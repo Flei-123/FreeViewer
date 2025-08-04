@@ -8,7 +8,7 @@ pub mod authentication;
 pub mod certificates;
 
 pub use authentication::AuthManager;
-pub use certificates::CertificateManager;
+pub use certificates::{CertificateManager, CertError};
 
 /// Security manager for encryption and authentication
 pub struct SecurityManager {
@@ -22,7 +22,7 @@ impl SecurityManager {
         Self {
             cipher: None,
             auth_manager: AuthManager::new(),
-            cert_manager: CertificateManager::new(),
+            cert_manager: CertificateManager::new("./certs"),
         }
     }
     

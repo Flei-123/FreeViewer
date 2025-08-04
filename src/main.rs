@@ -1,15 +1,14 @@
 use eframe::egui;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 mod client;
 mod host;
-mod protocol;
+mod protocol;  
 mod security;
 mod capture;
 mod ui;
 
-use ui::FreeViewerApp;
+use crate::ui::FreeViewerApp;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,20 +70,7 @@ fn load_icon() -> egui::IconData {
     }
 }
 
-fn setup_custom_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    
-    // Add custom fonts if needed
-    fonts.font_data.insert(
-        "fira_code".to_owned(),
-        egui::FontData::from_static(include_bytes!("../assets/fonts/FiraCode-Regular.ttf")),
-    );
-    
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(0, "fira_code".to_owned());
-    
-    ctx.set_fonts(fonts);
+fn setup_custom_fonts(_ctx: &egui::Context) {
+    // Custom font setup can be added here later
+    // For now, use default fonts
 }

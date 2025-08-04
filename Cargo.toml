@@ -50,13 +50,23 @@ lz4_flex = "0.11"
 # Encryption
 aes-gcm = "0.10"
 rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Error handling
+thiserror = "1.0"
+
 # Cross-platform paths
 dirs = "5.0"
+
+# Authentication and security
+argon2 = "0.5"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+rustls-pemfile = "2.0"
 
 # Audio (for future voice chat feature)
 cpal = "0.15"
@@ -75,6 +85,10 @@ opt-level = 3
 lto = true
 panic = "abort"
 strip = true
+
+[lib]
+name = "freeviewer"
+path = "src/lib.rs"
 
 [[bin]]
 name = "freeviewer"

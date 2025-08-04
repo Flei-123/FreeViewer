@@ -3,7 +3,7 @@ use image::{ImageBuffer, RgbaImage};
 pub mod screen;
 pub mod audio;
 
-pub use screen::ScreenCapture as ScreenCaptureImpl;
+pub use screen::{ScreenCapture as ScreenCaptureImpl, ScreenInfo};
 pub use audio::AudioCapture;
 
 /// Main capture module for screen and audio recording
@@ -33,7 +33,7 @@ impl CaptureManager {
         
         // Start audio capture if requested
         if include_audio {
-            let mut audio_capture = AudioCapture::new()?;
+            let mut audio_capture = AudioCapture::new();
             audio_capture.start().await?;
             self.audio_capture = Some(audio_capture);
         }
@@ -183,4 +183,22 @@ pub enum CaptureError {
     
     #[error("System error: {0}")]
     SystemError(String),
+    
+    #[error("Screen access error: {0}")]
+    ScreenAccessError(String),
+    
+    #[error("No screens found")]
+    NoScreensFound,
+    
+    #[error("Capture failure: {0}")]
+    CaptureFailure(String),
+    
+    #[error("Encoding error: {0}")]
+    EncodingError(String),
+    
+    #[error("Task error: {0}")]
+    TaskError(String),
+    
+    #[error("Invalid parameters")]
+    InvalidParameters,
 }

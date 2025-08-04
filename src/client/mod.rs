@@ -121,3 +121,14 @@ pub enum ClientError {
     #[error("File transfer error: {0}")]
     FileTransferError(String),
 }
+
+impl From<connection_manager::ConnectionError> for ClientError {
+    fn from(err: connection_manager::ConnectionError) -> Self {
+        match err {
+            connection_manager::ConnectionError::NetworkError(msg) => ClientError::NetworkError(msg),
+            connection_manager::ConnectionError::NotConnected => ClientError::NotConnected,
+            connection_manager::ConnectionError::AuthenticationFailed => ClientError::AuthenticationFailed,
+            connection_manager::ConnectionError::Timeout => ClientError::NetworkError("Connection timeout".to_string()),
+        }
+    }
+}

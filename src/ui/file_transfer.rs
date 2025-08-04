@@ -171,7 +171,6 @@ impl FileTransfer {
                 ui.label("Path:");
                 ui.label(
                     egui::RichText::new(self.local_path.to_string_lossy())
-                        .font(egui::TextStyle::Monospace)
                         .color(egui::Color32::GRAY)
                 );
             });
@@ -179,35 +178,37 @@ impl FileTransfer {
             ui.separator();
             
             // File list
+            let mut navigate_to_path: Option<std::path::PathBuf> = None;
+            let mut toggle_selection: Option<(usize, bool)> = None;
+            
             egui::ScrollArea::vertical()
                 .max_height(400.0)
                 .show(ui, |ui| {
                     for (i, file) in self.local_files.iter().enumerate() {
                         let is_selected = self.selected_local.contains(&i);
                         
+                        let size_str = if file.is_directory { 
+                            String::new() 
+                        } else { 
+                            format_file_size(file.size) 
+                        };
                         let response = ui.selectable_label(
                             is_selected,
                             format!(
                                 "{} {} {}",
                                 if file.is_directory { "📁" } else { "📄" },
                                 file.name,
-                                if file.is_directory { "" } else { &format_file_size(file.size) }
+                                size_str
                             )
                         );
                         
                         if response.clicked() {
                             if file.is_directory {
                                 // Navigate into directory
-                                self.local_path = file.path.clone();
-                                self.refresh_local_files();
-                                self.selected_local.clear();
+                                navigate_to_path = Some(file.path.clone());
                             } else {
                                 // Select/deselect file
-                                if is_selected {
-                                    self.selected_local.retain(|&x| x != i);
-                                } else {
-                                    self.selected_local.push(i);
-                                }
+                                toggle_selection = Some((i, is_selected));
                             }
                         }
                         
@@ -225,6 +226,22 @@ impl FileTransfer {
                         });
                     }
                 });
+            
+            // Handle navigation after the iterator is finished  
+            if let Some(path) = navigate_to_path {
+                self.local_path = path;
+                self.refresh_local_files();
+                self.selected_local.clear();
+            }
+            
+            // Handle file selection changes
+            if let Some((i, was_selected)) = toggle_selection {
+                if was_selected {
+                    self.selected_local.retain(|&x| x != i);
+                } else {
+                    self.selected_local.push(i);
+                }
+            }
         });
     }
     
@@ -244,7 +261,6 @@ impl FileTransfer {
                 ui.label("Path:");
                 ui.label(
                     egui::RichText::new(&self.remote_path)
-                        .font(egui::TextStyle::Monospace)
                         .color(egui::Color32::GRAY)
                 );
             });
@@ -269,13 +285,18 @@ impl FileTransfer {
                         for (i, (icon, name, is_dir, size)) in demo_files.iter().enumerate() {
                             let is_selected = self.selected_remote.contains(&i);
                             
+                            let size_str = if *is_dir { 
+                                String::new() 
+                            } else { 
+                                format_file_size(*size) 
+                            };
                             let response = ui.selectable_label(
                                 is_selected,
                                 format!(
                                     "{} {} {}",
                                     icon,
                                     name,
-                                    if *is_dir { "" } else { &format_file_size(*size) }
+                                    size_str
                                 )
                             );
                             

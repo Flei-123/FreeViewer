@@ -5,7 +5,6 @@ pub mod encryption;
 pub mod messages;
 
 pub use network::NetworkManager;
-pub use encryption::SecurityManager;
 pub use messages::*;
 
 /// The main protocol version
