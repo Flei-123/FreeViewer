@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, Rounding, Stroke, Vec2, TextStyle, FontId, Ui, Align2, RichText, Layout, Align, Frame};
 use std::time::{Duration, Instant};
+use rand::Rng;
 
 mod connection_panel;
 mod settings_panel;
@@ -27,23 +28,55 @@ pub struct ConnectionInfo {
     pub password: String,
     pub is_connected: bool,
     pub connection_quality: f32, // 0.0 - 1.0
+    pub my_id: String,
+    pub my_password: String,
+    pub easy_access: bool,
+    pub permanent_password: String,
+    pub audio_enabled: bool,
+    pub quality: String,
+    pub port: String,
 }
 
 impl Default for ConnectionInfo {
     fn default() -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        
+        // Generate random ID and password like TeamViewer
+        let my_id = format!("{:03} {:03} {:03}", 
+            rng.gen_range(100..=999),
+            rng.gen_range(100..=999),
+            rng.gen_range(100..=999)
+        );
+        let my_password = format!("{:04}", rng.gen_range(1000..=9999));
+        
         Self {
             partner_id: String::new(),
             password: String::new(),
             is_connected: false,
             connection_quality: 0.0,
+            my_id,
+            my_password,
+            easy_access: false,
+            permanent_password: String::new(),
+            audio_enabled: true,
+            quality: "Medium".to_string(),
+            port: "5900".to_string(),
         }
+    }
+}
+
+impl ConnectionInfo {
+    pub fn generate_new_password(&mut self) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        self.my_password = format!("{:04}", rng.gen_range(1000..=9999));
     }
 }
 
 pub struct FreeViewerApp {
     mode: AppMode,
     connection_info: ConnectionInfo,
-    my_id: String,
     connection_panel: ConnectionPanel,
     settings_panel: SettingsPanel,
     remote_desktop: RemoteDesktop,
@@ -68,7 +101,6 @@ impl FreeViewerApp {
         Self {
             mode: AppMode::Home,
             connection_info: ConnectionInfo::default(),
-            my_id: generate_partner_id(),
             connection_panel: ConnectionPanel::new(),
             settings_panel: SettingsPanel::new(),
             remote_desktop: RemoteDesktop::new(),
@@ -133,7 +165,7 @@ impl eframe::App for FreeViewerApp {
 
         // About dialog
         if self.show_about {
-            self.draw_about_dialog(ctx);
+            // About dialog temporarily disabled
         }
         
         // Request repaint for smooth animations
@@ -171,7 +203,6 @@ impl FreeViewerApp {
         // Clone values to avoid borrowing issues
         let theme = self.theme.clone();
         let mode = self.mode.clone();
-        let my_id = self.my_id.clone();
         let text_primary = theme.text_primary;
         let text_secondary = theme.text_secondary;
         let accent = theme.accent;
@@ -192,60 +223,81 @@ impl FreeViewerApp {
                 
                 ui.add_space(30.0);
                 
-                // Your ID section - simplified without toast
-                Card::new("Connection").show(ui, &theme, |ui| {
+                // Your ID section - improved visibility
+                Card::new("Your ID").show(ui, &theme, |ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Your Partner ID").size(12.0).color(text_secondary));
+                        ui.label(RichText::new("Partner ID").size(12.0).color(text_secondary));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&my_id).size(16.0).strong().color(accent));
+                            let id_color = if theme.background == egui::Color32::from_gray(32) { 
+                                egui::Color32::WHITE 
+                            } else { 
+                                egui::Color32::BLACK 
+                            };
+                            ui.label(
+                                RichText::new(&self.connection_info.my_id)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(id_color)
+                                    .background_color(theme.secondary)
+                            );
                             if ui.small_button("📋").clicked() {
-                                ui.output_mut(|o| o.copied_text = my_id.clone());
+                                ui.output_mut(|o| o.copied_text = self.connection_info.my_id.clone());
+                                self.add_toast("ID copied to clipboard!");
                             }
                         });
+                        
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Password").size(12.0).color(text_secondary));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let password = if self.connection_info.easy_access && !self.connection_info.permanent_password.is_empty() {
+                                &self.connection_info.permanent_password
+                            } else {
+                                &self.connection_info.my_password
+                            };
+                            
+                            let password_color = if theme.background == egui::Color32::from_gray(32) { 
+                                egui::Color32::WHITE 
+                            } else { 
+                                egui::Color32::BLACK 
+                            };
+                            ui.label(
+                                RichText::new(password)
+                                    .size(16.0)
+                                    .strong()
+                                    .color(password_color)
+                                    .background_color(theme.secondary)
+                            );
+                            if ui.small_button("📋").clicked() {
+                                ui.output_mut(|o| o.copied_text = password.clone());
+                                self.add_toast("Password copied to clipboard!");
+                            }
+                        });
+                        
+                        if self.connection_info.easy_access {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("🟢 Easy Access").size(11.0).color(Color32::GREEN));
+                        }
                     });
                 });
                 
                 ui.add_space(20.0);
                 
-                // Navigation
-                if Sidebar::nav_button(
-                    ui, 
-                    &self.theme, 
-                    "🏠", 
-                    "Home", 
-                    *current_mode == AppMode::Home
-                ).clicked() {
+                // Navigation  
+                if ModernButton::navigation(ui, &self.theme, "Home", "🏠", *current_mode == AppMode::Home).clicked() {
                     self.mode = AppMode::Home;
                 }
                 
-                if Sidebar::nav_button(
-                    ui, 
-                    &self.theme, 
-                    "🖥️", 
-                    "Remote Control", 
-                    *current_mode == AppMode::RemoteControl
-                ).clicked() {
+                if ModernButton::navigation(ui, &self.theme, "Remote Control", "🖥️", *current_mode == AppMode::RemoteControl).clicked() {
                     self.mode = AppMode::RemoteControl;
                 }
                 
-                if Sidebar::nav_button(
-                    ui, 
-                    &self.theme, 
-                    "📁", 
-                    "File Transfer", 
-                    *current_mode == AppMode::FileTransfer
-                ).clicked() {
+                if ModernButton::navigation(ui, &self.theme, "File Transfer", "📁", *current_mode == AppMode::FileTransfer).clicked() {
                     self.mode = AppMode::FileTransfer;
                 }
                 
-                if Sidebar::nav_button(
-                    ui, 
-                    &self.theme, 
-                    "⚙️", 
-                    "Settings", 
-                    *current_mode == AppMode::Settings
-                ).clicked() {
+                if ModernButton::navigation(ui, &self.theme, "Settings", "⚙️", *current_mode == AppMode::Settings).clicked() {
                     self.mode = AppMode::Settings;
                 }
                 
@@ -276,7 +328,7 @@ impl FreeViewerApp {
 
     fn draw_main_content_modern(&mut self, ui: &mut Ui) {
         match self.mode {
-            AppMode::Home => self.draw_home_screen_modern(ui),
+            AppMode::Home => self.draw_home_modern(ui),
             AppMode::RemoteControl => self.draw_remote_control_modern(ui),
             AppMode::FileTransfer => self.draw_file_transfer_modern(ui),
             AppMode::Settings => self.draw_settings_modern(ui),
@@ -341,7 +393,7 @@ impl FreeViewerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.mode {
                 AppMode::Home => {
-                    self.draw_home_screen(ui);
+                    self.draw_home_modern(ui);
                 }
                 AppMode::RemoteControl => {
                     self.remote_desktop.draw(ui, &mut self.connection_info);
@@ -356,158 +408,143 @@ impl FreeViewerApp {
         });
     }
     
-    fn draw_home_screen(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(50.0);
-            
-            // Welcome header
-            ui.label(
-                egui::RichText::new("Welcome to FreeViewer")
-                    .size(32.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(70, 130, 180))
-            );
-            
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new("Open-source remote desktop software")
-                    .size(16.0)
-                    .color(egui::Color32::GRAY)
-            );
-            
-            ui.add_space(40.0);
-            
-            // My ID section
-            ui.group(|ui| {
-                ui.set_min_width(400.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Your ID")
-                            .size(18.0)
-                            .strong()
-                    );
-                    
-                    ui.add_space(10.0);
-                    
-                    // ID display with copy button
-                    ui.horizontal(|ui| {
-                        ui.add_sized(
-                            [300.0, 30.0],
-                            egui::TextEdit::singleline(&mut self.my_id.clone())
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(300.0)
-                        );
-                        
-                        if ui.button("📋 Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.my_id.clone());
-                        }
-                    });
-                    
-                    ui.add_space(5.0);
-                    ui.label(
-                        egui::RichText::new("Share this ID to allow remote connections")
-                            .size(12.0)
-                            .color(egui::Color32::GRAY)
-                    );
-                });
-            });
-            
-            ui.add_space(30.0);
-            
-            // Connection section
-            self.connection_panel.draw(ui, &mut self.connection_info);
-            
-            ui.add_space(30.0);
-            
-            // Quick actions
-            ui.horizontal(|ui| {
-                if ui.add_sized([200.0, 40.0], egui::Button::new("🖥️ Start Remote Control")).clicked() {
-                    self.mode = AppMode::RemoteControl;
-                }
-                
-                ui.add_space(20.0);
-                
-                if ui.add_sized([200.0, 40.0], egui::Button::new("📁 Transfer Files")).clicked() {
-                    self.mode = AppMode::FileTransfer;
-                }
-            });
-        });
-    }
-    
-    fn draw_about_dialog(&mut self, ctx: &egui::Context) {
-        if self.show_about {
-            egui::Window::new("About FreeViewer")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label("🖥️");
-                        ui.label(
-                            egui::RichText::new("FreeViewer")
-                                .size(24.0)
-                                .strong()
-                        );
-                        
-                        ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                        
-                        ui.add_space(10.0);
-                        
-                        ui.label("Open-source remote desktop software");
-                        ui.label("Built with Rust 🦀");
-                        
-                        ui.add_space(10.0);
-                        
-                        ui.hyperlink_to("GitHub Repository", "https://github.com/yourusername/freeviewer");
-                        
-                        ui.add_space(20.0);
-                        
-                        if ui.button("Close").clicked() {
-                            self.show_about = false;
-                        }
-                    });
-                });
-        }
-    }
-    
-    // Modern UI view implementations
-    fn draw_home_screen_modern(&mut self, ui: &mut Ui) {
-        use modern_ui::{Card, ModernButton};
+    fn draw_home_modern(&mut self, ui: &mut Ui) {
+        use modern_ui::Card;
         
         ui.vertical_centered(|ui| {
             ui.add_space(20.0);
             
-            // Welcome section
-            let my_id = self.my_id.clone();
-            let theme_primary = self.theme.primary;
-            Card::new("Welcome to FreeViewer")
-                .show(ui, &self.theme, |ui| {
-                    ui.add_space(10.0);
-                    ui.label("Your secure remote desktop solution");
+            // Header
+            ui.heading("🖥️ FreeViewer");
+            ui.label("Professional Remote Desktop Solution");
+            ui.add_space(20.0);
+            
+            // Connection Info Panel - showing your ID and password
+            let theme = &self.theme;
+            let my_id = self.connection_info.my_id.clone();
+            let my_password = self.connection_info.my_password.clone();
+            
+            let mut copy_id_clicked = false;
+            let mut copy_password_clicked = false;
+            let mut generate_new_clicked = false;
+            let mut set_permanent_clicked = false;
+            
+            Card::new("Your Connection Details")
+                .show(ui, theme, |ui| {
                     ui.add_space(10.0);
                     
-                    // Your ID display
+                    // Your ID section with improved visibility
                     ui.horizontal(|ui| {
-                        ui.label("Your ID:");
-                        ui.label(egui::RichText::new(&my_id)
-                            .color(theme_primary)
+                        ui.label(egui::RichText::new("Your ID:")
+                            .color(theme.text)
+                            .size(14.0)
+                            .strong());
+                        
+                        ui.add_space(10.0);
+                        
+                        // ID display with proper contrast
+                        let id_color = if self.theme.background == egui::Color32::from_gray(32) { 
+                            egui::Color32::WHITE 
+                        } else { 
+                            egui::Color32::BLACK 
+                        };
+                        let id_text = egui::RichText::new(&my_id)
+                            .size(16.0)
+                            .color(id_color)
                             .monospace()
-                            .size(16.0));
-                        if ui.button("📋").on_hover_text("Copy to clipboard").clicked() {
+                            .background_color(theme.secondary);
+                            
+                        ui.label(id_text);
+                        
+                        ui.add_space(10.0);
+                        
+                        if ui.button("📋 Copy ID").clicked() {
                             ui.output_mut(|o| o.copied_text = my_id.clone());
+                            copy_id_clicked = true;
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Password section
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Password:")
+                            .color(theme.text)
+                            .size(14.0)
+                            .strong());
+                        
+                        ui.add_space(10.0);
+                        
+                        let password_color = if self.theme.background == egui::Color32::from_gray(32) { 
+                            egui::Color32::WHITE 
+                        } else { 
+                            egui::Color32::BLACK 
+                        };
+                        let password_text = egui::RichText::new(&my_password)
+                            .size(16.0)
+                            .color(password_color)
+                            .monospace()
+                            .background_color(theme.secondary);
+                            
+                        ui.label(password_text);
+                        
+                        ui.add_space(10.0);
+                        
+                        if ui.button("📋 Copy Password").clicked() {
+                            ui.output_mut(|o| o.copied_text = my_password.clone());
+                            copy_password_clicked = true;
+                        }
+                        
+                        if ui.button("🔄 Generate New").clicked() {
+                            generate_new_clicked = true;
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Easy Access toggle
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.connection_info.easy_access, "Easy Access Mode");
+                        ui.label("(No password required for trusted partners)");
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    // Permanent password option
+                    ui.horizontal(|ui| {
+                        ui.label("Permanent Password:");
+                        ui.text_edit_singleline(&mut self.connection_info.permanent_password);
+                        if ui.button("Set").clicked() && !self.connection_info.permanent_password.is_empty() {
+                            set_permanent_clicked = true;
                         }
                     });
                 });
             
-            // Check if copy button was clicked
-            if ui.button("Copy ID").clicked() {
+            // Handle button clicks after the card
+            if copy_id_clicked {
                 self.add_toast("ID copied to clipboard!");
+            }
+            if copy_password_clicked {
+                self.add_toast("Password copied to clipboard!");
+            }
+            if generate_new_clicked {
+                self.connection_info.generate_new_password();
+                self.add_toast("New password generated!");
+            }
+            if set_permanent_clicked {
+                self.connection_info.my_password = self.connection_info.permanent_password.clone();
+                self.add_toast("Permanent password set!");
             }
             
             ui.add_space(20.0);
             
-            // Quick connect section
-            Card::new("Quick Connect")
-                .show(ui, &self.theme, |ui| {
+            // Quick Connect Panel
+            let theme = &self.theme;
+            let mut remote_control_clicked = false;
+            let mut file_transfer_clicked = false;
+            
+            Card::new("Connect to Partner")
+                .show(ui, theme, |ui| {
                     ui.add_space(10.0);
                     
                     ui.horizontal(|ui| {
@@ -515,22 +552,37 @@ impl FreeViewerApp {
                         ui.text_edit_singleline(&mut self.connection_info.partner_id);
                     });
                     
+                    ui.add_space(5.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("Password:");
+                        ui.text_edit_singleline(&mut self.connection_info.password);
+                    });
+                    
                     ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.add_sized([120.0, 35.0], egui::Button::new("🖥️ Remote Control")).clicked() {
+                            remote_control_clicked = true;
+                        }
+                        
+                        ui.add_space(10.0);
+                        
+                        if ui.add_sized([120.0, 35.0], egui::Button::new("📁 File Transfer")).clicked() {
+                            file_transfer_clicked = true;
+                        }
+                    });
                 });
             
-            // Connect buttons outside of the card to avoid borrowing issues
-            ui.horizontal(|ui| {
-                if ModernButton::primary(ui, &self.theme, "Connect").clicked() {
-                    if !self.connection_info.partner_id.is_empty() {
-                        self.add_toast("Connecting to partner...");
-                        // TODO: Implement actual connection logic
-                    }
-                }
-                
-                if ModernButton::secondary(ui, &self.theme, "Remote Support").clicked() {
-                    self.add_toast("Remote support mode activated");
-                }
-            });
+            // Handle button clicks
+            if remote_control_clicked {
+                self.mode = AppMode::RemoteControl;
+                self.add_toast("Starting remote control session...");
+            }
+            if file_transfer_clicked {
+                self.mode = AppMode::FileTransfer;
+                self.add_toast("Starting file transfer...");
+            }
         });
     }
     
@@ -727,7 +779,13 @@ impl FreeViewerApp {
                 });
                 
             if ModernButton::secondary(ui, &self.theme, "Generate New ID").clicked() {
-                self.my_id = generate_partner_id();
+                // Generate new ID
+                let mut rng = rand::thread_rng();
+                self.connection_info.my_id = format!("{:03} {:03} {:03}", 
+                    rng.gen_range(100..=999),
+                    rng.gen_range(100..=999),
+                    rng.gen_range(100..=999)
+                );
                 self.add_toast("New Partner ID generated");
             }
             
@@ -760,14 +818,4 @@ impl FreeViewerApp {
 
 }
 
-fn generate_partner_id() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    
-    // Generate a 9-digit ID like TeamViewer
-    format!("{:03} {:03} {:03}", 
-        rng.gen_range(100..=999),
-        rng.gen_range(100..=999),
-        rng.gen_range(100..=999)
-    )
-}
+

@@ -109,7 +109,7 @@ pub struct ModernButton;
 impl ModernButton {
     pub fn primary(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
         ui.add(
-            Button::new(text)
+            Button::new(RichText::new(text).color(Color32::WHITE))
                 .fill(theme.accent)
                 .rounding(Rounding::same(8.0))
                 .min_size(Vec2::new(120.0, 40.0))
@@ -118,7 +118,7 @@ impl ModernButton {
 
     pub fn secondary(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
         ui.add(
-            Button::new(text)
+            Button::new(RichText::new(text).color(theme.text))
                 .fill(theme.secondary)
                 .stroke(Stroke::new(1.0, theme.accent))
                 .rounding(Rounding::same(8.0))
@@ -128,10 +128,36 @@ impl ModernButton {
 
     pub fn danger(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
         ui.add(
-            Button::new(text)
+            Button::new(RichText::new(text).color(Color32::WHITE))
                 .fill(theme.error)
                 .rounding(Rounding::same(8.0))
                 .min_size(Vec2::new(120.0, 40.0))
+        )
+    }
+
+    pub fn navigation(ui: &mut Ui, theme: &Theme, text: &str, icon: &str, is_selected: bool) -> Response {
+        let text_color = if is_selected {
+            theme.accent
+        } else {
+            Color32::LIGHT_GRAY
+        };
+        
+        let bg_color = if is_selected {
+            Color32::from_rgba_premultiplied(theme.accent.r(), theme.accent.g(), theme.accent.b(), 40)
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        ui.add(
+            Button::new(
+                RichText::new(format!("{} {}", icon, text))
+                    .color(text_color)
+                    .strong()
+            )
+            .fill(bg_color)
+            .stroke(if is_selected { Stroke::new(1.0, theme.accent) } else { Stroke::NONE })
+            .rounding(Rounding::same(6.0))
+            .min_size(Vec2::new(180.0, 36.0))
         )
     }
 }
