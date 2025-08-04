@@ -2,11 +2,13 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey)](https://github.com/yourusername/freeviewer)
+[![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey)](https://github.com/Flei-123/FreeViewer)
 
 **Open-source remote desktop software - A free TeamViewer alternative built in Rust**
 
 FreeViewer is a cross-platform, secure, and fast remote desktop application that allows you to access and control computers remotely. Built from the ground up in Rust for maximum performance and security.
+
+> 🚧 **Status**: Early Development - This is an active project under development. Core features are being implemented.
 
 ## ✨ Features
 
@@ -47,13 +49,13 @@ FreeViewer is a cross-platform, secure, and fast remote desktop application that
 ### Installation
 
 #### From Releases (Recommended)
-Download the latest release for your platform from the [Releases page](https://github.com/yourusername/freeviewer/releases).
+Download the latest release for your platform from the [Releases page](https://github.com/Flei-123/FreeViewer/releases).
 
 #### From Source
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/freeviewer.git
-cd freeviewer
+git clone https://github.com/Flei-123/FreeViewer.git
+cd FreeViewer
 
 # Build and run
 cargo run --release
@@ -143,9 +145,9 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## 📞 Support
 
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/yourusername/freeviewer/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/yourusername/freeviewer/discussions)
-- 📧 **Email**: support@freeviewer.org
+- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/Flei-123/FreeViewer/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/Flei-123/FreeViewer/discussions)
+- 📧 **Email**: flei.dev@example.com
 
 ---
 

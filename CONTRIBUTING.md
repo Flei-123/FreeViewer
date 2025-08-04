@@ -7,8 +7,8 @@ Thank you for your interest in contributing to FreeViewer! 🎉
 1. **Fork the repository** on GitHub
 2. **Clone your fork** locally:
    ```bash
-   git clone https://github.com/yourusername/freeviewer.git
-   cd freeviewer
+   git clone https://github.com/yourusername/FreeViewer.git
+   cd FreeViewer
    ```
 3. **Install Rust** (if not already installed):
    ```bash
