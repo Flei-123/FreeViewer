@@ -142,6 +142,13 @@ impl eframe::App for FreeViewerApp {
         // Clean up expired toasts
         self.toasts.retain(|toast| !toast.is_expired());
 
+        // Update theme based on egui's style
+        let is_dark = ctx.style().visuals.dark_mode;
+        if is_dark != self.is_dark_mode {
+            self.is_dark_mode = is_dark;
+            self.theme = if is_dark { Theme::dark() } else { Theme::light() };
+        }
+
         // Apply modern theme
         self.apply_modern_theme(ctx);
 
@@ -229,7 +236,7 @@ impl FreeViewerApp {
                         ui.label(RichText::new("Partner ID").size(12.0).color(text_secondary));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            let id_color = if theme.background == egui::Color32::from_gray(32) { 
+                            let id_color = if ui.ctx().style().visuals.dark_mode { 
                                 egui::Color32::WHITE 
                             } else { 
                                 egui::Color32::BLACK 
@@ -257,7 +264,7 @@ impl FreeViewerApp {
                                 &self.connection_info.my_password
                             };
                             
-                            let password_color = if theme.background == egui::Color32::from_gray(32) { 
+                            let password_color = if ui.ctx().style().visuals.dark_mode { 
                                 egui::Color32::WHITE 
                             } else { 
                                 egui::Color32::BLACK 
@@ -443,7 +450,7 @@ impl FreeViewerApp {
                         ui.add_space(10.0);
                         
                         // ID display with proper contrast
-                        let id_color = if self.theme.background == egui::Color32::from_gray(32) { 
+                        let id_color = if ui.ctx().style().visuals.dark_mode { 
                             egui::Color32::WHITE 
                         } else { 
                             egui::Color32::BLACK 
@@ -475,7 +482,7 @@ impl FreeViewerApp {
                         
                         ui.add_space(10.0);
                         
-                        let password_color = if self.theme.background == egui::Color32::from_gray(32) { 
+                        let password_color = if ui.ctx().style().visuals.dark_mode { 
                             egui::Color32::WHITE 
                         } else { 
                             egui::Color32::BLACK 
