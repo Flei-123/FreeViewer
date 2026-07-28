@@ -1,11 +1,11 @@
 //! State shared between the GUI thread and the async worker tasks.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::proto::Msg;
+use crate::proto::{Msg, MODE_ADMIN};
 
 pub struct FrameData {
     pub width: u32,
@@ -32,9 +32,18 @@ pub struct Shared {
     pub viewer_status: Mutex<String>,
     pub frame: Mutex<Option<FrameData>>,
     pub remote_size: Mutex<(u32, u32)>,
+    /// Remote pointer, normalized 0..10000 plus visibility.
+    pub remote_cursor: Mutex<(i32, i32, bool)>,
     pub input_tx: Mutex<Option<UnboundedSender<Msg>>>,
+    /// Clipboard text that arrived from the host and has to be written into
+    /// the local clipboard by the clipboard worker thread.
+    pub clip_in: Mutex<Option<String>>,
+    /// How many clipboard updates the host has sent us (diagnostics/tests).
+    pub clip_from_host: AtomicU32,
     pub connected: AtomicBool,
     pub connecting: AtomicBool,
+    /// Active session profile (MODE_ADMIN / MODE_GAME).
+    pub mode: AtomicU8,
     pub stats: Mutex<Stats>,
 }
 
@@ -49,9 +58,13 @@ impl Shared {
             viewer_status: Mutex::new(String::new()),
             frame: Mutex::new(None),
             remote_size: Mutex::new((1920, 1080)),
+            remote_cursor: Mutex::new((0, 0, false)),
             input_tx: Mutex::new(None),
+            clip_in: Mutex::new(None),
+            clip_from_host: AtomicU32::new(0),
             connected: AtomicBool::new(false),
             connecting: AtomicBool::new(false),
+            mode: AtomicU8::new(MODE_ADMIN),
             stats: Mutex::new(Stats::default()),
         }
     }
@@ -66,5 +79,8 @@ impl Shared {
         if let Some(tx) = self.input_tx.lock().unwrap().as_ref() {
             let _ = tx.send(m);
         }
+    }
+    pub fn game_mode(&self) -> bool {
+        self.mode.load(Ordering::Relaxed) == crate::proto::MODE_GAME
     }
 }

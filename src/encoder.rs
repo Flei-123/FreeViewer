@@ -22,20 +22,28 @@ pub const KEYFRAME_RATIO: f32 = 0.6;
 pub const MAX_RECTS: usize = 96;
 
 /// Box-filter downscale straight from RGBA into RGB.
-///
-/// Doing scaling and the RGBA->RGB conversion in a single pass avoids one full
-/// intermediate buffer per frame (the old path did `thumbnail()` and then a
-/// separate `rgba_to_rgb()`).
+#[allow(dead_code)]
 pub fn scale_to_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    scale_to_rgb_ex(src, sw, sh, dw, dh, false)
+}
+
+/// Box-filter downscale straight from RGBA/BGRA into RGB.
+///
+/// Doing scaling and the conversion in a single pass avoids one full
+/// intermediate buffer per frame (the old path did `thumbnail()` and then a
+/// separate `rgba_to_rgb()`). `bgra = true` additionally swaps red and blue,
+/// which is the pixel order the DXGI duplication API hands us.
+pub fn scale_to_rgb_ex(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, bgra: bool) -> Vec<u8> {
     let mut out = vec![0u8; dw as usize * dh as usize * 3];
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return out;
     }
+    let (ri, bi) = if bgra { (2usize, 0usize) } else { (0usize, 2usize) };
     if dw == sw && dh == sh {
         for (o, px) in out.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
-            o[0] = px[0];
+            o[0] = px[ri];
             o[1] = px[1];
-            o[2] = px[2];
+            o[2] = px[bi];
         }
         return out;
     }
@@ -73,9 +81,9 @@ pub fn scale_to_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
                     break;
                 }
                 for px in src[a..e].chunks_exact(4) {
-                    r += px[0] as u32;
+                    r += px[ri] as u32;
                     g += px[1] as u32;
-                    b += px[2] as u32;
+                    b += px[bi] as u32;
                     n += 1;
                 }
             }
@@ -254,11 +262,24 @@ impl EncodeResult {
 }
 
 /// Keeps the previously sent frame so the next one can be diffed against it.
-#[derive(Default)]
 pub struct Delta {
     prev: Vec<u8>,
     w: u32,
     h: u32,
+    full_q: u8,
+    tile_q: u8,
+}
+
+impl Default for Delta {
+    fn default() -> Self {
+        Self {
+            prev: Vec::new(),
+            w: 0,
+            h: 0,
+            full_q: FULL_QUALITY,
+            tile_q: TILE_QUALITY,
+        }
+    }
 }
 
 impl Delta {
@@ -266,7 +287,16 @@ impl Delta {
         Self::default()
     }
 
-    #[allow(dead_code)]
+    /// Game mode trades sharpness for bandwidth, remote maintenance does the
+    /// opposite - so the quality is switchable at runtime.
+    pub fn set_quality(&mut self, full: u8, tile: u8) {
+        if full != self.full_q || tile != self.tile_q {
+            self.full_q = full;
+            self.tile_q = tile;
+            self.reset();
+        }
+    }
+
     pub fn reset(&mut self) {
         self.prev.clear();
         self.w = 0;
@@ -275,7 +305,7 @@ impl Delta {
 
     /// Always emits a complete frame (used for the first frame and as fallback).
     pub fn encode_full(&mut self, rgb: &[u8], w: u32, h: u32) -> EncodeResult {
-        let jpeg = match jpeg_rgb(rgb, w, h, FULL_QUALITY) {
+        let jpeg = match jpeg_rgb(rgb, w, h, self.full_q) {
             Some(j) => j,
             None => return EncodeResult::nothing(),
         };
@@ -317,7 +347,7 @@ impl Delta {
         let mut bytes = 0usize;
         for (x, y, cw, ch) in rects {
             let crop = crop_rgb(rgb, w, x, y, cw, ch);
-            if let Some(jpeg) = jpeg_rgb(&crop, cw, ch, TILE_QUALITY) {
+            if let Some(jpeg) = jpeg_rgb(&crop, cw, ch, self.tile_q) {
                 bytes += jpeg.len();
                 tiles.push(Tile {
                     x,
@@ -360,6 +390,18 @@ mod tests {
         let rgba = vec![1, 2, 3, 255, 4, 5, 6, 255];
         let out = scale_to_rgb(&rgba, 2, 1, 2, 1);
         assert_eq!(out, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn bgra_channels_are_swapped() {
+        // one blue pixel in BGRA (B=255) must come out as RGB 0,0,255
+        let bgra = vec![255u8, 0, 0, 255];
+        let out = scale_to_rgb_ex(&bgra, 1, 1, 1, 1, true);
+        assert_eq!(out, vec![0, 0, 255]);
+        // and the downscaling path must swap as well
+        let bgra4 = vec![255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
+        let out2 = scale_to_rgb_ex(&bgra4, 2, 2, 1, 1, true);
+        assert_eq!(out2, vec![0, 0, 255]);
     }
 
     #[test]
@@ -483,5 +525,15 @@ mod tests {
         d.encode(&solid_rgb(128, 128, 1), 128, 128);
         let r = d.encode(&solid_rgb(64, 64, 1), 64, 64);
         assert!(r.keyframe);
+    }
+
+    #[test]
+    fn quality_switch_forces_a_fresh_keyframe() {
+        let mut d = Delta::new();
+        let a = solid_rgb(128, 128, 40);
+        assert!(d.encode(&a, 128, 128).keyframe);
+        assert!(d.encode(&a, 128, 128).msg.is_none());
+        d.set_quality(40, 45);
+        assert!(d.encode(&a, 128, 128).keyframe, "quality change must resend");
     }
 }

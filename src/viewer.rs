@@ -9,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
+use crate::clip::Clip;
 use crate::crypto::{self, Cipher};
 use crate::encoder::blit_rgb_to_rgba;
 use crate::net;
@@ -54,6 +55,25 @@ impl Canvas {
     }
 }
 
+/// Keeps the local clipboard in sync with the remote one. Runs on its own
+/// thread because the platform clipboard handles are not `Send`.
+fn clipboard_worker(shared: Arc<Shared>) {
+    let mut clip = Clip::new();
+    if !clip.available() {
+        return;
+    }
+    while shared.connected.load(Ordering::Relaxed) {
+        let incoming = shared.clip_in.lock().unwrap().take();
+        if let Some(text) = incoming {
+            clip.set(&text);
+        }
+        if let Some(text) = clip.poll() {
+            shared.send_input(Msg::Clipboard { text });
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
 pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
     shared.connecting.store(true, Ordering::Relaxed);
     shared.set_viewer_status(format!("Verbinde mit {} ...", id));
@@ -64,6 +84,7 @@ pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
     shared.connecting.store(false, Ordering::Relaxed);
     *shared.input_tx.lock().unwrap() = None;
     *shared.frame.lock().unwrap() = None;
+    crate::vinput::set_active(false);
 
     match result {
         Ok(()) => shared.set_viewer_status("Sitzung beendet"),
@@ -177,6 +198,10 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }
                         });
 
+                        // clipboard sync (own thread, clipboard handles are not Send)
+                        let sh_clip = shared.clone();
+                        std::thread::spawn(move || clipboard_worker(sh_clip));
+
                         // latency probe
                         let c3 = c.clone();
                         let tx3 = tx.clone();
@@ -207,6 +232,13 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         match decode(&plain) {
                             Some(Msg::ScreenInfo { width, height }) => {
                                 *shared.remote_size.lock().unwrap() = (width, height);
+                            }
+                            Some(Msg::Cursor { x, y, visible }) => {
+                                *shared.remote_cursor.lock().unwrap() = (x, y, visible);
+                            }
+                            Some(Msg::Clipboard { text }) => {
+                                shared.clip_from_host.fetch_add(1, Ordering::Relaxed);
+                                *shared.clip_in.lock().unwrap() = Some(text);
                             }
                             Some(Msg::Frame {
                                 width,

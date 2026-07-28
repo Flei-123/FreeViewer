@@ -1,6 +1,6 @@
 //! Host side: share this machine's screen and execute remote input.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,15 +10,47 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
+use crate::capture::{self, Next};
+use crate::clip::Clip;
 use crate::crypto::{self, Cipher};
 use crate::encoder::{self, Delta};
+use crate::input::{Injector, ScreenRect};
 use crate::net;
 use crate::proto::{self, decode, encode, Msg};
 use crate::shared::Shared;
 
-const MAX_WIDTH: u32 = 1600;
-const TARGET_FPS: u64 = 30;
-const JPEG_QUALITY: u8 = encoder::FULL_QUALITY;
+/// One operating point of the stream. The viewer switches between them at
+/// runtime: "Fernwartung" keeps the picture sharp and the mouse absolute,
+/// "Spiel" trades sharpness for frame rate and uses raw relative mouse input.
+#[derive(Clone, Copy, Debug)]
+pub struct Profile {
+    pub max_w: u32,
+    pub full_q: u8,
+    pub tile_q: u8,
+    pub fps: u64,
+}
+
+pub const ADMIN: Profile = Profile {
+    max_w: 1920,
+    full_q: 68,
+    tile_q: 78,
+    fps: 30,
+};
+
+pub const GAME: Profile = Profile {
+    max_w: 1280,
+    full_q: 48,
+    tile_q: 55,
+    fps: 60,
+};
+
+pub fn profile(mode: u8) -> Profile {
+    if mode == proto::MODE_GAME {
+        GAME
+    } else {
+        ADMIN
+    }
+}
 
 pub async fn run_host(shared: Arc<Shared>, secret: String) {
     loop {
@@ -130,6 +162,7 @@ struct Session {
     cipher: Option<Arc<Mutex<Cipher>>>,
     stop: Arc<AtomicBool>,
     input_tx: Option<std::sync::mpsc::Sender<Msg>>,
+    mode: Arc<AtomicU8>,
 }
 
 impl Session {
@@ -139,6 +172,7 @@ impl Session {
             cipher: None,
             stop: Arc::new(AtomicBool::new(false)),
             input_tx: None,
+            mode: Arc::new(AtomicU8::new(proto::MODE_ADMIN)),
         }
     }
 
@@ -213,18 +247,24 @@ impl Session {
                     }
                 });
 
-                let screen = Arc::new(Mutex::new((1920u32, 1080u32)));
+                let screen = Arc::new(Mutex::new(ScreenRect::default()));
                 let (in_tx, in_rx) = std::sync::mpsc::channel::<Msg>();
 
-                // input worker (enigo must live on one dedicated thread)
+                // input worker (SendInput must live on one dedicated thread)
                 let screen_in = screen.clone();
-                std::thread::spawn(move || input_loop(in_rx, screen_in));
+                let out_in = out_tx.clone();
+                let stop_in = self.stop.clone();
+                let shared_in = shared.clone();
+                std::thread::spawn(move || {
+                    input_loop(in_rx, screen_in, out_in, stop_in, shared_in)
+                });
 
                 // capture worker
                 let stop = self.stop.clone();
                 let shared2 = shared.clone();
                 let screen_cap = screen.clone();
-                std::thread::spawn(move || capture_loop(stop, out_tx, screen_cap, shared2));
+                let mode = self.mode.clone();
+                std::thread::spawn(move || capture_loop(stop, out_tx, screen_cap, shared2, mode));
 
                 self.cipher = Some(cipher);
                 self.input_tx = Some(in_tx);
@@ -251,6 +291,14 @@ impl Session {
                                 tx.send(WsMsg::Binary(sealed.into()))?;
                             }
                         }
+                        Msg::SetMode { mode } => {
+                            self.mode.store(mode, Ordering::Relaxed);
+                            *shared.host_peer.lock().unwrap() = if mode == proto::MODE_GAME {
+                                "Verbunden - Spielmodus (relative Maus)".to_string()
+                            } else {
+                                "Verbunden - Fernwartung".to_string()
+                            };
+                        }
                         other => {
                             if let Some(itx) = self.input_tx.as_ref() {
                                 let _ = itx.send(other);
@@ -265,306 +313,190 @@ impl Session {
     }
 }
 
-/// Grabs the primary monitor fresh on every frame. Reusing one cached
-/// `Monitor` handle can return stale device contexts on Windows, which looks
-/// like a frozen remote screen.
-fn grab(mon_idx: usize) -> Option<image::RgbaImage> {
-    let mut all = xcap::Monitor::all().ok()?;
-    if mon_idx >= all.len() {
-        return None;
-    }
-    let m = all.swap_remove(mon_idx);
-    m.capture_image().ok()
-}
-
-fn primary_index() -> Option<usize> {
-    let monitors = xcap::Monitor::all().ok()?;
-    if monitors.is_empty() {
-        return None;
-    }
-    Some(
-        monitors
-            .iter()
-            .position(|m| m.is_primary().unwrap_or(false))
-            .unwrap_or(0),
-    )
-}
-
 /// Streaming resolution for a captured screen (downscale wide screens).
-fn target_size(w: u32, h: u32) -> (u32, u32) {
-    if w > MAX_WIDTH {
-        let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
-        (MAX_WIDTH, nh.max(1))
+fn target_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
+    if w > max_w {
+        let nh = ((h as f64) * (max_w as f64) / (w as f64)).round() as u32;
+        (max_w, nh.max(1))
     } else {
         (w.max(1), h.max(1))
     }
 }
 
-fn selftest_log(line: &str) {
-    use std::io::Write;
-    let path = crate::ident::config_dir().join("captest.txt");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line);
-        let _ = f.flush();
-    }
-}
-
+/// `freeviewer --captest` - which backend do we get and how fast is it?
 pub fn capture_selftest(rounds: u32) -> String {
-    selftest_log("--- captest start ---");
-    let t_all = Instant::now();
-    let n = xcap::Monitor::all().map(|v| v.len()).unwrap_or(0);
-    selftest_log(&format!(
-        "Monitor::all -> {} monitors in {} ms",
-        n,
-        t_all.elapsed().as_millis()
-    ));
-    let idx = match primary_index() {
-        Some(i) => i,
-        None => return "kein Monitor gefunden".to_string(),
-    };
     let mut out = String::new();
-    for i in 0..rounds {
-        let t = Instant::now();
-        match grab(idx) {
-            Some(img) => {
-                let t_cap = t.elapsed().as_millis();
-                let (w, h) = (img.width(), img.height());
-                let (dw, dh) = target_size(w, h);
-                let rgba = img.into_raw();
-                let t1 = Instant::now();
-                let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
-                let t_scale = t1.elapsed().as_millis();
-                let t4 = Instant::now();
-                let jpeg = encoder::jpeg_rgb(&rgb, dw, dh, JPEG_QUALITY).unwrap_or_default();
-                let t_jpeg = t4.elapsed().as_millis();
-                out.push_str(&format!(
-                    "{}: {}x{} -> {}x{} | capture {} ms | scale+rgb {} ms | jpeg {} ms ({} KB) | total {} ms\n",
-                    i, w, h, dw, dh, t_cap, t_scale, t_jpeg, jpeg.len() / 1024,
-                    t.elapsed().as_millis()
-                ));
-            }
-            None => out.push_str(&format!("{}: capture failed\n", i)),
-        }
-        std::thread::sleep(Duration::from_millis(400));
-    }
+    out.push_str("== DXGI Desktop Duplication ==\n");
+    out.push_str(&capture::bench(rounds, true));
+    out.push_str("== xcap (Screenshot-Fallback) ==\n");
+    out.push_str(&capture::bench(rounds, false));
     out
 }
 
-/// Benchmarks the old full-frame path against the new delta path, both on the
-/// real screen: first serial (pure encoder cost), then through the actual
-/// capture/encode pipeline (what the session really achieves).
+/// `freeviewer --deltatest [n]` - end to end encoder benchmark on the real
+/// screen: capture, scale, delta encode, once per configured profile.
 pub fn delta_selftest(rounds: u32) -> String {
-    let idx = match primary_index() {
-        Some(i) => i,
-        None => return "kein Monitor gefunden".to_string(),
-    };
     let mut out = String::new();
+    for (name, prof) in [("Fernwartung", ADMIN), ("Spiel", GAME)] {
+        let mut cap = match capture::open(true) {
+            Some(c) => c,
+            None => return "kein Capture-Backend\n".to_string(),
+        };
+        let (sw, sh) = cap.size();
+        let (dw, dh) = target_size(sw, sh, prof.max_w);
+        let mut delta = Delta::new();
+        delta.set_quality(prof.full_q, prof.tile_q);
 
-    // ---- pass A: full frame every time (v0.2 behaviour) ----
-    let mut a_ms = 0u128;
-    let mut a_bytes = 0usize;
-    let mut a_frames = 0u32;
-    for _ in 0..rounds {
-        let t = Instant::now();
-        if let Some(img) = grab(idx) {
-            let (w, h) = (img.width(), img.height());
-            let (dw, dh) = target_size(w, h);
-            let nh = ((h as f64) * (dw as f64) / (w as f64)).round() as u32;
-            let small = image::imageops::thumbnail(&img, dw, nh.max(1));
-            let rgba = small.into_raw();
-            let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-            for px in rgba.chunks_exact(4) {
-                rgb.push(px[0]);
-                rgb.push(px[1]);
-                rgb.push(px[2]);
-            }
-            let jpeg = encoder::jpeg_rgb(&rgb, dw, dh, JPEG_QUALITY).unwrap_or_default();
-            a_bytes += jpeg.len();
-            a_frames += 1;
-            a_ms += t.elapsed().as_millis();
-        }
-    }
-
-    // ---- pass B: new path, serial ----
-    let mut delta = Delta::new();
-    let mut b_ms = 0u128;
-    let mut b_cap = 0u128;
-    let mut b_scale = 0u128;
-    let mut b_enc = 0u128;
-    let mut b_bytes = 0usize;
-    let mut b_frames = 0u32;
-    let mut b_sent = 0u32;
-    let mut b_key = 0u32;
-    let mut dirty_sum = 0f32;
-    for _ in 0..rounds {
-        let t = Instant::now();
+        let (mut n_cap, mut n_scale, mut n_enc) = (0u128, 0u128, 0u128);
+        let mut frames = 0u32;
+        let mut idle = 0u32;
+        let mut bytes = 0usize;
+        let mut sent = 0u32;
+        let mut keys = 0u32;
         let t0 = Instant::now();
-        if let Some(img) = grab(idx) {
-            let cap = t0.elapsed().as_millis();
-            let (w, h) = (img.width(), img.height());
-            let (dw, dh) = target_size(w, h);
-            let rgba = img.into_raw();
+        for _ in 0..rounds {
+            let t = Instant::now();
+            match cap.next(200) {
+                Next::Frame => {}
+                Next::Unchanged => {
+                    idle += 1;
+                    continue;
+                }
+                Next::Lost => break,
+            }
+            n_cap += t.elapsed().as_micros();
+            let (buf, w, h, bgra) = cap.frame();
             let t1 = Instant::now();
-            let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
-            let sc = t1.elapsed().as_millis();
+            let rgb = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+            n_scale += t1.elapsed().as_micros();
             let t2 = Instant::now();
             let res = delta.encode(&rgb, dw, dh);
-            let en = t2.elapsed().as_millis();
-            b_cap += cap;
-            b_scale += sc;
-            b_enc += en;
-            b_bytes += res.bytes;
-            b_frames += 1;
+            n_enc += t2.elapsed().as_micros();
+            frames += 1;
+            bytes += res.bytes;
             if res.msg.is_some() {
-                b_sent += 1;
-                dirty_sum += res.dirty;
+                sent += 1;
             }
             if res.keyframe {
-                b_key += 1;
+                keys += 1;
             }
-            b_ms += t.elapsed().as_millis();
         }
+        let secs = t0.elapsed().as_secs_f32().max(0.001);
+        let f = frames.max(1) as f32;
+        out.push_str(&format!(
+            "{:<12} {} ({}x{} -> {}x{}) | {} Frames, {} unveraendert in {:.2}s\n",
+            name,
+            cap.name(),
+            sw,
+            sh,
+            dw,
+            dh,
+            frames,
+            idle,
+            secs
+        ));
+        out.push_str(&format!(
+            "             capture {:.1} ms | scale {:.1} ms | encode {:.1} ms => {:.1} fps moeglich, {} gesendet ({} Keyframes), {:.1} KB/Frame\n",
+            n_cap as f32 / f / 1000.0,
+            n_scale as f32 / f / 1000.0,
+            n_enc as f32 / f / 1000.0,
+            1000.0 / ((n_cap + n_scale + n_enc) as f32 / f / 1000.0).max(0.001),
+            sent,
+            keys,
+            bytes as f32 / sent.max(1) as f32 / 1024.0
+        ));
     }
-
-    // ---- pass C: new path through the real pipeline (capture || encode) ----
-    let stop = Arc::new(AtomicBool::new(false));
-    let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32)>(1);
-    let stop_g = stop.clone();
-    let grabber = std::thread::spawn(move || {
-        let budget = Duration::from_millis(1000 / TARGET_FPS);
-        while !stop_g.load(Ordering::Relaxed) {
-            let t = Instant::now();
-            if let Some(img) = grab(idx) {
-                let (w, h) = (img.width(), img.height());
-                if raw_tx.try_send((img.into_raw(), w, h)).is_err() {
-                    // encoder busy - drop this frame
-                }
-            }
-            let dt = t.elapsed();
-            if dt < budget {
-                std::thread::sleep(budget - dt);
-            }
-        }
-    });
-    let mut delta_c = Delta::new();
-    let mut c_bytes = 0usize;
-    let mut c_frames = 0u32;
-    let t_c = Instant::now();
-    while c_frames < rounds {
-        match raw_rx.recv_timeout(Duration::from_millis(1500)) {
-            Ok((rgba, w, h)) => {
-                let (dw, dh) = target_size(w, h);
-                let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
-                let res = delta_c.encode(&rgb, dw, dh);
-                c_bytes += res.bytes;
-                c_frames += 1;
-            }
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(_) => break,
-        }
-    }
-    let c_secs = t_c.elapsed().as_secs_f32();
-    stop.store(true, Ordering::Relaxed);
-    let _ = grabber.join();
-
-    let f = |x: u32| if x == 0 { 1 } else { x };
-    out.push_str(&format!(
-        "A full-frame (v0.2): {} Frames, {} ms/Frame => {:.1} fps, {:.1} KB/Frame\n",
-        a_frames,
-        a_ms / f(a_frames) as u128,
-        1000.0 / (a_ms as f32 / f(a_frames) as f32).max(0.001),
-        a_bytes as f32 / f(a_frames) as f32 / 1024.0
-    ));
-    out.push_str(&format!(
-        "B delta seriell:     {} Frames, {} ms/Frame (capture {} | scale {} | encode {}) => {:.1} fps, {:.1} KB/Frame, {} gesendet, {} Keyframes, dirty {:.1}%\n",
-        b_frames,
-        b_ms / f(b_frames) as u128,
-        b_cap / f(b_frames) as u128,
-        b_scale / f(b_frames) as u128,
-        b_enc / f(b_frames) as u128,
-        1000.0 / (b_ms as f32 / f(b_frames) as f32).max(0.001),
-        b_bytes as f32 / f(b_frames) as f32 / 1024.0,
-        b_sent,
-        b_key,
-        if b_sent > 0 { dirty_sum / b_sent as f32 * 100.0 } else { 0.0 }
-    ));
-    out.push_str(&format!(
-        "C delta pipeline:    {} Frames in {:.2}s => {:.1} fps, {:.1} KB/Frame\n",
-        c_frames,
-        c_secs,
-        c_frames as f32 / c_secs.max(0.001),
-        c_bytes as f32 / f(c_frames) as f32 / 1024.0
-    ));
     out
 }
 
-/// Capture thread + encode thread. The grabber keeps pulling screenshots while
-/// the encoder is still busy with the previous frame, so a session runs at
-/// roughly max(capture, encode) instead of capture + encode.
+/// Capture thread + encode thread. The grabber keeps pulling frames while the
+/// encoder is still busy with the previous one, so a session runs at roughly
+/// max(capture, encode) instead of capture + encode.
 fn capture_loop(
     stop: Arc<AtomicBool>,
     out: mpsc::UnboundedSender<Vec<u8>>,
-    screen: Arc<Mutex<(u32, u32)>>,
+    screen: Arc<Mutex<ScreenRect>>,
     shared: Arc<Shared>,
+    mode: Arc<AtomicU8>,
 ) {
-    let monitors = match xcap::Monitor::all() {
-        Ok(m) => m,
-        Err(e) => {
-            shared.set_host_status(format!("Bildschirm nicht lesbar: {}", e));
-            return;
-        }
-    };
-    if monitors.is_empty() {
-        shared.set_host_status("Kein Bildschirm gefunden");
-        return;
-    }
-    let mon_idx = monitors
-        .iter()
-        .position(|m| m.is_primary().unwrap_or(false))
-        .unwrap_or(0);
-
-    let sw = monitors[mon_idx].width().unwrap_or(1920);
-    let sh = monitors[mon_idx].height().unwrap_or(1080);
-    *screen.lock().unwrap() = (sw, sh);
-    let _ = out.send(encode(&Msg::ScreenInfo {
-        width: sw,
-        height: sh,
-    }));
-    drop(monitors);
-
-    // FV_NODELTA / FV_NOSKIP force a full frame every time (benchmarks, debugging)
+    // FV_NODELTA / FV_NOSKIP force a full frame every time (benchmarks)
     let force_full = std::env::var("FV_NODELTA").is_ok() || std::env::var("FV_NOSKIP").is_ok();
-    let frame_budget = Duration::from_millis(1000 / TARGET_FPS);
+    let no_dxgi = std::env::var("FV_NODXGI").is_ok();
 
     let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32)>(1);
     let stop_grab = stop.clone();
     let shared_grab = shared.clone();
+    let out_grab = out.clone();
+    let mode_grab = mode.clone();
+    let screen_grab = screen.clone();
+
     let grabber = std::thread::spawn(move || {
+        let mut cap = match capture::open(!no_dxgi) {
+            Some(c) => c,
+            None => {
+                shared_grab.set_host_status("Kein Bildschirm gefunden");
+                return;
+            }
+        };
+        let (sw, sh) = cap.size();
+        let (ox, oy) = cap.origin();
+        *screen_grab.lock().unwrap() = ScreenRect {
+            x: ox,
+            y: oy,
+            w: sw,
+            h: sh,
+        };
+        shared_grab.set_host_status(format!("Aufnahme: {} {}x{}", cap.name(), sw, sh));
+        let _ = out_grab.send(encode(&Msg::ScreenInfo {
+            width: sw,
+            height: sh,
+        }));
+
+        let mut last_cursor = (i32::MIN, i32::MIN, false);
         let mut fails = 0u32;
         while !stop_grab.load(Ordering::Relaxed) {
+            let prof = profile(mode_grab.load(Ordering::Relaxed));
+            let budget = Duration::from_millis(1000 / prof.fps.max(1));
             let t0 = Instant::now();
-            match grab(mon_idx) {
-                Some(img) => {
+            match cap.next(budget.as_millis() as u32) {
+                Next::Frame => {
                     fails = 0;
-                    let (w, h) = (img.width(), img.height());
-                    // channel full = encoder still busy, skip this frame
-                    let _ = raw_tx.try_send((img.into_raw(), w, h));
+                    let (buf, w, h, bgra) = cap.frame();
+                    let (dw, dh) = target_size(w, h, prof.max_w);
+                    let rgb = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+                    // channel full = encoder still busy, drop this frame
+                    let _ = raw_tx.try_send((rgb, dw, dh));
                 }
-                None => {
+                Next::Unchanged => {}
+                Next::Lost => {
                     fails += 1;
                     if fails == 5 {
                         shared_grab.set_host_status("Bildschirmaufnahme schlaegt fehl");
                     }
                     std::thread::sleep(Duration::from_millis(250));
+                    if fails > 20 {
+                        break;
+                    }
                 }
             }
+
+            // the duplication API does not paint the cursor into the frame,
+            // so the viewer gets its position and draws it itself
+            let (cx, cy, vis) = cap.cursor();
+            if (cx, cy, vis) != last_cursor && (sw > 0 && sh > 0) {
+                last_cursor = (cx, cy, vis);
+                let nx = ((cx - ox) as i64 * 10000 / sw.max(1) as i64) as i32;
+                let ny = ((cy - oy) as i64 * 10000 / sh.max(1) as i64) as i32;
+                let _ = out_grab.send(encode(&Msg::Cursor {
+                    x: nx,
+                    y: ny,
+                    visible: vis,
+                }));
+            }
+
             let dt = t0.elapsed();
-            if dt < frame_budget {
-                std::thread::sleep(frame_budget - dt);
+            if dt < budget {
+                std::thread::sleep(budget - dt);
             }
         }
     });
@@ -575,14 +507,13 @@ fn capture_loop(
     let mut window = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let (rgba, w, h) = match raw_rx.recv_timeout(Duration::from_millis(300)) {
+        let (rgb, dw, dh) = match raw_rx.recv_timeout(Duration::from_millis(300)) {
             Ok(v) => v,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let (dw, dh) = target_size(w, h);
-        let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
-        drop(rgba);
+        let prof = profile(mode.load(Ordering::Relaxed));
+        delta.set_quality(prof.full_q, prof.tile_q);
         let res = if force_full {
             delta.encode_full(&rgb, dw, dh)
         } else {
@@ -613,98 +544,60 @@ fn capture_loop(
     let _ = grabber.join();
 }
 
-fn named_key(code: u32) -> Option<enigo::Key> {
-    use enigo::Key;
-    let k = match code {
-        proto::KEY_BACKSPACE => Key::Backspace,
-        proto::KEY_ENTER => Key::Return,
-        proto::KEY_TAB => Key::Tab,
-        proto::KEY_ESCAPE => Key::Escape,
-        proto::KEY_LEFT => Key::LeftArrow,
-        proto::KEY_RIGHT => Key::RightArrow,
-        proto::KEY_UP => Key::UpArrow,
-        proto::KEY_DOWN => Key::DownArrow,
-        proto::KEY_DELETE => Key::Delete,
-        proto::KEY_HOME => Key::Home,
-        proto::KEY_END => Key::End,
-        proto::KEY_PAGEUP => Key::PageUp,
-        proto::KEY_PAGEDOWN => Key::PageDown,
-        proto::KEY_INSERT => Key::Insert,
-        proto::KEY_SPACE => Key::Space,
-        proto::KEY_SHIFT => Key::Shift,
-        proto::KEY_CTRL => Key::Control,
-        proto::KEY_ALT => Key::Alt,
-        proto::KEY_META => Key::Meta,
-        30 => Key::F1,
-        31 => Key::F2,
-        32 => Key::F3,
-        33 => Key::F4,
-        34 => Key::F5,
-        35 => Key::F6,
-        36 => Key::F7,
-        37 => Key::F8,
-        38 => Key::F9,
-        39 => Key::F10,
-        40 => Key::F11,
-        41 => Key::F12,
-        _ => return None,
-    };
-    Some(k)
-}
+fn input_loop(
+    rx: std::sync::mpsc::Receiver<Msg>,
+    screen: Arc<Mutex<ScreenRect>>,
+    out: mpsc::UnboundedSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+) {
+    let mut inj = Injector::new();
+    let mut clip = Clip::new();
 
-fn input_loop(rx: std::sync::mpsc::Receiver<Msg>, screen: Arc<Mutex<(u32, u32)>>) {
-    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
-
-    #[cfg(target_os = "windows")]
-    {
-        let _ = enigo::set_dpi_awareness();
-    }
-
-    let mut enigo = match Enigo::new(&Settings::default()) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    while let Ok(m) = rx.recv() {
-        let (sw, sh) = *screen.lock().unwrap();
-        match m {
-            Msg::MouseMove { x, y } => {
-                let px = (x as i64 * sw as i64 / 10000) as i32;
-                let py = (y as i64 * sh as i64 / 10000) as i32;
-                let _ = enigo.move_mouse(px, py, Coordinate::Abs);
-            }
-            Msg::MouseButton { button, down } => {
-                let b = match button {
-                    1 => Button::Right,
-                    2 => Button::Middle,
-                    _ => Button::Left,
-                };
-                let d = if down {
-                    Direction::Press
-                } else {
-                    Direction::Release
-                };
-                let _ = enigo.button(b, d);
-            }
-            Msg::Wheel { lines } => {
-                let _ = enigo.scroll(-lines, Axis::Vertical);
-            }
-            Msg::Key { code, named, down } => {
-                let d = if down {
-                    Direction::Press
-                } else {
-                    Direction::Release
-                };
-                let key = if named {
-                    named_key(code)
-                } else {
-                    char::from_u32(code).map(enigo::Key::Unicode)
-                };
-                if let Some(k) = key {
-                    let _ = enigo.key(k, d);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(40)) {
+            Ok(m) => {
+                let rect = *screen.lock().unwrap();
+                match m {
+                    Msg::MouseMove { x, y } => inj.mouse_abs(x, y, rect),
+                    Msg::MouseDelta { dx, dy } => inj.mouse_delta(dx, dy),
+                    Msg::MouseButton { button, down } => inj.button(button, down),
+                    Msg::Wheel { lines } => inj.wheel(lines),
+                    Msg::KeyVk { vk, ext, down } => inj.key_vk(vk, ext, down),
+                    Msg::Key { code, named, down } => {
+                        match if named {
+                            crate::input::named_to_vk(code)
+                        } else {
+                            None
+                        } {
+                            Some((vk, ext)) => inj.key_vk(vk, ext, down),
+                            None => inj.key_portable(code, named, down),
+                        }
+                    }
+                    Msg::Special { code } => {
+                        let what = inj.special(code);
+                        shared.set_host_status(format!("Sondertaste: {}", what));
+                    }
+                    Msg::Clipboard { text } => {
+                        clip.set(&text);
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+
+        if let Some(text) = clip.poll() {
+            if out.send(encode(&Msg::Clipboard { text })).is_err() {
+                break;
+            }
         }
     }
+
+    // never leave keys stuck on the host when a session dies
+    inj.release_all();
 }

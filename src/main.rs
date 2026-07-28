@@ -8,14 +8,19 @@
 //! Relay can be overridden with the FV_RELAY environment variable,
 //! the session password with FV_PASSWORD.
 
+mod capture;
+mod clip;
 mod crypto;
 mod encoder;
 mod hostside;
 mod ident;
+mod input;
 mod net;
 mod proto;
+mod selftest;
 mod shared;
 mod viewer;
+mod vinput;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -28,11 +33,37 @@ const DEFAULT_RELAY: &str = "wss://jarvis.fleitec.com/fv/ws";
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
+/// Diagnostic line into <config>/debug.log. The release build is a GUI binary,
+/// so println! is invisible unless somebody redirected stdout.
+pub fn dbg_line(s: &str) {
+    use std::io::Write;
+    println!("{}", s);
+    let path = ident::config_dir().join("debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", s);
+    }
+}
+
 fn rt() -> &'static tokio::runtime::Runtime {
     RT.get().expect("tokio runtime")
 }
 
+/// Capture and input work in physical pixels, so the process must not be
+/// scaled by Windows.
+#[cfg(windows)]
+fn make_dpi_aware() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+#[cfg(not(windows))]
+fn make_dpi_aware() {}
+
 fn main() -> eframe::Result<()> {
+    make_dpi_aware();
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let relay = std::env::var("FV_RELAY").unwrap_or_else(|_| DEFAULT_RELAY.to_string());
@@ -51,7 +82,7 @@ fn main() -> eframe::Result<()> {
 
     // capture self test:  freeviewer --captest   (writes <config>/captest.txt)
     if std::env::args().any(|a| a == "--captest") {
-        let report = hostside::capture_selftest(8);
+        let report = hostside::capture_selftest(20);
         let path = ident::config_dir().join("captest.txt");
         let _ = std::fs::write(&path, &report);
         println!("{}", report);
@@ -73,7 +104,7 @@ fn main() -> eframe::Result<()> {
     }
     // in --connect test mode we only act as a viewer (otherwise this process
     // would register the same machine identity and kick the real host offline)
-    let viewer_only = std::env::args().any(|a| a == "--connect");
+    let viewer_only = std::env::args().any(|a| a == "--connect" || a == "--inputtest");
     if !viewer_only {
         let host_shared = shared.clone();
         let host_secret = secret.clone();
@@ -100,7 +131,8 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    // headless viewer mode for testing:  freeviewer --connect <id> <password> [frames]
+    // headless viewer mode for testing:
+    //   freeviewer --connect <id> <password> [frames] [--game]
     let argv: Vec<String> = std::env::args().collect();
     if let Some(pos) = argv.iter().position(|a| a == "--connect") {
         let id = argv.get(pos + 1).cloned().unwrap_or_default();
@@ -109,13 +141,23 @@ fn main() -> eframe::Result<()> {
             .get(pos + 3)
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
+        let game = argv.iter().any(|a| a == "--game");
         let sh = shared.clone();
         let idc = id.clone();
         rt().spawn(async move { viewer::run_viewer(sh, idc, pw).await });
         let start = std::time::Instant::now();
         let mut last = 0u64;
+        let mut mode_sent = false;
         loop {
             std::thread::sleep(Duration::from_millis(200));
+            if game && !mode_sent && shared.connected.load(Ordering::Relaxed) {
+                shared.send_input(Msg::SetMode {
+                    mode: proto::MODE_GAME,
+                });
+                shared.mode.store(proto::MODE_GAME, Ordering::Relaxed);
+                mode_sent = true;
+                println!("mode -> game");
+            }
             let seq = shared
                 .frame
                 .lock()
@@ -129,13 +171,15 @@ fn main() -> eframe::Result<()> {
             }
             if last >= want {
                 let st = *shared.stats.lock().unwrap();
+                let cur = *shared.remote_cursor.lock().unwrap();
                 println!(
-                    "OK: {} Frames in {:.1}s, {:.0} fps, {:.0} kbit/s, {:.0} ms rtt",
+                    "OK: {} Frames in {:.1}s, {:.0} fps, {:.0} kbit/s, {:.0} ms rtt, Cursor {:?}",
                     last,
                     start.elapsed().as_secs_f32(),
                     st.fps,
                     st.kbps,
-                    st.latency_ms
+                    st.latency_ms,
+                    cur
                 );
                 std::process::exit(0);
             }
@@ -150,6 +194,14 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+
+    // scripted input self test:  freeviewer --inputtest <id> <password>
+    if let Some(pos) = argv.iter().position(|a| a == "--inputtest") {
+        selftest::input_selftest(shared.clone(), &argv, pos);
+    }
+
+    vinput::init(shared.clone());
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
@@ -173,6 +225,7 @@ struct App {
     last_seq: u64,
     last_mods: egui::Modifiers,
     viewer_task: Option<tokio::task::JoinHandle<()>>,
+    hint: String,
 }
 
 impl App {
@@ -185,6 +238,7 @@ impl App {
             last_seq: 0,
             last_mods: egui::Modifiers::default(),
             viewer_task: None,
+            hint: String::new(),
         }
     }
 
@@ -203,12 +257,14 @@ impl App {
         let pw = self.partner_pw.clone();
         self.tex = None;
         self.last_seq = 0;
+        self.shared.mode.store(proto::MODE_ADMIN, Ordering::Relaxed);
         self.viewer_task = Some(rt().spawn(async move {
             viewer::run_viewer(sh, id, pw).await;
         }));
     }
 
     fn stop_session(&mut self) {
+        vinput::set_active(false);
         // release modifiers that might still be held down on the remote side
         for code in [proto::KEY_SHIFT, proto::KEY_CTRL, proto::KEY_ALT] {
             self.shared.send_input(Msg::Key {
@@ -228,6 +284,20 @@ impl App {
         self.tex = None;
         self.last_seq = 0;
         self.last_mods = egui::Modifiers::default();
+    }
+
+    fn set_mode(&mut self, mode: u8) {
+        self.shared.mode.store(mode, Ordering::Relaxed);
+        self.shared.send_input(Msg::SetMode { mode });
+        if mode == proto::MODE_GAME {
+            vinput::set_active(true);
+            self.hint =
+                "Spielmodus: Maus + Tastatur werden komplett uebertragen. Rechte Strg = freigeben."
+                    .to_string();
+        } else {
+            vinput::set_active(false);
+            self.hint = "Fernwartung: scharfes Bild, absolute Maus.".to_string();
+        }
     }
 
     fn pull_frame(&mut self, ctx: &egui::Context) {
@@ -258,7 +328,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("FreeViewer");
-            ui.label(egui::RichText::new("v0.3 - frei, verschluesselt, ohne Konto").weak());
+            ui.label(egui::RichText::new("v0.4 - frei, verschluesselt, ohne Konto").weak());
         });
         ui.separator();
         ui.add_space(10.0);
@@ -346,7 +416,10 @@ impl App {
 
     fn session_ui(&mut self, ctx: &egui::Context) {
         let stats = *self.shared.stats.lock().unwrap();
+        let game = self.shared.game_mode();
         let mut disconnect = false;
+        let mut want_mode: Option<u8> = None;
+        let mut special: Option<u8> = None;
 
         egui::TopBottomPanel::top("session_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -354,15 +427,76 @@ impl App {
                     disconnect = true;
                 }
                 ui.separator();
+
+                ui.label("Modus:");
+                if ui
+                    .selectable_label(!game, "Fernwartung")
+                    .on_hover_text("Scharfes Bild, absolute Maus, Tastatur nur im Fenster")
+                    .clicked()
+                    && game
+                {
+                    want_mode = Some(proto::MODE_ADMIN);
+                }
+                if ui
+                    .selectable_label(game, "Spiel")
+                    .on_hover_text(
+                        "Relative Maus fuer Ingame-Kameras, komplette Tastatur (Win, Alt+Tab), mehr fps",
+                    )
+                    .clicked()
+                    && !game
+                {
+                    want_mode = Some(proto::MODE_GAME);
+                }
+
+                ui.separator();
+                ui.menu_button("Tasten senden", |ui| {
+                    if ui.button("Strg+Alt+Entf").clicked() {
+                        special = Some(proto::SPECIAL_CAD);
+                        ui.close();
+                    }
+                    if ui.button("Task-Manager (Strg+Shift+Esc)").clicked() {
+                        special = Some(proto::SPECIAL_TASKMGR);
+                        ui.close();
+                    }
+                    if ui.button("Windows-Taste").clicked() {
+                        special = Some(proto::SPECIAL_WIN);
+                        ui.close();
+                    }
+                    if ui.button("Alt+Tab").clicked() {
+                        special = Some(proto::SPECIAL_ALTTAB);
+                        ui.close();
+                    }
+                    if ui.button("Sperren (Win+L)").clicked() {
+                        special = Some(proto::SPECIAL_LOCK);
+                        ui.close();
+                    }
+                });
+
+                ui.separator();
                 let (rw, rh) = *self.shared.remote_size.lock().unwrap();
                 ui.label(format!(
                     "{}x{}   {:.0} fps   {:.0} kbit/s   {:.0} ms",
                     rw, rh, stats.fps, stats.kbps, stats.latency_ms
                 ));
+                if game {
+                    ui.separator();
+                    if vinput::is_active() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 220, 120),
+                            "Eingabe gegriffen - rechte Strg loest",
+                        );
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 190, 90),
+                            "frei - ins Bild klicken zum Greifen",
+                        );
+                    }
+                }
             });
         });
 
         let mut image_rect: Option<egui::Rect> = None;
+        let mut clicked_image = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(18, 18, 18)))
             .show(ctx, |ui| {
@@ -377,6 +511,7 @@ impl App {
                             egui::Image::new(egui::load::SizedTexture::new(tex.id(), size))
                                 .sense(egui::Sense::click_and_drag()),
                         );
+                        clicked_image = resp.clicked();
                         image_rect = Some(resp.rect);
                     });
                 } else {
@@ -387,39 +522,112 @@ impl App {
             });
 
         if let Some(rect) = image_rect {
-            self.forward_input(ctx, rect);
+            self.draw_remote_cursor(ctx, rect, game);
+            self.update_grab(ctx, rect, game, clicked_image);
+            self.forward_input(ctx, rect, game);
         }
 
+        if let Some(m) = want_mode {
+            self.set_mode(m);
+        }
+        if let Some(code) = special {
+            self.shared.send_input(Msg::Special { code });
+        }
         if disconnect {
             self.stop_session();
         }
     }
 
-    fn forward_input(&mut self, ctx: &egui::Context, rect: egui::Rect) {
-        // modifier keys are not part of egui's Key enum, so we diff the state
-        let mods = ctx.input(|i| i.modifiers);
-        if mods.shift != self.last_mods.shift {
-            self.shared.send_input(Msg::Key {
-                code: proto::KEY_SHIFT,
-                named: true,
-                down: mods.shift,
-            });
+    /// The duplication API does not paint the cursor into the frame, so the
+    /// viewer draws the remote pointer itself.
+    fn draw_remote_cursor(&self, ctx: &egui::Context, rect: egui::Rect, game: bool) {
+        if game {
+            return;
         }
-        if mods.ctrl != self.last_mods.ctrl {
-            self.shared.send_input(Msg::Key {
-                code: proto::KEY_CTRL,
-                named: true,
-                down: mods.ctrl,
-            });
+        let (x, y, visible) = *self.shared.remote_cursor.lock().unwrap();
+        if !visible {
+            return;
         }
-        if mods.alt != self.last_mods.alt {
-            self.shared.send_input(Msg::Key {
-                code: proto::KEY_ALT,
-                named: true,
-                down: mods.alt,
-            });
+        let p = egui::pos2(
+            rect.left() + rect.width() * (x as f32 / 10000.0).clamp(0.0, 1.0),
+            rect.top() + rect.height() * (y as f32 / 10000.0).clamp(0.0, 1.0),
+        );
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("remote_cursor"),
+        ));
+        let pts = vec![
+            p,
+            egui::pos2(p.x, p.y + 17.0),
+            egui::pos2(p.x + 4.5, p.y + 12.5),
+            egui::pos2(p.x + 10.5, p.y + 12.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            pts,
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.2, egui::Color32::BLACK),
+        ));
+    }
+
+    /// Keeps the pointer lock in sync with focus and clicks.
+    fn update_grab(&mut self, ctx: &egui::Context, rect: egui::Rect, game: bool, clicked: bool) {
+        if !game {
+            return;
         }
-        self.last_mods = mods;
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if !focused {
+            vinput::set_active(false);
+            return;
+        }
+        // center of the picture in physical screen pixels
+        let ppp = ctx.pixels_per_point();
+        let origin = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map(|r| r.min)
+            .unwrap_or(egui::Pos2::ZERO);
+        let c = rect.center();
+        vinput::set_center(
+            ((origin.x + c.x) * ppp) as i32,
+            ((origin.y + c.y) * ppp) as i32,
+        );
+        if clicked && !vinput::is_active() {
+            vinput::set_active(true);
+        }
+        if vinput::is_active() {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+    }
+
+    fn forward_input(&mut self, ctx: &egui::Context, rect: egui::Rect, game: bool) {
+        let grabbed = game && vinput::is_active();
+
+        // modifier keys are not part of egui's Key enum, so we diff the state.
+        // In game mode the low level hook already forwards everything.
+        if !grabbed {
+            let mods = ctx.input(|i| i.modifiers);
+            if mods.shift != self.last_mods.shift {
+                self.shared.send_input(Msg::Key {
+                    code: proto::KEY_SHIFT,
+                    named: true,
+                    down: mods.shift,
+                });
+            }
+            if mods.ctrl != self.last_mods.ctrl {
+                self.shared.send_input(Msg::Key {
+                    code: proto::KEY_CTRL,
+                    named: true,
+                    down: mods.ctrl,
+                });
+            }
+            if mods.alt != self.last_mods.alt {
+                self.shared.send_input(Msg::Key {
+                    code: proto::KEY_ALT,
+                    named: true,
+                    down: mods.alt,
+                });
+            }
+            self.last_mods = mods;
+        }
 
         let norm = |pos: egui::Pos2| -> Option<(i32, i32)> {
             if rect.width() < 1.0 || rect.height() < 1.0 || !rect.contains(pos) {
@@ -434,8 +642,11 @@ impl App {
         for ev in events {
             match ev {
                 egui::Event::PointerMoved(pos) => {
-                    if let Some((x, y)) = norm(pos) {
-                        self.shared.send_input(Msg::MouseMove { x, y });
+                    // in game mode the raw delta path owns the mouse
+                    if !grabbed {
+                        if let Some((x, y)) = norm(pos) {
+                            self.shared.send_input(Msg::MouseMove { x, y });
+                        }
                     }
                 }
                 egui::Event::PointerButton {
@@ -444,13 +655,20 @@ impl App {
                     pressed,
                     ..
                 } => {
-                    if let Some((x, y)) = norm(pos) {
+                    let b = match button {
+                        egui::PointerButton::Secondary => 1u8,
+                        egui::PointerButton::Middle => 2u8,
+                        egui::PointerButton::Extra1 => 3u8,
+                        egui::PointerButton::Extra2 => 4u8,
+                        _ => 0u8,
+                    };
+                    if grabbed {
+                        self.shared.send_input(Msg::MouseButton {
+                            button: b,
+                            down: pressed,
+                        });
+                    } else if let Some((x, y)) = norm(pos) {
                         self.shared.send_input(Msg::MouseMove { x, y });
-                        let b = match button {
-                            egui::PointerButton::Secondary => 1u8,
-                            egui::PointerButton::Middle => 2u8,
-                            _ => 0u8,
-                        };
                         self.shared.send_input(Msg::MouseButton {
                             button: b,
                             down: pressed,
@@ -474,7 +692,7 @@ impl App {
                     repeat,
                     ..
                 } => {
-                    if !repeat {
+                    if !repeat && !grabbed {
                         if let Some((code, named)) = map_key(key) {
                             self.shared.send_input(Msg::Key {
                                 code,
@@ -560,8 +778,11 @@ impl eframe::App for App {
 
         if self.shared.connected.load(Ordering::Relaxed) {
             self.session_ui(ctx);
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.request_repaint_after(Duration::from_millis(8));
         } else {
+            if vinput::is_active() {
+                vinput::set_active(false);
+            }
             egui::CentralPanel::default().show(ctx, |ui| self.home_ui(ui));
             ctx.request_repaint_after(Duration::from_millis(250));
         }

@@ -1,0 +1,570 @@
+//! Screen capture backends.
+//!
+//! Two implementations live here:
+//!
+//! * `dxgi` - DXGI Desktop Duplication (Windows 8+). The desktop compositor
+//!   hands us the finished frame as a GPU texture, tells us *which* rectangles
+//!   changed and blocks until a new frame actually exists. We only read back
+//!   the changed rectangles over PCIe, so an idle desktop costs almost
+//!   nothing. This is the same API Parsec/OBS use.
+//! * `fallback` - the old `xcap` screenshot path. Used on non-Windows, in
+//!   session 0 (services have no interactive desktop) and whenever the
+//!   duplication API refuses to start.
+//!
+//! The capture thread owns the backend; it is deliberately not `Send`.
+
+use std::time::Instant;
+
+/// What one `next()` call produced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Next {
+    /// A new picture is in the backend buffer.
+    Frame,
+    /// Nothing changed on screen (only the cursor may have moved).
+    Unchanged,
+    /// The capture broke down (display mode change, session switch, ...).
+    Lost,
+}
+
+pub trait Backend {
+    /// Blocks for at most `timeout_ms` waiting for a new frame.
+    fn next(&mut self, timeout_ms: u32) -> Next;
+    /// Current picture: (pixels, width, height, `true` if BGRA instead of RGBA).
+    fn frame(&self) -> (&[u8], u32, u32, bool);
+    /// Physical size of the captured screen.
+    fn size(&self) -> (u32, u32);
+    /// Position of the captured screen inside the virtual desktop.
+    fn origin(&self) -> (i32, i32);
+    /// Mouse position in desktop coordinates plus visibility.
+    fn cursor(&self) -> (i32, i32, bool);
+    fn name(&self) -> &'static str;
+}
+
+/// Opens the best available backend for `monitor` (0 = primary).
+pub fn open(prefer_fast: bool) -> Option<Box<dyn Backend>> {
+    #[cfg(windows)]
+    if prefer_fast {
+        match dxgi::Dxgi::new() {
+            Ok(d) => return Some(Box::new(d)),
+            Err(e) => {
+                log_line(&format!("dxgi unavailable: {}", e));
+            }
+        }
+    }
+    fallback::Shots::new().ok().map(|s| Box::new(s) as Box<dyn Backend>)
+}
+
+pub fn log_line(s: &str) {
+    use std::io::Write;
+    let path = crate::ident::config_dir().join("capture.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", s);
+    }
+}
+
+// ---------------------------------------------------------------- fallback --
+
+mod fallback {
+    use super::{Backend, Next};
+    use anyhow::{anyhow, Result};
+
+    pub struct Shots {
+        idx: usize,
+        buf: Vec<u8>,
+        w: u32,
+        h: u32,
+        origin: (i32, i32),
+    }
+
+    impl Shots {
+        pub fn new() -> Result<Self> {
+            let monitors = xcap::Monitor::all().map_err(|e| anyhow!(e.to_string()))?;
+            if monitors.is_empty() {
+                return Err(anyhow!("kein Monitor"));
+            }
+            let idx = monitors
+                .iter()
+                .position(|m| m.is_primary().unwrap_or(false))
+                .unwrap_or(0);
+            let w = monitors[idx].width().unwrap_or(1920);
+            let h = monitors[idx].height().unwrap_or(1080);
+            let origin = (
+                monitors[idx].x().unwrap_or(0),
+                monitors[idx].y().unwrap_or(0),
+            );
+            Ok(Self {
+                idx,
+                buf: Vec::new(),
+                w,
+                h,
+                origin,
+            })
+        }
+    }
+
+    impl Backend for Shots {
+        fn next(&mut self, _timeout_ms: u32) -> Next {
+            // A cached Monitor handle goes stale on Windows and then returns
+            // the same picture forever, so it is re-enumerated every frame.
+            let mut all = match xcap::Monitor::all() {
+                Ok(a) => a,
+                Err(_) => return Next::Lost,
+            };
+            if self.idx >= all.len() {
+                return Next::Lost;
+            }
+            let m = all.swap_remove(self.idx);
+            match m.capture_image() {
+                Ok(img) => {
+                    self.w = img.width();
+                    self.h = img.height();
+                    self.buf = img.into_raw();
+                    Next::Frame
+                }
+                Err(_) => Next::Lost,
+            }
+        }
+        fn frame(&self) -> (&[u8], u32, u32, bool) {
+            (&self.buf, self.w, self.h, false)
+        }
+        fn size(&self) -> (u32, u32) {
+            (self.w, self.h)
+        }
+        fn origin(&self) -> (i32, i32) {
+            self.origin
+        }
+        fn cursor(&self) -> (i32, i32, bool) {
+            (0, 0, false)
+        }
+        fn name(&self) -> &'static str {
+            "xcap"
+        }
+    }
+}
+
+// -------------------------------------------------------------------- dxgi --
+
+#[cfg(windows)]
+mod dxgi {
+    use super::{Backend, Next};
+    use anyhow::{anyhow, Result};
+    use windows::core::Interface;
+    use windows::Win32::Foundation::{HMODULE, POINT, RECT};
+    use windows::Win32::Graphics::Direct3D::{
+        D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
+    };
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use windows::Win32::Graphics::Dxgi::*;
+
+    /// Above this many changed rectangles a single full copy is cheaper.
+    const MAX_RECTS: usize = 48;
+
+    pub struct Dxgi {
+        device: ID3D11Device,
+        ctx: ID3D11DeviceContext,
+        output: IDXGIOutput1,
+        dupl: IDXGIOutputDuplication,
+        staging: ID3D11Texture2D,
+        buf: Vec<u8>,
+        w: u32,
+        h: u32,
+        origin: (i32, i32),
+        holding: bool,
+        cursor: (i32, i32, bool),
+        dirty: Vec<RECT>,
+        moves: Vec<DXGI_OUTDUPL_MOVE_RECT>,
+        primed: bool,
+    }
+
+    impl Drop for Dxgi {
+        fn drop(&mut self) {
+            unsafe {
+                if self.holding {
+                    let _ = self.dupl.ReleaseFrame();
+                }
+            }
+        }
+    }
+
+    fn make_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+        let mut device: Option<ID3D11Device> = None;
+        let mut ctx: Option<ID3D11DeviceContext> = None;
+        let levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0];
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut ctx),
+            )
+            .map_err(|e| anyhow!("D3D11CreateDevice: {}", e))?;
+        }
+        Ok((
+            device.ok_or_else(|| anyhow!("kein D3D11 device"))?,
+            ctx.ok_or_else(|| anyhow!("kein D3D11 context"))?,
+        ))
+    }
+
+    /// Picks the output that shows the primary monitor (desktop origin 0,0).
+    fn primary_output(device: &ID3D11Device) -> Result<(IDXGIOutput1, RECT)> {
+        unsafe {
+            let dxgi_dev: IDXGIDevice = device.cast()?;
+            let adapter = dxgi_dev.GetAdapter()?;
+            let mut best: Option<(IDXGIOutput1, RECT)> = None;
+            let mut i = 0u32;
+            while let Ok(out) = adapter.EnumOutputs(i) {
+                let desc = match out.GetDesc() {
+                    Ok(d) => d,
+                    Err(_) => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                if desc.AttachedToDesktop.as_bool() {
+                    let r = desc.DesktopCoordinates;
+                    let o1: IDXGIOutput1 = out.cast()?;
+                    let is_primary = r.left == 0 && r.top == 0;
+                    if is_primary {
+                        return Ok((o1, r));
+                    }
+                    if best.is_none() {
+                        best = Some((o1, r));
+                    }
+                }
+                i += 1;
+            }
+            best.ok_or_else(|| anyhow!("kein angeschlossener Ausgang"))
+        }
+    }
+
+    fn make_staging(device: &ID3D11Device, w: u32, h: u32) -> Result<ID3D11Texture2D> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut tex: Option<ID3D11Texture2D> = None;
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut tex))
+                .map_err(|e| anyhow!("CreateTexture2D: {}", e))?;
+        }
+        tex.ok_or_else(|| anyhow!("kein staging texture"))
+    }
+
+    impl Dxgi {
+        pub fn new() -> Result<Self> {
+            let (device, ctx) = make_device()?;
+            let (output, rect) = primary_output(&device)?;
+            let w = (rect.right - rect.left).max(1) as u32;
+            let h = (rect.bottom - rect.top).max(1) as u32;
+            let dupl = unsafe {
+                output
+                    .DuplicateOutput(&device)
+                    .map_err(|e| anyhow!("DuplicateOutput: {}", e))?
+            };
+            let staging = make_staging(&device, w, h)?;
+            super::log_line(&format!("dxgi ready {}x{} at {},{}", w, h, rect.left, rect.top));
+            Ok(Self {
+                device,
+                ctx,
+                output,
+                dupl,
+                staging,
+                buf: vec![0u8; w as usize * h as usize * 4],
+                w,
+                h,
+                origin: (rect.left, rect.top),
+                holding: false,
+                cursor: (0, 0, false),
+                dirty: Vec::with_capacity(64),
+                moves: Vec::with_capacity(32),
+                primed: false,
+            })
+        }
+
+        /// Rebuilds the duplication after ACCESS_LOST (resolution change, UAC
+        /// prompt, session switch, ...).
+        fn recreate(&mut self) -> Result<()> {
+            unsafe {
+                if self.holding {
+                    let _ = self.dupl.ReleaseFrame();
+                    self.holding = false;
+                }
+            }
+            let (output, rect) = primary_output(&self.device)?;
+            let w = (rect.right - rect.left).max(1) as u32;
+            let h = (rect.bottom - rect.top).max(1) as u32;
+            self.dupl = unsafe { output.DuplicateOutput(&self.device)? };
+            self.output = output;
+            if w != self.w || h != self.h {
+                self.staging = make_staging(&self.device, w, h)?;
+                self.buf = vec![0u8; w as usize * h as usize * 4];
+                self.w = w;
+                self.h = h;
+            }
+            self.origin = (rect.left, rect.top);
+            self.primed = false;
+            Ok(())
+        }
+
+        fn collect_rects(&mut self) -> Result<bool> {
+            self.dirty.clear();
+            self.moves.clear();
+            unsafe {
+                // move rects first (the API guarantees they were applied first)
+                let mut needed = 0u32;
+                let mut cap = 32usize;
+                loop {
+                    self.moves.resize(cap, DXGI_OUTDUPL_MOVE_RECT::default());
+                    let bytes = (cap * std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>()) as u32;
+                    match self
+                        .dupl
+                        .GetFrameMoveRects(bytes, self.moves.as_mut_ptr(), &mut needed)
+                    {
+                        Ok(()) => {
+                            let n = needed as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+                            self.moves.truncate(n);
+                            break;
+                        }
+                        Err(e) if e.code() == DXGI_ERROR_MORE_DATA && cap < 4096 => {
+                            cap *= 4;
+                        }
+                        Err(_) => {
+                            self.moves.clear();
+                            break;
+                        }
+                    }
+                }
+
+                let mut cap = 64usize;
+                loop {
+                    self.dirty.resize(cap, RECT::default());
+                    let bytes = (cap * std::mem::size_of::<RECT>()) as u32;
+                    match self
+                        .dupl
+                        .GetFrameDirtyRects(bytes, self.dirty.as_mut_ptr(), &mut needed)
+                    {
+                        Ok(()) => {
+                            let n = needed as usize / std::mem::size_of::<RECT>();
+                            self.dirty.truncate(n);
+                            break;
+                        }
+                        Err(e) if e.code() == DXGI_ERROR_MORE_DATA && cap < 8192 => {
+                            cap *= 4;
+                        }
+                        Err(_) => {
+                            self.dirty.clear();
+                            return Ok(false); // unknown -> full copy
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        }
+
+        /// Copies the changed regions into the CPU buffer.
+        fn read_back(&mut self, src: &ID3D11Texture2D, full: bool) -> Result<()> {
+            let stride = self.w as usize * 4;
+            unsafe {
+                if full {
+                    self.ctx.CopyResource(&self.staging, src);
+                } else {
+                    for r in self.dirty.iter().chain(
+                        self.moves
+                            .iter()
+                            .map(|m| &m.DestinationRect)
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    ) {
+                        let bx = D3D11_BOX {
+                            left: r.left.max(0) as u32,
+                            top: r.top.max(0) as u32,
+                            front: 0,
+                            right: (r.right.max(0) as u32).min(self.w),
+                            bottom: (r.bottom.max(0) as u32).min(self.h),
+                            back: 1,
+                        };
+                        if bx.right <= bx.left || bx.bottom <= bx.top {
+                            continue;
+                        }
+                        self.ctx.CopySubresourceRegion(
+                            &self.staging,
+                            0,
+                            bx.left,
+                            bx.top,
+                            0,
+                            src,
+                            0,
+                            Some(&bx),
+                        );
+                    }
+                }
+
+                let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+                self.ctx
+                    .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut map))
+                    .map_err(|e| anyhow!("Map: {}", e))?;
+                let src_ptr = map.pData as *const u8;
+                let pitch = map.RowPitch as usize;
+
+                let copy_rows = |dst: &mut [u8], y0: usize, y1: usize, x0: usize, x1: usize| {
+                    let bytes = (x1 - x0) * 4;
+                    for y in y0..y1 {
+                        let s = src_ptr.add(y * pitch + x0 * 4);
+                        let d = &mut dst[y * stride + x0 * 4..y * stride + x0 * 4 + bytes];
+                        std::ptr::copy_nonoverlapping(s, d.as_mut_ptr(), bytes);
+                    }
+                };
+
+                if full {
+                    copy_rows(&mut self.buf, 0, self.h as usize, 0, self.w as usize);
+                } else {
+                    let rects: Vec<RECT> = self
+                        .dirty
+                        .iter()
+                        .copied()
+                        .chain(self.moves.iter().map(|m| m.DestinationRect))
+                        .collect();
+                    for r in rects {
+                        let x0 = r.left.max(0) as usize;
+                        let x1 = (r.right.max(0) as usize).min(self.w as usize);
+                        let y0 = r.top.max(0) as usize;
+                        let y1 = (r.bottom.max(0) as usize).min(self.h as usize);
+                        if x1 <= x0 || y1 <= y0 {
+                            continue;
+                        }
+                        copy_rows(&mut self.buf, y0, y1, x0, x1);
+                    }
+                }
+                self.ctx.Unmap(&self.staging, 0);
+            }
+            Ok(())
+        }
+    }
+
+    impl Backend for Dxgi {
+        fn next(&mut self, timeout_ms: u32) -> Next {
+            unsafe {
+                if self.holding {
+                    let _ = self.dupl.ReleaseFrame();
+                    self.holding = false;
+                }
+                let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+                let mut res: Option<IDXGIResource> = None;
+                match self.dupl.AcquireNextFrame(timeout_ms, &mut info, &mut res) {
+                    Ok(()) => {}
+                    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Next::Unchanged,
+                    Err(e) => {
+                        super::log_line(&format!("AcquireNextFrame: {}", e));
+                        if self.recreate().is_err() {
+                            return Next::Lost;
+                        }
+                        return Next::Unchanged;
+                    }
+                }
+                self.holding = true;
+
+                if info.LastMouseUpdateTime != 0 {
+                    let p: POINT = info.PointerPosition.Position;
+                    self.cursor = (
+                        p.x + self.origin.0,
+                        p.y + self.origin.1,
+                        info.PointerPosition.Visible.as_bool(),
+                    );
+                }
+                // no new pixels, only the pointer moved
+                if info.LastPresentTime == 0 && self.primed {
+                    return Next::Unchanged;
+                }
+
+                let tex: ID3D11Texture2D = match res.as_ref().and_then(|r| r.cast().ok()) {
+                    Some(t) => t,
+                    None => return Next::Unchanged,
+                };
+
+                let known = self.collect_rects().unwrap_or(false);
+                let count = self.dirty.len() + self.moves.len();
+                let full = !self.primed || !known || count == 0 || count > MAX_RECTS;
+                if !full && count == 0 {
+                    return Next::Unchanged;
+                }
+                if self.read_back(&tex, full).is_err() {
+                    return Next::Lost;
+                }
+                self.primed = true;
+                Next::Frame
+            }
+        }
+
+        fn frame(&self) -> (&[u8], u32, u32, bool) {
+            (&self.buf, self.w, self.h, true)
+        }
+        fn size(&self) -> (u32, u32) {
+            (self.w, self.h)
+        }
+        fn origin(&self) -> (i32, i32) {
+            self.origin
+        }
+        fn cursor(&self) -> (i32, i32, bool) {
+            self.cursor
+        }
+        fn name(&self) -> &'static str {
+            "dxgi"
+        }
+    }
+}
+
+/// Small benchmark used by `--captest`: how long does one frame take?
+pub fn bench(rounds: u32, prefer_fast: bool) -> String {
+    let mut out = String::new();
+    let mut cap = match open(prefer_fast) {
+        Some(c) => c,
+        None => return "kein Capture-Backend verfuegbar\n".to_string(),
+    };
+    let (w, h) = cap.size();
+    out.push_str(&format!("backend {} {}x{}\n", cap.name(), w, h));
+    let mut frames = 0u32;
+    let mut unchanged = 0u32;
+    let mut total = 0u128;
+    let t0 = Instant::now();
+    for _ in 0..rounds {
+        let t = Instant::now();
+        match cap.next(200) {
+            Next::Frame => {
+                frames += 1;
+                total += t.elapsed().as_micros();
+            }
+            Next::Unchanged => unchanged += 1,
+            Next::Lost => {
+                out.push_str("capture lost\n");
+                break;
+            }
+        }
+    }
+    let secs = t0.elapsed().as_secs_f32();
+    out.push_str(&format!(
+        "{} Frames, {} unveraendert in {:.2}s | {:.2} ms pro echtem Frame\n",
+        frames,
+        unchanged,
+        secs,
+        total as f32 / frames.max(1) as f32 / 1000.0
+    ));
+    out
+}
