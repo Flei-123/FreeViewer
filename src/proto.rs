@@ -8,12 +8,34 @@
 //! remote screen) so that scaling/downsampling of the video stream never
 //! affects pointer accuracy.
 
+/// One changed rectangle of the current frame (delta update).
+#[derive(Debug, Clone)]
+pub struct Tile {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub jpeg: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Msg {
     /// Real (unscaled) size of the shared screen.
     ScreenInfo { width: u32, height: u32 },
-    /// One JPEG encoded frame (may be downscaled).
-    Frame { width: u32, height: u32, jpeg: Vec<u8> },
+    /// One JPEG encoded full frame / keyframe (may be downscaled).
+    Frame {
+        width: u32,
+        height: u32,
+        jpeg: Vec<u8>,
+    },
+    /// Only the parts of the frame that changed since the previous one.
+    /// `width`/`height` describe the full frame the tiles belong to, so the
+    /// viewer can detect a stale canvas and wait for the next keyframe.
+    Tiles {
+        width: u32,
+        height: u32,
+        tiles: Vec<Tile>,
+    },
     /// Normalized 0..10000 pointer position.
     MouseMove { x: i32, y: i32 },
     /// button: 0 = left, 1 = right, 2 = middle
@@ -50,12 +72,16 @@ pub const KEY_F1: u32 = 30; // F1..F12 => 30..41
 
 const T_SCREEN: u8 = 0x20;
 const T_FRAME: u8 = 0x21;
+const T_TILES: u8 = 0x22;
 const T_MOVE: u8 = 0x30;
 const T_BUTTON: u8 = 0x31;
 const T_WHEEL: u8 = 0x32;
 const T_KEY: u8 = 0x33;
 const T_PING: u8 = 0x40;
 const T_PONG: u8 = 0x41;
+
+/// Hard limit so a corrupt/hostile message cannot make us allocate wildly.
+const MAX_TILES: usize = 4096;
 
 fn pu32(v: &mut Vec<u8>, x: u32) {
     v.extend_from_slice(&x.to_le_bytes());
@@ -86,6 +112,26 @@ pub fn encode(m: &Msg) -> Vec<u8> {
             pu32(&mut v, *height);
             pu32(&mut v, jpeg.len() as u32);
             v.extend_from_slice(jpeg);
+        }
+        Msg::Tiles {
+            width,
+            height,
+            tiles,
+        } => {
+            let total: usize = tiles.iter().map(|t| t.jpeg.len() + 20).sum();
+            v.reserve(total + 16);
+            v.push(T_TILES);
+            pu32(&mut v, *width);
+            pu32(&mut v, *height);
+            pu32(&mut v, tiles.len() as u32);
+            for t in tiles {
+                pu32(&mut v, t.x);
+                pu32(&mut v, t.y);
+                pu32(&mut v, t.w);
+                pu32(&mut v, t.h);
+                pu32(&mut v, t.jpeg.len() as u32);
+                v.extend_from_slice(&t.jpeg);
+            }
         }
         Msg::MouseMove { x, y } => {
             v.push(T_MOVE);
@@ -146,7 +192,7 @@ impl<'a> Rd<'a> {
         Some(u64::from_le_bytes(a))
     }
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.b.get(self.p..self.p + n)?;
+        let s = self.b.get(self.p..self.p.checked_add(n)?)?;
         self.p += n;
         Some(s)
     }
@@ -169,6 +215,35 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
                 width,
                 height,
                 jpeg: data.to_vec(),
+            })
+        }
+        T_TILES => {
+            let width = r.u32()?;
+            let height = r.u32()?;
+            let count = r.u32()? as usize;
+            if count > MAX_TILES {
+                return None;
+            }
+            let mut tiles = Vec::with_capacity(count.min(256));
+            for _ in 0..count {
+                let x = r.u32()?;
+                let y = r.u32()?;
+                let w = r.u32()?;
+                let h = r.u32()?;
+                let n = r.u32()? as usize;
+                let data = r.take(n)?;
+                tiles.push(Tile {
+                    x,
+                    y,
+                    w,
+                    h,
+                    jpeg: data.to_vec(),
+                });
+            }
+            Some(Msg::Tiles {
+                width,
+                height,
+                tiles,
             })
         }
         T_MOVE => Some(Msg::MouseMove {
@@ -207,6 +282,26 @@ mod tests {
                 height: 200,
                 jpeg: vec![1, 2, 3, 4, 5],
             },
+            Msg::Tiles {
+                width: 1600,
+                height: 670,
+                tiles: vec![
+                    Tile {
+                        x: 0,
+                        y: 64,
+                        w: 64,
+                        h: 128,
+                        jpeg: vec![9, 8, 7],
+                    },
+                    Tile {
+                        x: 1536,
+                        y: 640,
+                        w: 64,
+                        h: 30,
+                        jpeg: vec![1],
+                    },
+                ],
+            },
             Msg::MouseMove { x: -7, y: 9999 },
             Msg::MouseButton {
                 button: 2,
@@ -227,5 +322,29 @@ mod tests {
         }
         assert!(decode(&[]).is_none());
         assert!(decode(&[0x21, 1, 2]).is_none());
+    }
+
+    #[test]
+    fn truncated_tiles_do_not_panic() {
+        let full = encode(&Msg::Tiles {
+            width: 100,
+            height: 100,
+            tiles: vec![Tile {
+                x: 0,
+                y: 0,
+                w: 64,
+                h: 64,
+                jpeg: vec![1, 2, 3, 4],
+            }],
+        });
+        for cut in 0..full.len() {
+            let _ = decode(&full[..cut]);
+        }
+        // absurd tile count is rejected instead of allocating
+        let mut evil = vec![T_TILES];
+        evil.extend_from_slice(&100u32.to_le_bytes());
+        evil.extend_from_slice(&100u32.to_le_bytes());
+        evil.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode(&evil).is_none());
     }
 }

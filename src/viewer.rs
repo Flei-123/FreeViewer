@@ -10,9 +10,49 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 use crate::crypto::{self, Cipher};
+use crate::encoder::blit_rgb_to_rgba;
 use crate::net;
 use crate::proto::{decode, encode, Msg};
 use crate::shared::{FrameData, Shared};
+
+/// Keeps the last complete picture so that delta updates can be painted into it.
+struct Canvas {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+    seq: u64,
+}
+
+impl Canvas {
+    fn new() -> Self {
+        Self {
+            w: 0,
+            h: 0,
+            rgba: Vec::new(),
+            seq: 0,
+        }
+    }
+
+    fn set_full(&mut self, w: u32, h: u32, rgba: Vec<u8>) {
+        self.w = w;
+        self.h = h;
+        self.rgba = rgba;
+        self.seq += 1;
+    }
+
+    fn matches(&self, w: u32, h: u32) -> bool {
+        self.w == w && self.h == h && self.rgba.len() == w as usize * h as usize * 4
+    }
+
+    fn publish(&self, shared: &Arc<Shared>) {
+        *shared.frame.lock().unwrap() = Some(FrameData {
+            width: self.w,
+            height: self.h,
+            rgba: self.rgba.clone(),
+            seq: self.seq,
+        });
+    }
+}
 
 pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
     shared.connecting.store(true, Ordering::Relaxed);
@@ -49,7 +89,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     let kp = crypto::keypair();
     let mut cipher: Option<Arc<Mutex<Cipher>>> = None;
     let started = Instant::now();
-    let mut seq: u64 = 0;
+    let mut canvas = Canvas::new();
     // rolling stats for the session bar
     let mut win_start = Instant::now();
     let mut win_frames = 0u32;
@@ -144,7 +184,8 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 let ts = started.elapsed().as_millis() as u64;
-                                let sealed = { c3.lock().unwrap().seal(&encode(&Msg::Ping { ts })) };
+                                let sealed =
+                                    { c3.lock().unwrap().seal(&encode(&Msg::Ping { ts })) };
                                 if tx3.send(WsMsg::Binary(sealed.into())).is_err() {
                                     break;
                                 }
@@ -174,29 +215,49 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }) => {
                                 win_frames += 1;
                                 win_bytes += jpeg.len();
-                                if win_start.elapsed() >= Duration::from_secs(1) {
-                                    let secs = win_start.elapsed().as_secs_f32();
-                                    {
-                                        let mut st = shared.stats.lock().unwrap();
-                                        st.fps = win_frames as f32 / secs;
-                                        st.kbps = (win_bytes as f32 * 8.0 / 1000.0) / secs;
-                                    }
-                                    win_frames = 0;
-                                    win_bytes = 0;
-                                    win_start = Instant::now();
-                                }
                                 if let Ok(img) = image::load_from_memory_with_format(
                                     &jpeg,
                                     image::ImageFormat::Jpeg,
                                 ) {
-                                    let rgba = img.to_rgba8();
-                                    seq += 1;
-                                    *shared.frame.lock().unwrap() = Some(FrameData {
-                                        width,
-                                        height,
-                                        rgba: rgba.into_raw(),
-                                        seq,
-                                    });
+                                    canvas.set_full(width, height, img.to_rgba8().into_raw());
+                                    canvas.publish(shared);
+                                }
+                            }
+                            Some(Msg::Tiles {
+                                width,
+                                height,
+                                tiles,
+                            }) => {
+                                if !canvas.matches(width, height) {
+                                    // no keyframe for this size yet - ignore until one arrives
+                                    continue;
+                                }
+                                let mut painted = false;
+                                for t in tiles {
+                                    win_bytes += t.jpeg.len();
+                                    if let Ok(img) = image::load_from_memory_with_format(
+                                        &t.jpeg,
+                                        image::ImageFormat::Jpeg,
+                                    ) {
+                                        let rgb = img.to_rgb8();
+                                        if blit_rgb_to_rgba(
+                                            &mut canvas.rgba,
+                                            width,
+                                            height,
+                                            t.x,
+                                            t.y,
+                                            rgb.as_raw(),
+                                            rgb.width(),
+                                            rgb.height(),
+                                        ) {
+                                            painted = true;
+                                        }
+                                    }
+                                }
+                                if painted {
+                                    win_frames += 1;
+                                    canvas.seq += 1;
+                                    canvas.publish(shared);
                                 }
                             }
                             Some(Msg::Pong { ts }) => {
@@ -205,6 +266,18 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                 shared.stats.lock().unwrap().latency_ms = rtt;
                             }
                             _ => {}
+                        }
+
+                        if win_start.elapsed() >= Duration::from_secs(1) {
+                            let secs = win_start.elapsed().as_secs_f32();
+                            {
+                                let mut st = shared.stats.lock().unwrap();
+                                st.fps = win_frames as f32 / secs;
+                                st.kbps = (win_bytes as f32 * 8.0 / 1000.0) / secs;
+                            }
+                            win_frames = 0;
+                            win_bytes = 0;
+                            win_start = Instant::now();
                         }
                     }
                     _ => {}

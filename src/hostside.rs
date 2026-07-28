@@ -1,6 +1,7 @@
 //! Host side: share this machine's screen and execute remote input.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -10,13 +11,14 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 use crate::crypto::{self, Cipher};
+use crate::encoder::{self, Delta};
 use crate::net;
 use crate::proto::{self, decode, encode, Msg};
 use crate::shared::Shared;
 
 const MAX_WIDTH: u32 = 1600;
-const TARGET_FPS: u64 = 15;
-const JPEG_QUALITY: u8 = 62;
+const TARGET_FPS: u64 = 30;
+const JPEG_QUALITY: u8 = encoder::FULL_QUALITY;
 
 pub async fn run_host(shared: Arc<Shared>, secret: String) {
     loop {
@@ -263,29 +265,6 @@ impl Session {
     }
 }
 
-fn fast_hash(data: &[u8]) -> u64 {
-    // FNV-1a over every 97th byte: cheap "did anything change" probe
-    let mut h: u64 = 0xcbf29ce484222325;
-    let mut i = 0usize;
-    while i < data.len() {
-        h ^= data[i] as u64;
-        h = h.wrapping_mul(0x100000001b3);
-        i += 97;
-    }
-    h ^= data.len() as u64;
-    h
-}
-
-fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
-        out.push(px[0]);
-        out.push(px[1]);
-        out.push(px[2]);
-    }
-    out
-}
-
 /// Grabs the primary monitor fresh on every frame. Reusing one cached
 /// `Monitor` handle can return stale device contexts on Windows, which looks
 /// like a frozen remote screen.
@@ -298,10 +277,37 @@ fn grab(mon_idx: usize) -> Option<image::RgbaImage> {
     m.capture_image().ok()
 }
 
+fn primary_index() -> Option<usize> {
+    let monitors = xcap::Monitor::all().ok()?;
+    if monitors.is_empty() {
+        return None;
+    }
+    Some(
+        monitors
+            .iter()
+            .position(|m| m.is_primary().unwrap_or(false))
+            .unwrap_or(0),
+    )
+}
+
+/// Streaming resolution for a captured screen (downscale wide screens).
+fn target_size(w: u32, h: u32) -> (u32, u32) {
+    if w > MAX_WIDTH {
+        let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
+        (MAX_WIDTH, nh.max(1))
+    } else {
+        (w.max(1), h.max(1))
+    }
+}
+
 fn selftest_log(line: &str) {
     use std::io::Write;
     let path = crate::ident::config_dir().join("captest.txt");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", line);
         let _ = f.flush();
     }
@@ -316,14 +322,10 @@ pub fn capture_selftest(rounds: u32) -> String {
         n,
         t_all.elapsed().as_millis()
     ));
-    let monitors = match xcap::Monitor::all() {
-        Ok(m) => m,
-        Err(e) => return format!("Monitor::all failed: {}", e),
+    let idx = match primary_index() {
+        Some(i) => i,
+        None => return "kein Monitor gefunden".to_string(),
     };
-    let idx = monitors
-        .iter()
-        .position(|m| m.is_primary().unwrap_or(false))
-        .unwrap_or(0);
     let mut out = String::new();
     for i in 0..rounds {
         let t = Instant::now();
@@ -331,26 +333,17 @@ pub fn capture_selftest(rounds: u32) -> String {
             Some(img) => {
                 let t_cap = t.elapsed().as_millis();
                 let (w, h) = (img.width(), img.height());
+                let (dw, dh) = target_size(w, h);
+                let rgba = img.into_raw();
                 let t1 = Instant::now();
-                let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
-                let small = image::imageops::thumbnail(&img, MAX_WIDTH, nh.max(1));
-                let rgba = small.into_raw();
+                let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
                 let t_scale = t1.elapsed().as_millis();
-                let hash = fast_hash(&rgba);
-                let t3 = Instant::now();
-                let rgb = rgba_to_rgb(&rgba);
-                let t_rgb = t3.elapsed().as_millis();
                 let t4 = Instant::now();
-                let mut buf: Vec<u8> = Vec::with_capacity(rgb.len() / 8);
-                {
-                    let mut enc =
-                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
-                    let _ = enc.encode(&rgb, MAX_WIDTH, nh.max(1), image::ExtendedColorType::Rgb8);
-                }
+                let jpeg = encoder::jpeg_rgb(&rgb, dw, dh, JPEG_QUALITY).unwrap_or_default();
                 let t_jpeg = t4.elapsed().as_millis();
                 out.push_str(&format!(
-                    "{}: {}x{} hash={:016x} | capture {} ms | scale {} ms | rgb {} ms | jpeg {} ms ({} KB) | total {} ms\n",
-                    i, w, h, hash, t_cap, t_scale, t_rgb, t_jpeg, buf.len() / 1024,
+                    "{}: {}x{} -> {}x{} | capture {} ms | scale+rgb {} ms | jpeg {} ms ({} KB) | total {} ms\n",
+                    i, w, h, dw, dh, t_cap, t_scale, t_jpeg, jpeg.len() / 1024,
                     t.elapsed().as_millis()
                 ));
             }
@@ -361,6 +354,157 @@ pub fn capture_selftest(rounds: u32) -> String {
     out
 }
 
+/// Benchmarks the old full-frame path against the new delta path, both on the
+/// real screen: first serial (pure encoder cost), then through the actual
+/// capture/encode pipeline (what the session really achieves).
+pub fn delta_selftest(rounds: u32) -> String {
+    let idx = match primary_index() {
+        Some(i) => i,
+        None => return "kein Monitor gefunden".to_string(),
+    };
+    let mut out = String::new();
+
+    // ---- pass A: full frame every time (v0.2 behaviour) ----
+    let mut a_ms = 0u128;
+    let mut a_bytes = 0usize;
+    let mut a_frames = 0u32;
+    for _ in 0..rounds {
+        let t = Instant::now();
+        if let Some(img) = grab(idx) {
+            let (w, h) = (img.width(), img.height());
+            let (dw, dh) = target_size(w, h);
+            let nh = ((h as f64) * (dw as f64) / (w as f64)).round() as u32;
+            let small = image::imageops::thumbnail(&img, dw, nh.max(1));
+            let rgba = small.into_raw();
+            let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+            for px in rgba.chunks_exact(4) {
+                rgb.push(px[0]);
+                rgb.push(px[1]);
+                rgb.push(px[2]);
+            }
+            let jpeg = encoder::jpeg_rgb(&rgb, dw, dh, JPEG_QUALITY).unwrap_or_default();
+            a_bytes += jpeg.len();
+            a_frames += 1;
+            a_ms += t.elapsed().as_millis();
+        }
+    }
+
+    // ---- pass B: new path, serial ----
+    let mut delta = Delta::new();
+    let mut b_ms = 0u128;
+    let mut b_cap = 0u128;
+    let mut b_scale = 0u128;
+    let mut b_enc = 0u128;
+    let mut b_bytes = 0usize;
+    let mut b_frames = 0u32;
+    let mut b_sent = 0u32;
+    let mut b_key = 0u32;
+    let mut dirty_sum = 0f32;
+    for _ in 0..rounds {
+        let t = Instant::now();
+        let t0 = Instant::now();
+        if let Some(img) = grab(idx) {
+            let cap = t0.elapsed().as_millis();
+            let (w, h) = (img.width(), img.height());
+            let (dw, dh) = target_size(w, h);
+            let rgba = img.into_raw();
+            let t1 = Instant::now();
+            let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
+            let sc = t1.elapsed().as_millis();
+            let t2 = Instant::now();
+            let res = delta.encode(&rgb, dw, dh);
+            let en = t2.elapsed().as_millis();
+            b_cap += cap;
+            b_scale += sc;
+            b_enc += en;
+            b_bytes += res.bytes;
+            b_frames += 1;
+            if res.msg.is_some() {
+                b_sent += 1;
+                dirty_sum += res.dirty;
+            }
+            if res.keyframe {
+                b_key += 1;
+            }
+            b_ms += t.elapsed().as_millis();
+        }
+    }
+
+    // ---- pass C: new path through the real pipeline (capture || encode) ----
+    let stop = Arc::new(AtomicBool::new(false));
+    let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32)>(1);
+    let stop_g = stop.clone();
+    let grabber = std::thread::spawn(move || {
+        let budget = Duration::from_millis(1000 / TARGET_FPS);
+        while !stop_g.load(Ordering::Relaxed) {
+            let t = Instant::now();
+            if let Some(img) = grab(idx) {
+                let (w, h) = (img.width(), img.height());
+                if raw_tx.try_send((img.into_raw(), w, h)).is_err() {
+                    // encoder busy - drop this frame
+                }
+            }
+            let dt = t.elapsed();
+            if dt < budget {
+                std::thread::sleep(budget - dt);
+            }
+        }
+    });
+    let mut delta_c = Delta::new();
+    let mut c_bytes = 0usize;
+    let mut c_frames = 0u32;
+    let t_c = Instant::now();
+    while c_frames < rounds {
+        match raw_rx.recv_timeout(Duration::from_millis(1500)) {
+            Ok((rgba, w, h)) => {
+                let (dw, dh) = target_size(w, h);
+                let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
+                let res = delta_c.encode(&rgb, dw, dh);
+                c_bytes += res.bytes;
+                c_frames += 1;
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(_) => break,
+        }
+    }
+    let c_secs = t_c.elapsed().as_secs_f32();
+    stop.store(true, Ordering::Relaxed);
+    let _ = grabber.join();
+
+    let f = |x: u32| if x == 0 { 1 } else { x };
+    out.push_str(&format!(
+        "A full-frame (v0.2): {} Frames, {} ms/Frame => {:.1} fps, {:.1} KB/Frame\n",
+        a_frames,
+        a_ms / f(a_frames) as u128,
+        1000.0 / (a_ms as f32 / f(a_frames) as f32).max(0.001),
+        a_bytes as f32 / f(a_frames) as f32 / 1024.0
+    ));
+    out.push_str(&format!(
+        "B delta seriell:     {} Frames, {} ms/Frame (capture {} | scale {} | encode {}) => {:.1} fps, {:.1} KB/Frame, {} gesendet, {} Keyframes, dirty {:.1}%\n",
+        b_frames,
+        b_ms / f(b_frames) as u128,
+        b_cap / f(b_frames) as u128,
+        b_scale / f(b_frames) as u128,
+        b_enc / f(b_frames) as u128,
+        1000.0 / (b_ms as f32 / f(b_frames) as f32).max(0.001),
+        b_bytes as f32 / f(b_frames) as f32 / 1024.0,
+        b_sent,
+        b_key,
+        if b_sent > 0 { dirty_sum / b_sent as f32 * 100.0 } else { 0.0 }
+    ));
+    out.push_str(&format!(
+        "C delta pipeline:    {} Frames in {:.2}s => {:.1} fps, {:.1} KB/Frame\n",
+        c_frames,
+        c_secs,
+        c_frames as f32 / c_secs.max(0.001),
+        c_bytes as f32 / f(c_frames) as f32 / 1024.0
+    ));
+    out
+}
+
+/// Capture thread + encode thread. The grabber keeps pulling screenshots while
+/// the encoder is still busy with the previous frame, so a session runs at
+/// roughly max(capture, encode) instead of capture + encode.
 fn capture_loop(
     stop: Arc<AtomicBool>,
     out: mpsc::UnboundedSender<Vec<u8>>,
@@ -392,64 +536,63 @@ fn capture_loop(
     }));
     drop(monitors);
 
-    let no_skip = std::env::var("FV_NOSKIP").is_ok();
+    // FV_NODELTA / FV_NOSKIP force a full frame every time (benchmarks, debugging)
+    let force_full = std::env::var("FV_NODELTA").is_ok() || std::env::var("FV_NOSKIP").is_ok();
     let frame_budget = Duration::from_millis(1000 / TARGET_FPS);
-    let mut last_hash = 0u64;
+
+    let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32)>(1);
+    let stop_grab = stop.clone();
+    let shared_grab = shared.clone();
+    let grabber = std::thread::spawn(move || {
+        let mut fails = 0u32;
+        while !stop_grab.load(Ordering::Relaxed) {
+            let t0 = Instant::now();
+            match grab(mon_idx) {
+                Some(img) => {
+                    fails = 0;
+                    let (w, h) = (img.width(), img.height());
+                    // channel full = encoder still busy, skip this frame
+                    let _ = raw_tx.try_send((img.into_raw(), w, h));
+                }
+                None => {
+                    fails += 1;
+                    if fails == 5 {
+                        shared_grab.set_host_status("Bildschirmaufnahme schlaegt fehl");
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+            let dt = t0.elapsed();
+            if dt < frame_budget {
+                std::thread::sleep(frame_budget - dt);
+            }
+        }
+    });
+
+    let mut delta = Delta::new();
     let mut frames = 0u32;
     let mut bytes = 0usize;
-    let mut fails = 0u32;
     let mut window = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let t0 = Instant::now();
-        match grab(mon_idx) {
-            Some(img) => {
-                fails = 0;
-                let (w, h) = (img.width(), img.height());
-                let (rgba, ow, oh) = if w > MAX_WIDTH {
-                    let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
-                    let small = image::imageops::thumbnail(&img, MAX_WIDTH, nh.max(1));
-                    (small.into_raw(), MAX_WIDTH, nh.max(1))
-                } else {
-                    (img.into_raw(), w, h)
-                };
-                let hash = fast_hash(&rgba);
-                if hash != last_hash || no_skip {
-                    last_hash = hash;
-                    let rgb = rgba_to_rgb(&rgba);
-                    let mut buf: Vec<u8> = Vec::with_capacity(rgb.len() / 8);
-                    {
-                        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                            &mut buf,
-                            JPEG_QUALITY,
-                        );
-                        if enc
-                            .encode(&rgb, ow, oh, image::ExtendedColorType::Rgb8)
-                            .is_err()
-                        {
-                            continue;
-                        }
-                    }
-                    frames += 1;
-                    bytes += buf.len();
-                    if out
-                        .send(encode(&Msg::Frame {
-                            width: ow,
-                            height: oh,
-                            jpeg: buf,
-                        }))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-            None => {
-                fails += 1;
-                if fails == 5 {
-                    shared.set_host_status("Bildschirmaufnahme schlaegt fehl");
-                }
-                std::thread::sleep(Duration::from_millis(250));
+        let (rgba, w, h) = match raw_rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(v) => v,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let (dw, dh) = target_size(w, h);
+        let rgb = encoder::scale_to_rgb(&rgba, w, h, dw, dh);
+        drop(rgba);
+        let res = if force_full {
+            delta.encode_full(&rgb, dw, dh)
+        } else {
+            delta.encode(&rgb, dw, dh)
+        };
+        if let Some(msg) = res.msg {
+            frames += 1;
+            bytes += res.bytes;
+            if out.send(encode(&msg)).is_err() {
+                break;
             }
         }
 
@@ -464,12 +607,10 @@ fn capture_loop(
             bytes = 0;
             window = Instant::now();
         }
-
-        let dt = t0.elapsed();
-        if dt < frame_budget {
-            std::thread::sleep(frame_budget - dt);
-        }
     }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = grabber.join();
 }
 
 fn named_key(code: u32) -> Option<enigo::Key> {

@@ -9,6 +9,7 @@
 //! the session password with FV_PASSWORD.
 
 mod crypto;
+mod encoder;
 mod hostside;
 mod ident;
 mod net;
@@ -57,6 +58,19 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // delta/full-frame benchmark:  freeviewer --deltatest [rounds]
+    if std::env::args().any(|a| a == "--deltatest") {
+        let rounds: u32 = std::env::args()
+            .skip_while(|a| a != "--deltatest")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+        let report = hostside::delta_selftest(rounds);
+        let path = ident::config_dir().join("deltatest.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
     // in --connect test mode we only act as a viewer (otherwise this process
     // would register the same machine identity and kick the real host offline)
     let viewer_only = std::env::args().any(|a| a == "--connect");
@@ -244,7 +258,7 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("FreeViewer");
-            ui.label(egui::RichText::new("v0.2 - frei, verschluesselt, ohne Konto").weak());
+            ui.label(egui::RichText::new("v0.3 - frei, verschluesselt, ohne Konto").weak());
         });
         ui.separator();
         ui.add_space(10.0);
