@@ -50,3 +50,9 @@ build.err
 rel.out
 rel.err
 relay/hosts.json
+
+# local test helper scripts (input probe runs, patch scripts)
+t_*.bat
+t_*.ps1
+patch*.ps1
+sample.log
