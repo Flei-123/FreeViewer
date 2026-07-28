@@ -1,0 +1,197 @@
+//! End-to-end crypto for FreeViewer.
+//!
+//! Handshake (all frames go through the relay, which cannot read them):
+//!   viewer -> host : 0x01 || client_pub(32)
+//!   host -> viewer : 0x02 || host_pub(32) || salt(16)
+//!   viewer -> host : 0x03 || proof(32)
+//!   host -> viewer : 0x04            (password ok)
+//!                  | 0x05            (password wrong)
+//!   afterwards     : 0x10 || nonce(12) || AES-256-GCM ciphertext
+//!
+//! Session key  = HKDF-SHA256(ikm = X25519 shared secret, salt, "freeviewer-v1")
+//! Password key = Argon2id(password, salt)
+//! proof        = HMAC-SHA256(password key, "fv-auth" || client_pub || host_pub || salt)
+//!
+//! The relay never learns the password (only a proof bound to this one
+//! session's ephemeral keys) and cannot decrypt the stream.
+
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use hkdf::Hkdf;
+use hmac::{Hmac, Mac};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use sha2::Sha256;
+use x25519_dalek::{PublicKey, StaticSecret};
+
+type HmacSha256 = Hmac<Sha256>;
+
+pub const TAG_HELLO: u8 = 0x01;
+pub const TAG_HELLO_ACK: u8 = 0x02;
+pub const TAG_PROOF: u8 = 0x03;
+pub const TAG_OK: u8 = 0x04;
+pub const TAG_FAIL: u8 = 0x05;
+pub const TAG_DATA: u8 = 0x10;
+
+pub fn random_bytes(n: usize) -> Vec<u8> {
+    let mut v = vec![0u8; n];
+    OsRng.fill_bytes(&mut v);
+    v
+}
+
+pub struct Keypair {
+    pub secret: StaticSecret,
+    pub public: [u8; 32],
+}
+
+pub fn keypair() -> Keypair {
+    let mut raw = [0u8; 32];
+    OsRng.fill_bytes(&mut raw);
+    let secret = StaticSecret::from(raw);
+    let public = PublicKey::from(&secret).to_bytes();
+    Keypair { secret, public }
+}
+
+pub fn session_key(secret: &StaticSecret, peer_pub: &[u8; 32], salt: &[u8; 16]) -> [u8; 32] {
+    let shared = secret.diffie_hellman(&PublicKey::from(*peer_pub));
+    let hk = Hkdf::<Sha256>::new(Some(salt), shared.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(b"freeviewer-v1 session", &mut okm)
+        .expect("hkdf expand");
+    okm
+}
+
+/// Argon2id over the session password. Deliberately slow so that a stolen
+/// proof cannot be brute forced cheaply.
+pub fn password_key(password: &str, salt: &[u8; 16]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let a = argon2::Argon2::default();
+    if a.hash_password_into(password.as_bytes(), salt, &mut out).is_err() {
+        // fall back to a plain hash so the handshake still completes deterministically
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(salt).expect("hmac key");
+        mac.update(password.as_bytes());
+        out.copy_from_slice(&mac.finalize().into_bytes());
+    }
+    out
+}
+
+pub fn auth_proof(
+    pw_key: &[u8; 32],
+    client_pub: &[u8; 32],
+    host_pub: &[u8; 32],
+    salt: &[u8; 16],
+) -> [u8; 32] {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(pw_key).expect("hmac key");
+    mac.update(b"fv-auth");
+    mac.update(client_pub);
+    mac.update(host_pub);
+    mac.update(salt);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&mac.finalize().into_bytes());
+    out
+}
+
+pub fn proof_matches(expected: &[u8; 32], got: &[u8]) -> bool {
+    if got.len() != 32 {
+        return false;
+    }
+    // constant time compare
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= expected[i] ^ got[i];
+    }
+    diff == 0
+}
+
+pub struct Cipher {
+    aead: Aes256Gcm,
+    dir_send: u8,
+    dir_recv: u8,
+    ctr_send: u64,
+    last_recv: u64,
+}
+
+impl Cipher {
+    /// `is_host` only decides which nonce direction byte is used, so host and
+    /// viewer can never collide on a nonce.
+    pub fn new(key: &[u8; 32], is_host: bool) -> Self {
+        let aead = Aes256Gcm::new_from_slice(key).expect("aes key");
+        Self {
+            aead,
+            dir_send: if is_host { 1 } else { 2 },
+            dir_recv: if is_host { 2 } else { 1 },
+            ctr_send: 0,
+            last_recv: 0,
+        }
+    }
+
+    pub fn seal(&mut self, plain: &[u8]) -> Vec<u8> {
+        self.ctr_send += 1;
+        let mut nonce = [0u8; 12];
+        nonce[0] = self.dir_send;
+        nonce[4..12].copy_from_slice(&self.ctr_send.to_be_bytes());
+        let ct = self
+            .aead
+            .encrypt(Nonce::from_slice(&nonce), plain)
+            .expect("aes encrypt");
+        let mut out = Vec::with_capacity(13 + ct.len());
+        out.push(TAG_DATA);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    pub fn open(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        if frame.len() < 14 || frame[0] != TAG_DATA {
+            return None;
+        }
+        let nonce = &frame[1..13];
+        if nonce[0] != self.dir_recv {
+            return None;
+        }
+        let mut ctr_bytes = [0u8; 8];
+        ctr_bytes.copy_from_slice(&nonce[4..12]);
+        let ctr = u64::from_be_bytes(ctr_bytes);
+        if ctr <= self.last_recv {
+            return None; // replay / reorder
+        }
+        let pt = self
+            .aead
+            .decrypt(Nonce::from_slice(nonce), &frame[13..])
+            .ok()?;
+        self.last_recv = ctr;
+        Some(pt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_and_channel() {
+        let host = keypair();
+        let viewer = keypair();
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&random_bytes(16));
+
+        let k_host = session_key(&host.secret, &viewer.public, &salt);
+        let k_view = session_key(&viewer.secret, &host.public, &salt);
+        assert_eq!(k_host, k_view, "ECDH must agree");
+
+        let pw = password_key("hunter2", &salt);
+        let good = auth_proof(&pw, &viewer.public, &host.public, &salt);
+        assert!(proof_matches(&good, &good));
+        let bad = auth_proof(&password_key("wrong", &salt), &viewer.public, &host.public, &salt);
+        assert!(!proof_matches(&good, &bad));
+
+        let mut h = Cipher::new(&k_host, true);
+        let mut v = Cipher::new(&k_view, false);
+        let frame = h.seal(b"hello viewer");
+        assert_eq!(v.open(&frame).unwrap(), b"hello viewer");
+        // replay must fail
+        assert!(v.open(&frame).is_none());
+        let back = v.seal(b"hello host");
+        assert_eq!(h.open(&back).unwrap(), b"hello host");
+    }
+}

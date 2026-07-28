@@ -1,154 +1,113 @@
-# FreeViewer 🖥️
+# FreeViewer
+
+**Open source remote desktop in Rust - a free TeamViewer alternative.**
+Connect with a 9 digit ID and a session password, through a relay, end-to-end encrypted.
+No account, no subscription, no telemetry.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-windows%20%7C%20linux%20%7C%20macos-lightgrey)](https://github.com/Flei-123/FreeViewer)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 
-**Open-source remote desktop software - A free TeamViewer alternative built in Rust**
+> Status: **v0.2 - working prototype.** Screen streaming, remote mouse and
+> keyboard, relay and crypto are implemented and tested end to end over the
+> internet. File transfer, clipboard sync and multi monitor are not done yet.
 
-FreeViewer is a cross-platform, secure, and fast remote desktop application that allows you to access and control computers remotely. Built from the ground up in Rust for maximum performance and security.
+## What works today
 
-> 🚧 **Status**: Early Development - This is an active project under development. Core features are being implemented.
+- **9 digit ID + session password** (TeamViewer style). The ID is stable per
+  machine, the password is regenerated on every start (or set it yourself).
+- **Relay based connections** - works behind NAT/CGNAT/firewalls, no port
+  forwarding, no VPN. A single outgoing `wss://` connection is enough.
+- **End-to-end encryption** - X25519 key exchange + AES-256-GCM. The relay only
+  routes opaque ciphertext, it never sees the password or the screen.
+- **Password authentication with Argon2id**, bound to the ephemeral session
+  keys (a captured proof cannot be replayed against another session).
+- **Screen streaming** - JPEG frames, downscaled to max 1600 px width,
+  15 fps target, unchanged frames are skipped (idle screen = almost no traffic).
+- **Remote input** - absolute mouse positioning, all three buttons, scroll
+  wheel, keyboard including modifiers (Shift/Ctrl/Alt) and F1-F12.
+- **Live stats** - resolution, fps, kbit/s and round trip time in the session bar.
 
-## ✨ Features
+## Quick start
 
-### 🔒 Security & Privacy
-- **End-to-end encryption** using AES-256-GCM
-- **Zero-knowledge architecture** - we can't see your sessions
-- **Self-hosted option** - run your own relay servers
-- **No telemetry** - your privacy is respected
-
-### 🚀 Performance
-- **QUIC protocol** for ultra-fast connections
-- **Hardware-accelerated** screen capture
-- **Adaptive quality** - automatically adjusts to network conditions
-- **Low latency** input forwarding
-
-### 🌐 Cross-Platform
-- **Windows** (7, 8, 10, 11)
-- **Linux** (Ubuntu, Debian, Fedora, Arch, etc.)
-- **macOS** (10.14+)
-
-### 📋 Core Functionality
-- **Remote desktop control** - Full mouse and keyboard control
-- **Screen sharing** - View remote screens in real-time
-- **File transfer** - Drag & drop files between computers
-- **Clipboard sync** - Share clipboard content
-- **Multi-monitor support** - Access all connected displays
-- **Session recording** - Record remote sessions (optional)
-
-### 🛠️ Advanced Features
-- **Unattended access** - Connect without user interaction
-- **Custom resolutions** - Optimize for your network
-- **Wake-on-LAN** - Wake up sleeping computers
-- **Chat** - Built-in text chat during sessions
-- **Voice chat** - Talk while sharing screens (planned)
-
-## 🚀 Quick Start
-
-### Installation
-
-#### From Releases (Recommended)
-Download the latest release for your platform from the [Releases page](https://github.com/Flei-123/FreeViewer/releases).
-
-#### From Source
 ```bash
-# Clone the repository
 git clone https://github.com/Flei-123/FreeViewer.git
 cd FreeViewer
-
-# Build and run
 cargo run --release
 ```
 
-### Usage
+Both computers run the same binary. The left card shows *your* ID and password,
+the right card connects to someone else's.
 
-1. **Start FreeViewer** on both computers
-2. **Generate ID** - Each computer gets a unique ID
-3. **Connect** - Enter the remote computer's ID
-4. **Authenticate** - Enter the password shown on remote screen
-5. **Control** - You're now connected!
+Environment variables:
 
-## 🏗️ Architecture
+| Variable      | Meaning                                    | Default                            |
+| ------------- | ------------------------------------------ | ---------------------------------- |
+| `FV_RELAY`    | relay websocket URL                        | `wss://jarvis.fleitec.com/fv/ws`   |
+| `FV_PASSWORD` | fixed session password (unattended access) | random on every start              |
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Client GUI    │    │  Relay Server   │    │   Remote Host   │
-│                 │◄──►│                 │◄──►│                 │
-│ • Control UI    │    │ • NAT traversal │    │ • Screen capture│
-│ • Display       │    │ • Connection    │    │ • Input handler │
-│ • Input         │    │   routing       │    │ • File server   │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
+Extra command line modes (handy for servers and testing):
 
-### Components
-
-- **Client** (`src/client/`) - GUI application for controlling remote computers
-- **Host** (`src/host/`) - Background service that allows incoming connections
-- **Daemon** (`src/daemon/`) - System service for unattended access
-- **Protocol** (`src/protocol/`) - Network protocol implementation
-- **Security** (`src/security/`) - Encryption and authentication
-- **Capture** (`src/capture/`) - Screen capture and input simulation
-
-## 🔧 Development
-
-### Prerequisites
-- Rust 1.70+ 
-- Platform-specific dependencies:
-  - **Windows**: Visual Studio Build Tools
-  - **Linux**: X11 development libraries
-  - **macOS**: Xcode command line tools
-
-### Building
 ```bash
-# Debug build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Run with logging
-RUST_LOG=debug cargo run
+freeviewer --headless                       # host only, no window, prints the ID
+freeviewer --connect <id> <password> [n]    # viewer only, pulls n frames, prints stats
 ```
 
-### Testing
+## Architecture
+
+```
++---------------+        wss (TLS)        +--------------+        wss (TLS)        +---------------+
+|   Viewer      | <---------------------> |    Relay     | <---------------------> |     Host      |
+| egui window   |   AES-256-GCM payload   | dumb pipe,   |   AES-256-GCM payload   | xcap capture  |
+| input capture |   (relay cannot read)   | id directory |                         | enigo input   |
++---------------+                         +--------------+                         +---------------+
+```
+
+- `src/main.rs` - egui GUI, input capture, session view
+- `src/hostside.rs` - screen capture thread, input execution thread, host session
+- `src/viewer.rs` - viewer session, frame decode
+- `src/crypto.rs` - X25519 + HKDF + Argon2id + AES-256-GCM channel
+- `src/proto.rs` - compact binary message format
+- `src/net.rs` - relay websocket transport
+- `relay/relay.js` - the relay (Node.js, ~200 lines, zero knowledge)
+
+### Handshake
+
+```
+viewer -> host : 0x01 || client_pub(32)
+host -> viewer : 0x02 || host_pub(32) || salt(16)
+viewer -> host : 0x03 || HMAC(Argon2id(password, salt), "fv-auth"||pubs||salt)
+host -> viewer : 0x04 ok  |  0x05 wrong password
+both           : 0x10 || nonce(12) || AES-256-GCM(payload)
+```
+
+Session key = HKDF-SHA256(X25519 shared secret, salt). Nonces are direction
+tagged and strictly increasing, so replay and reflection are rejected.
+
+## Run your own relay
+
+The relay is a small Node.js service - anyone can host their own and point
+clients at it with `FV_RELAY`.
+
 ```bash
-# Run all tests
-cargo test
-
-# Run specific test
-cargo test protocol::tests
+node relay/relay.js          # listens on :7180, websocket path /fv/ws
+node relay/test_relay.js     # end to end smoke test
 ```
 
-## 🤝 Contributing
+It keeps only `sha256(host_secret) -> id` on disk so IDs stay stable. It has no
+idea what the sessions contain.
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+## Roadmap
 
-### Development Roadmap
-- [ ] Basic remote desktop functionality
-- [ ] File transfer system
-- [ ] Mobile apps (Android/iOS)
-- [ ] Web client
-- [ ] Voice chat integration
-- [ ] Session recording
-- [ ] Plugin system
+- [x] relay + end-to-end crypto + ID/password login
+- [x] screen streaming, remote mouse/keyboard
+- [ ] file transfer (drag & drop)
+- [ ] clipboard sync
+- [ ] multi monitor selection
+- [ ] delta/tile encoding instead of full JPEG frames, hardware encode
+- [ ] direct P2P (UDP hole punching) with relay fallback
+- [ ] unattended access as a service, Linux/macOS builds
+- [ ] session recording, chat
 
-## 📄 License
+## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Inspired by TeamViewer, AnyDesk, and other remote desktop solutions
-- Built with amazing Rust libraries from the community
-- Special thanks to all contributors and testers
-
-## 📞 Support
-
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/Flei-123/FreeViewer/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/Flei-123/FreeViewer/discussions)
-- 📧 **Email**: flei.dev@example.com
-
----
-
-**⭐ Star this repository if you find FreeViewer useful!**
+GPL-3.0 - see [LICENSE](LICENSE).

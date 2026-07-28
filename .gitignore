@@ -43,3 +43,10 @@ config/secrets.toml
 # Coverage
 tarpaulin-report.html
 lcov.info
+
+# local build/test artifacts
+build.out
+build.err
+rel.out
+rel.err
+relay/hosts.json
