@@ -41,3 +41,17 @@ pub fn random_password() -> String {
         .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
         .collect()
 }
+
+/// Optional fixed password for unattended access:
+/// put it into <config dir>/password.txt (one line). If the file is missing a
+/// fresh random session password is generated on every start.
+pub fn fixed_password() -> Option<String> {
+    let file = config_dir().join("password.txt");
+    let s = fs::read_to_string(file).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}

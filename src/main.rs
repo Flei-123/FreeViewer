@@ -42,14 +42,31 @@ fn main() -> eframe::Result<()> {
     let _ = RT.set(runtime);
 
     let secret = ident::load_or_create_secret();
-    let password = std::env::var("FV_PASSWORD").unwrap_or_else(|_| ident::random_password());
+    let password = std::env::var("FV_PASSWORD")
+        .ok()
+        .or_else(ident::fixed_password)
+        .unwrap_or_else(ident::random_password);
     let shared = Arc::new(Shared::new(relay, password));
 
-    let host_shared = shared.clone();
-    let host_secret = secret.clone();
-    rt().spawn(async move {
-        hostside::run_host(host_shared, host_secret).await;
-    });
+    // capture self test:  freeviewer --captest   (writes <config>/captest.txt)
+    if std::env::args().any(|a| a == "--captest") {
+        let report = hostside::capture_selftest(8);
+        let path = ident::config_dir().join("captest.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // in --connect test mode we only act as a viewer (otherwise this process
+    // would register the same machine identity and kick the real host offline)
+    let viewer_only = std::env::args().any(|a| a == "--connect");
+    if !viewer_only {
+        let host_shared = shared.clone();
+        let host_secret = secret.clone();
+        rt().spawn(async move {
+            hostside::run_host(host_shared, host_secret).await;
+        });
+    }
 
     // headless host mode (no window) - handy for servers and for testing
     if std::env::args().any(|a| a == "--headless") {

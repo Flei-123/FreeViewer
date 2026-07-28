@@ -56,7 +56,11 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                     serde_json::from_str(t.as_str()).unwrap_or(serde_json::Value::Null);
                 match net::msg_type(&v) {
                     "registered" => {
-                        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let id = v
+                            .get("id")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         *shared.my_id.lock().unwrap() = id;
                         shared.set_host_status("Bereit - warte auf Verbindungen");
                     }
@@ -223,14 +227,19 @@ impl Session {
                 self.cipher = Some(cipher);
                 self.input_tx = Some(in_tx);
                 self.stage = Stage::Live;
-                *shared.host_peer.lock().unwrap() = "Verbunden - Bildschirm wird geteilt".to_string();
+                *shared.host_peer.lock().unwrap() =
+                    "Verbunden - Bildschirm wird geteilt".to_string();
                 Ok(())
             }
             (Stage::Live, crypto::TAG_DATA) => {
                 let plain = {
-                    let c = self.cipher.as_ref().ok_or_else(|| anyhow!("kein Schluessel"))?;
+                    let c = self
+                        .cipher
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("kein Schluessel"))?;
                     let mut c = c.lock().unwrap();
-                    c.open(data).ok_or_else(|| anyhow!("Entschluesselung fehlgeschlagen"))?
+                    c.open(data)
+                        .ok_or_else(|| anyhow!("Entschluesselung fehlgeschlagen"))?
                 };
                 if let Some(m) = decode(&plain) {
                     match m {
@@ -277,6 +286,81 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Grabs the primary monitor fresh on every frame. Reusing one cached
+/// `Monitor` handle can return stale device contexts on Windows, which looks
+/// like a frozen remote screen.
+fn grab(mon_idx: usize) -> Option<image::RgbaImage> {
+    let mut all = xcap::Monitor::all().ok()?;
+    if mon_idx >= all.len() {
+        return None;
+    }
+    let m = all.swap_remove(mon_idx);
+    m.capture_image().ok()
+}
+
+fn selftest_log(line: &str) {
+    use std::io::Write;
+    let path = crate::ident::config_dir().join("captest.txt");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", line);
+        let _ = f.flush();
+    }
+}
+
+pub fn capture_selftest(rounds: u32) -> String {
+    selftest_log("--- captest start ---");
+    let t_all = Instant::now();
+    let n = xcap::Monitor::all().map(|v| v.len()).unwrap_or(0);
+    selftest_log(&format!(
+        "Monitor::all -> {} monitors in {} ms",
+        n,
+        t_all.elapsed().as_millis()
+    ));
+    let monitors = match xcap::Monitor::all() {
+        Ok(m) => m,
+        Err(e) => return format!("Monitor::all failed: {}", e),
+    };
+    let idx = monitors
+        .iter()
+        .position(|m| m.is_primary().unwrap_or(false))
+        .unwrap_or(0);
+    let mut out = String::new();
+    for i in 0..rounds {
+        let t = Instant::now();
+        match grab(idx) {
+            Some(img) => {
+                let t_cap = t.elapsed().as_millis();
+                let (w, h) = (img.width(), img.height());
+                let t1 = Instant::now();
+                let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
+                let small = image::imageops::thumbnail(&img, MAX_WIDTH, nh.max(1));
+                let rgba = small.into_raw();
+                let t_scale = t1.elapsed().as_millis();
+                let hash = fast_hash(&rgba);
+                let t3 = Instant::now();
+                let rgb = rgba_to_rgb(&rgba);
+                let t_rgb = t3.elapsed().as_millis();
+                let t4 = Instant::now();
+                let mut buf: Vec<u8> = Vec::with_capacity(rgb.len() / 8);
+                {
+                    let mut enc =
+                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+                    let _ = enc.encode(&rgb, MAX_WIDTH, nh.max(1), image::ExtendedColorType::Rgb8);
+                }
+                let t_jpeg = t4.elapsed().as_millis();
+                out.push_str(&format!(
+                    "{}: {}x{} hash={:016x} | capture {} ms | scale {} ms | rgb {} ms | jpeg {} ms ({} KB) | total {} ms\n",
+                    i, w, h, hash, t_cap, t_scale, t_rgb, t_jpeg, buf.len() / 1024,
+                    t.elapsed().as_millis()
+                ));
+            }
+            None => out.push_str(&format!("{}: capture failed\n", i)),
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    out
+}
+
 fn capture_loop(
     stop: Arc<AtomicBool>,
     out: mpsc::UnboundedSender<Vec<u8>>,
@@ -294,29 +378,33 @@ fn capture_loop(
         shared.set_host_status("Kein Bildschirm gefunden");
         return;
     }
-    let mon = monitors
+    let mon_idx = monitors
         .iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .unwrap_or(&monitors[0]);
+        .position(|m| m.is_primary().unwrap_or(false))
+        .unwrap_or(0);
 
-    let sw = mon.width().unwrap_or(1920);
-    let sh = mon.height().unwrap_or(1080);
+    let sw = monitors[mon_idx].width().unwrap_or(1920);
+    let sh = monitors[mon_idx].height().unwrap_or(1080);
     *screen.lock().unwrap() = (sw, sh);
     let _ = out.send(encode(&Msg::ScreenInfo {
         width: sw,
         height: sh,
     }));
+    drop(monitors);
 
+    let no_skip = std::env::var("FV_NOSKIP").is_ok();
     let frame_budget = Duration::from_millis(1000 / TARGET_FPS);
     let mut last_hash = 0u64;
     let mut frames = 0u32;
     let mut bytes = 0usize;
+    let mut fails = 0u32;
     let mut window = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
-        match mon.capture_image() {
-            Ok(img) => {
+        match grab(mon_idx) {
+            Some(img) => {
+                fails = 0;
                 let (w, h) = (img.width(), img.height());
                 let (rgba, ow, oh) = if w > MAX_WIDTH {
                     let nh = ((h as f64) * (MAX_WIDTH as f64) / (w as f64)).round() as u32;
@@ -326,13 +414,15 @@ fn capture_loop(
                     (img.into_raw(), w, h)
                 };
                 let hash = fast_hash(&rgba);
-                if hash != last_hash {
+                if hash != last_hash || no_skip {
                     last_hash = hash;
                     let rgb = rgba_to_rgb(&rgba);
                     let mut buf: Vec<u8> = Vec::with_capacity(rgb.len() / 8);
                     {
-                        let mut enc =
-                            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+                        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                            &mut buf,
+                            JPEG_QUALITY,
+                        );
                         if enc
                             .encode(&rgb, ow, oh, image::ExtendedColorType::Rgb8)
                             .is_err()
@@ -354,17 +444,22 @@ fn capture_loop(
                     }
                 }
             }
-            Err(_) => {
+            None => {
+                fails += 1;
+                if fails == 5 {
+                    shared.set_host_status("Bildschirmaufnahme schlaegt fehl");
+                }
                 std::thread::sleep(Duration::from_millis(250));
             }
         }
 
         if window.elapsed() >= Duration::from_secs(1) {
             let secs = window.elapsed().as_secs_f32();
-            let mut st = shared.stats.lock().unwrap();
-            st.fps = frames as f32 / secs;
-            st.kbps = (bytes as f32 * 8.0 / 1000.0) / secs;
-            drop(st);
+            {
+                let mut st = shared.stats.lock().unwrap();
+                st.fps = frames as f32 / secs;
+                st.kbps = (bytes as f32 * 8.0 / 1000.0) / secs;
+            }
             frames = 0;
             bytes = 0;
             window = Instant::now();
@@ -443,14 +538,22 @@ fn input_loop(rx: std::sync::mpsc::Receiver<Msg>, screen: Arc<Mutex<(u32, u32)>>
                     2 => Button::Middle,
                     _ => Button::Left,
                 };
-                let d = if down { Direction::Press } else { Direction::Release };
+                let d = if down {
+                    Direction::Press
+                } else {
+                    Direction::Release
+                };
                 let _ = enigo.button(b, d);
             }
             Msg::Wheel { lines } => {
                 let _ = enigo.scroll(-lines, Axis::Vertical);
             }
             Msg::Key { code, named, down } => {
-                let d = if down { Direction::Press } else { Direction::Release };
+                let d = if down {
+                    Direction::Press
+                } else {
+                    Direction::Release
+                };
                 let key = if named {
                     named_key(code)
                 } else {

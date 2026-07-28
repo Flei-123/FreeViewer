@@ -50,6 +50,10 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     let mut cipher: Option<Arc<Mutex<Cipher>>> = None;
     let started = Instant::now();
     let mut seq: u64 = 0;
+    // rolling stats for the session bar
+    let mut win_start = Instant::now();
+    let mut win_frames = 0u32;
+    let mut win_bytes = 0usize;
     let mut ping_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let res: Result<()> = loop {
@@ -168,6 +172,19 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                 height,
                                 jpeg,
                             }) => {
+                                win_frames += 1;
+                                win_bytes += jpeg.len();
+                                if win_start.elapsed() >= Duration::from_secs(1) {
+                                    let secs = win_start.elapsed().as_secs_f32();
+                                    {
+                                        let mut st = shared.stats.lock().unwrap();
+                                        st.fps = win_frames as f32 / secs;
+                                        st.kbps = (win_bytes as f32 * 8.0 / 1000.0) / secs;
+                                    }
+                                    win_frames = 0;
+                                    win_bytes = 0;
+                                    win_start = Instant::now();
+                                }
                                 if let Ok(img) = image::load_from_memory_with_format(
                                     &jpeg,
                                     image::ImageFormat::Jpeg,
