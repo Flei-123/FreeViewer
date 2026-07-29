@@ -234,36 +234,40 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                 Ok(p) => {
                                     let sink = pipe.sender();
                                     let sh_v = shared.clone();
-                                    let p_punch = p.clone();
-                                    let p_recv = p.clone();
                                     let sh_off = shared.clone();
+                                    let sh_state = shared.clone();
                                     let p_off = p.clone();
                                     tokio::spawn(async move {
+                                        // STUN shares this socket with the
+                                        // receive loop, so ask first and only
+                                        // then start listening - otherwise the
+                                        // loop swallows the STUN answer and we
+                                        // never learn our public address.
                                         let addrs = p_off.candidates().await;
                                         crate::capture::log_line(&format!(
                                             "p2p eigene Kandidaten: {:?}",
                                             addrs
                                         ));
                                         sh_off.send_input(Msg::P2pOffer { token: 0, addrs });
+                                        let p_punch = p_off.clone();
+                                        tokio::spawn(p_punch.punch_loop(move |direct, _rtt| {
+                                            sh_state.direct.store(direct, Ordering::Relaxed);
+                                        }));
+                                        tokio::spawn(p_off.recv_loop(move |plain| {
+                                            sh_v.video_bytes
+                                                .fetch_add(plain.len() as u64, Ordering::Relaxed);
+                                            if let Some(Msg::Video {
+                                                width,
+                                                height,
+                                                key,
+                                                data,
+                                            }) = decode(&plain)
+                                            {
+                                                sh_v.udp_frames.fetch_add(1, Ordering::Relaxed);
+                                                let _ = sink.send((width, height, key, data));
+                                            }
+                                        }));
                                     });
-                                    let sh_state = shared.clone();
-                                    tokio::spawn(p_punch.punch_loop(move |direct, _rtt| {
-                                        sh_state.direct.store(direct, Ordering::Relaxed);
-                                    }));
-                                    tokio::spawn(p_recv.recv_loop(move |plain| {
-                                        sh_v.video_bytes
-                                            .fetch_add(plain.len() as u64, Ordering::Relaxed);
-                                        if let Some(Msg::Video {
-                                            width,
-                                            height,
-                                            key,
-                                            data,
-                                        }) = decode(&plain)
-                                        {
-                                            sh_v.udp_frames.fetch_add(1, Ordering::Relaxed);
-                                            let _ = sink.send((width, height, key, data));
-                                        }
-                                    }));
                                     p2p = Some(p);
                                 }
                                 Err(e) => {
