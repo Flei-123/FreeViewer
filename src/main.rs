@@ -18,6 +18,7 @@ mod ident;
 mod input;
 mod net;
 mod p2p;
+mod partners;
 mod proto;
 mod selftest;
 mod shared;
@@ -423,6 +424,16 @@ struct App {
     hint: String,
     /// Is a permanent password stored for this machine?
     pw_fixed: bool,
+    /// Everyone we connected to before.
+    book: partners::Book,
+    /// Store the password of the next connection?
+    remember_pw: bool,
+    /// Entry currently being renamed: (id, buffer).
+    renaming: Option<(String, String)>,
+    /// Running session: partner id + when it started.
+    session: Option<(String, std::time::Instant)>,
+    /// Until when the "how do I get out" hint stays on screen.
+    hint_until: Option<std::time::Instant>,
 }
 
 impl App {
@@ -437,6 +448,11 @@ impl App {
             viewer_task: None,
             hint: String::new(),
             pw_fixed: ident::has_fixed_password(),
+            book: partners::Book::load(),
+            remember_pw: false,
+            renaming: None,
+            session: None,
+            hint_until: None,
         }
     }
 
@@ -455,13 +471,25 @@ impl App {
         let pw = self.partner_pw.clone();
         self.tex = None;
         self.last_seq = 0;
+        self.book.started(&id, &pw, self.remember_pw);
+        self.session = Some((id.clone(), std::time::Instant::now()));
+        self.hint_until = Some(std::time::Instant::now() + Duration::from_secs(8));
         self.shared.mode.store(proto::MODE_ADMIN, Ordering::Relaxed);
         self.viewer_task = Some(rt().spawn(async move {
             viewer::run_viewer(sh, id, pw).await;
         }));
     }
 
+    /// Books the time of a finished session into the address book.
+    fn close_session(&mut self) {
+        if let Some((id, started)) = self.session.take() {
+            self.book.ended(&id, started.elapsed().as_secs());
+        }
+        self.hint_until = None;
+    }
+
     fn stop_session(&mut self) {
+        self.close_session();
         vinput::set_active(false);
         // release modifiers that might still be held down on the remote side
         for code in [proto::KEY_SHIFT, proto::KEY_CTRL, proto::KEY_ALT] {
@@ -779,7 +807,13 @@ impl App {
                         .password(true)
                         .desired_width(200.0),
                 );
-                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.remember_pw, "Passwort merken")
+                        .on_hover_text(
+                            "Wird verschluesselt neben der Geraete-Kennung abgelegt und nur auf diesem PC entschluesselbar.",
+                        );
+                });
+                ui.add_space(10.0);
                 let btn = egui::Button::new(if connecting {
                     "Verbinde..."
                 } else {
@@ -788,8 +822,10 @@ impl App {
                 if ui.add_enabled(!connecting, btn).clicked() {
                     self.start_session();
                 }
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.label(egui::RichText::new(viewer_status).weak());
+                ui.add_space(6.0);
+                self.partner_list(ui, connecting);
             });
         });
 
@@ -802,6 +838,133 @@ impl App {
                 .weak()
                 .size(11.0),
         );
+    }
+
+    /// "Zuletzt verbunden" - the address book. Favourites first, one click
+    /// fills the form, one more connects.
+    fn partner_list(&mut self, ui: &mut egui::Ui, connecting: bool) {
+        let list = self.book.sorted();
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Zuletzt verbunden").strong());
+            if list.is_empty() {
+                ui.label(
+                    egui::RichText::new("- noch niemand -")
+                        .weak()
+                        .size(11.0),
+                );
+            }
+        });
+
+        let mut connect_now: Option<String> = None;
+        let mut fill: Option<String> = None;
+        let mut fav: Option<String> = None;
+        let mut del: Option<String> = None;
+        let mut rename_done: Option<(String, String)> = None;
+        let mut rename_start: Option<String> = None;
+
+        egui::ScrollArea::vertical()
+            .max_height(150.0)
+            .show(ui, |ui| {
+                for p in &list {
+                    ui.horizontal(|ui| {
+                        let star = if p.favorite { "*" } else { "-" };
+                        if ui
+                            .small_button(star)
+                            .on_hover_text("Anheften / loesen")
+                            .clicked()
+                        {
+                            fav = Some(p.id.clone());
+                        }
+
+                        if let Some((rid, buf)) = self.renaming.as_mut() {
+                            if rid == &p.id {
+                                let r = ui.add(
+                                    egui::TextEdit::singleline(buf).desired_width(120.0),
+                                );
+                                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    rename_done = Some((p.id.clone(), buf.clone()));
+                                }
+                                if ui.small_button("ok").clicked() {
+                                    rename_done = Some((p.id.clone(), buf.clone()));
+                                }
+                                return;
+                            }
+                        }
+
+                        let label = ui.add(
+                            egui::Label::new(egui::RichText::new(p.label()).strong())
+                                .sense(egui::Sense::click()),
+                        );
+                        if label.clicked() {
+                            fill = Some(p.id.clone());
+                        }
+                        if label.double_clicked() {
+                            connect_now = Some(p.id.clone());
+                        }
+                        label.on_hover_text(format!(
+                            "{}\n{} Verbindungen, insgesamt {}\nzuletzt {}",
+                            partners::pretty_id(&p.id),
+                            p.count,
+                            p.total(),
+                            p.ago()
+                        ));
+
+                        ui.label(egui::RichText::new(p.ago()).weak().size(11.0));
+                        if p.secret.is_some() {
+                            ui.label(
+                                egui::RichText::new("Passwort gespeichert")
+                                    .weak()
+                                    .size(10.0),
+                            );
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("x").on_hover_text("Aus der Liste entfernen").clicked() {
+                                del = Some(p.id.clone());
+                            }
+                            if ui.small_button("umbenennen").clicked() {
+                                rename_start = Some(p.id.clone());
+                            }
+                            if ui
+                                .add_enabled(!connecting, egui::Button::new("verbinden").small())
+                                .clicked()
+                            {
+                                connect_now = Some(p.id.clone());
+                            }
+                        });
+                    });
+                }
+            });
+
+        if let Some(id) = fav {
+            self.book.toggle_favorite(&id);
+        }
+        if let Some(id) = del {
+            self.book.remove(&id);
+        }
+        if let Some(id) = rename_start {
+            let cur = self
+                .book
+                .get(&id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            self.renaming = Some((id, cur));
+        }
+        if let Some((id, name)) = rename_done {
+            self.book.rename(&id, &name);
+            self.renaming = None;
+        }
+        if let Some(id) = fill.or(connect_now.clone()) {
+            self.partner_id = id.clone();
+            if let Some(pw) = self.book.password(&id) {
+                self.partner_pw = pw;
+                self.remember_pw = true;
+            }
+        }
+        if connect_now.is_some() && !connecting {
+            self.start_session();
+        }
     }
 
     fn session_ui(&mut self, ctx: &egui::Context) {
@@ -914,10 +1077,25 @@ impl App {
 
                 ui.separator();
                 let (rw, rh) = *self.shared.remote_size.lock().unwrap();
+                let direct = self.shared.direct.load(Ordering::Relaxed);
                 ui.label(format!(
-                    "{}x{}   {:.0} fps   {:.0} kbit/s   {:.0} ms",
-                    rw, rh, stats.fps, stats.kbps, stats.latency_ms
+                    "{}x{}   {:.0} fps   {:.0} kbit/s   {:.0} ms   {}",
+                    rw,
+                    rh,
+                    stats.fps,
+                    stats.kbps,
+                    stats.latency_ms,
+                    if direct { "direkt" } else { "ueber Relay" }
                 ));
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("rechte Strg = raus")
+                        .weak()
+                        .size(11.0),
+                )
+                .on_hover_text(
+                    "Einmal druecken gibt Maus und Tastatur wieder an diesen PC zurueck.\nDreimal schnell hintereinander beendet die Sitzung.",
+                );
                 if game {
                     ui.separator();
                     if vinput::is_active() {
@@ -934,6 +1112,28 @@ impl App {
                 }
             });
         });
+
+        if let Some(until) = self.hint_until {
+            if std::time::Instant::now() < until {
+                let text = if self.hint.is_empty() {
+                    "Rechte Strg = Eingabe freigeben  |  3x rechte Strg = Sitzung beenden"
+                        .to_string()
+                } else {
+                    self.hint.clone()
+                };
+                egui::TopBottomPanel::top("escape_hint").show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(text)
+                                .color(egui::Color32::from_rgb(240, 220, 120)),
+                        );
+                    });
+                });
+            } else {
+                self.hint_until = None;
+                self.hint.clear();
+            }
+        }
 
         let mut image_rect: Option<egui::Rect> = None;
         let mut clicked_image = false;
@@ -1230,10 +1430,27 @@ impl eframe::App for App {
         self.handle_drops(ctx);
         self.transfer_ui(ctx);
 
+        // right Ctrl: 1x hands the input back, 3x leaves the session
+        match self.shared.escape.swap(0, Ordering::Relaxed) {
+            1 => {
+                self.hint = "Eingabe freigegeben - ins Bild klicken uebernimmt wieder".to_string();
+                self.hint_until = Some(std::time::Instant::now() + Duration::from_secs(4));
+            }
+            2 => {
+                self.stop_session();
+                self.hint = "Sitzung ueber die Host-Taste beendet".to_string();
+            }
+            _ => {}
+        }
+
         if self.shared.connected.load(Ordering::Relaxed) {
             self.session_ui(ctx);
             ctx.request_repaint_after(Duration::from_millis(8));
         } else {
+            if self.session.is_some() && !self.shared.connecting.load(Ordering::Relaxed) {
+                // the session died on its own - still book the time
+                self.close_session();
+            }
             if vinput::is_active() {
                 vinput::set_active(false);
             }

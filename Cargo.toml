@@ -1,6 +1,6 @@
 [package]
 name = "freeviewer"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
 license = "GPL-3.0"
@@ -12,6 +12,7 @@ categories = ["network-programming", "multimedia"]
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 

@@ -26,6 +26,36 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static CX: AtomicI32 = AtomicI32::new(0);
 static CY: AtomicI32 = AtomicI32::new(0);
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+/// Timestamps of the last right-Ctrl presses (for the triple tap).
+static PRESSES: std::sync::Mutex<Vec<std::time::Instant>> = std::sync::Mutex::new(Vec::new());
+
+/// Right Ctrl was pressed while a session is running.
+///
+/// One tap always hands the input back - that is the way out of the remote
+/// machine and it works in both profiles, not just in game mode. Three taps
+/// within 1.5 seconds are the emergency exit and end the session, for the
+/// moment when the remote side hangs and the picture no longer reacts.
+fn host_key_pressed() {
+    let sh = match SHARED.get() {
+        Some(s) => s,
+        None => return,
+    };
+    if !sh.connected.load(Ordering::Relaxed) {
+        return;
+    }
+    set_active(false);
+    let now = std::time::Instant::now();
+    let mut p = PRESSES.lock().unwrap();
+    p.retain(|t| now.duration_since(*t) < std::time::Duration::from_millis(1500));
+    p.push(now);
+    let code = if p.len() >= 3 {
+        p.clear();
+        2
+    } else {
+        1
+    };
+    sh.escape.store(code, Ordering::Relaxed);
+}
 
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
@@ -48,6 +78,17 @@ mod imp {
     const LLKHF_INJECTED: u32 = 0x10;
 
     unsafe extern "system" fn hook_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        if code >= 0 {
+            let info = &*(l.0 as *const KBDLLHOOKSTRUCT);
+            let injected = info.flags.0 & LLKHF_INJECTED != 0;
+            let vk_any = info.vkCode as u16;
+            let down_any = w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN;
+            // The host key works even when the input is not grabbed, so a
+            // session can always be left - it stays local either way.
+            if !injected && vk_any == 0xA3 && down_any && !ACTIVE.load(Ordering::Relaxed) {
+                super::host_key_pressed();
+            }
+        }
         if code >= 0 && ACTIVE.load(Ordering::Relaxed) {
             let info = &*(l.0 as *const KBDLLHOOKSTRUCT);
             let injected = info.flags.0 & LLKHF_INJECTED != 0;
@@ -59,7 +100,7 @@ mod imp {
                 // right ctrl = host key, never forwarded
                 if vk == 0xA3 {
                     if down {
-                        super::set_active(false);
+                        super::host_key_pressed();
                     }
                     return LRESULT(1);
                 }

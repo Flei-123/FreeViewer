@@ -54,6 +54,9 @@ pub struct Shared {
     pub connecting: AtomicBool,
     /// Active session profile (MODE_ADMIN / MODE_GAME).
     pub mode: AtomicU8,
+    /// The host key (right Ctrl) was pressed: 1 = release the input,
+    /// 2 = leave the session entirely. The GUI picks this up and resets it.
+    pub escape: AtomicU8,
     /// Host side: which screen the capture thread should grab.
     pub monitor: AtomicU8,
     /// Viewer side: the screens the host offers plus the active one.
@@ -96,6 +99,7 @@ impl Shared {
             connected: AtomicBool::new(false),
             connecting: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADMIN),
+            escape: AtomicU8::new(0),
             monitor: AtomicU8::new(0),
             monitors: Mutex::new(Vec::new()),
             active_monitor: AtomicU8::new(0),
