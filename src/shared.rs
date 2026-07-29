@@ -57,6 +57,10 @@ pub struct Shared {
     pub drop_dir: Mutex<std::path::PathBuf>,
     /// True while a direct peer to peer path carries the video.
     pub direct: AtomicBool,
+    /// A newer build waiting on the relay.
+    pub update: Mutex<Option<crate::update::Release>>,
+    pub update_status: Mutex<String>,
+    pub auto_update: AtomicBool,
     pub stats: Mutex<Stats>,
 }
 
@@ -85,12 +89,18 @@ impl Shared {
             xfer: Mutex::new(None),
             drop_dir: Mutex::new(crate::xfer::default_dir()),
             direct: AtomicBool::new(false),
+            update: Mutex::new(None),
+            update_status: Mutex::new(String::new()),
+            auto_update: AtomicBool::new(crate::ident::auto_update_enabled()),
             stats: Mutex::new(Stats::default()),
         }
     }
 
     pub fn set_host_status(&self, s: impl Into<String>) {
         *self.host_status.lock().unwrap() = s.into();
+    }
+    pub fn set_update_status(&self, s: impl Into<String>) {
+        *self.update_status.lock().unwrap() = s.into();
     }
     pub fn set_viewer_status(&self, s: impl Into<String>) {
         *self.viewer_status.lock().unwrap() = s.into();

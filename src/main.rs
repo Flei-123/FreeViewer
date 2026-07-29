@@ -19,6 +19,7 @@ mod net;
 mod proto;
 mod selftest;
 mod shared;
+mod update;
 mod viewer;
 mod vinput;
 mod xfer;
@@ -80,6 +81,50 @@ fn main() -> eframe::Result<()> {
         .or_else(ident::fixed_password)
         .unwrap_or_else(ident::random_password);
     let shared = Arc::new(Shared::new(relay, password));
+
+    // print the version:  freeviewer --version
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("FreeViewer {}", update::VERSION);
+        return Ok(());
+    }
+
+    // update check/installation from the command line:  freeviewer --update
+    if std::env::args().any(|a| a == "--update") {
+        update::cleanup();
+        println!("lokal: {}", update::VERSION);
+        match update::check() {
+            Ok(rel) => {
+                println!(
+                    "relay: {} ({} Bytes, {}...)",
+                    rel.version,
+                    rel.size,
+                    &rel.sha256[..12]
+                );
+                if update::newer(&rel.version, update::VERSION) {
+                    println!("installiere...");
+                    match update::download(&rel) {
+                        Ok(tmp) => {
+                            println!("geladen + Pruefsumme ok: {}", tmp.display());
+                            if std::env::args().any(|a| a == "--dry") {
+                                let _ = std::fs::remove_file(&tmp);
+                                println!("DRY: nicht ersetzt");
+                                return Ok(());
+                            }
+                            match update::swap(&tmp) {
+                                Ok(p) => println!("UPDATE OK -> {}", p.display()),
+                                Err(e) => println!("FAIL: {}", e),
+                            }
+                        }
+                        Err(e) => println!("FAIL: {}", e),
+                    }
+                } else {
+                    println!("schon aktuell");
+                }
+            }
+            Err(e) => println!("FAIL: {}", e),
+        }
+        return Ok(());
+    }
 
     // which screens can this machine share?   freeviewer --monitors
     if std::env::args().any(|a| a == "--monitors") {
@@ -287,6 +332,7 @@ fn main() -> eframe::Result<()> {
     }
 
     vinput::init(shared.clone());
+    update::watcher(shared.clone());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -497,6 +543,37 @@ impl App {
         });
     }
 
+    /// Update line at the bottom of the home screen.
+    fn update_ui(&mut self, ui: &mut egui::Ui) {
+        let pending = self.shared.update.lock().unwrap().clone();
+        let status = self.shared.update_status.lock().unwrap().clone();
+        ui.horizontal(|ui| {
+            let mut auto = self.shared.auto_update.load(Ordering::Relaxed);
+            if ui.checkbox(&mut auto, "Automatisch aktualisieren").changed() {
+                self.shared.auto_update.store(auto, Ordering::Relaxed);
+                ident::set_auto_update(auto);
+            }
+            if let Some(rel) = pending {
+                if ui
+                    .button(format!("Update {} jetzt installieren", rel.version))
+                    .clicked()
+                {
+                    self.shared
+                        .set_update_status(format!("Installiere {} ...", rel.version));
+                    let sh = self.shared.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = update::install(&rel) {
+                            sh.set_update_status(format!("Update fehlgeschlagen: {}", e));
+                        }
+                    });
+                }
+            }
+            if !status.is_empty() {
+                ui.label(egui::RichText::new(status).weak().size(11.0));
+            }
+        });
+    }
+
     fn pull_frame(&mut self, ctx: &egui::Context) {
         let img = {
             let guard = self.shared.frame.lock().unwrap();
@@ -525,7 +602,13 @@ impl App {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("FreeViewer");
-            ui.label(egui::RichText::new("v0.4 - frei, verschluesselt, ohne Konto").weak());
+            ui.label(
+                egui::RichText::new(format!(
+                    "v{} - frei, verschluesselt, ohne Konto",
+                    update::VERSION
+                ))
+                .weak(),
+            );
         });
         ui.separator();
         ui.add_space(10.0);
@@ -613,7 +696,10 @@ impl App {
             });
         });
 
-        ui.add_space(14.0);
+        ui.add_space(12.0);
+        self.update_ui(ui);
+
+        ui.add_space(8.0);
         ui.label(
             egui::RichText::new(format!("Relay: {}", self.shared.relay_url))
                 .weak()

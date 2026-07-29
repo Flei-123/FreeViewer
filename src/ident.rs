@@ -42,6 +42,21 @@ pub fn random_password() -> String {
         .collect()
 }
 
+/// Auto update is on unless <config dir>/noupdate exists.
+pub fn auto_update_enabled() -> bool {
+    !config_dir().join("noupdate").exists()
+}
+
+/// Turns automatic updates on/off (remembered across restarts).
+pub fn set_auto_update(on: bool) {
+    let flag = config_dir().join("noupdate");
+    if on {
+        let _ = std::fs::remove_file(flag);
+    } else {
+        let _ = std::fs::write(flag, b"1");
+    }
+}
+
 /// Optional fixed password for unattended access:
 /// put it into <config dir>/password.txt (one line). If the file is missing a
 /// fresh random session password is generated on every start.

@@ -1,6 +1,6 @@
 [package]
 name = "freeviewer"
-version = "0.4.0"
+version = "0.6.1"
 edition = "2021"
 description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
 license = "GPL-3.0"
@@ -31,6 +31,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
 rfd = "0.15"
+ureq = "3"
 
 # crypto (end-to-end, the relay never sees plaintext)
 aes-gcm = "0.10"
