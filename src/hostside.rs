@@ -163,6 +163,26 @@ struct Session {
     stop: Arc<AtomicBool>,
     input_tx: Option<std::sync::mpsc::Sender<Msg>>,
     mode: Arc<AtomicU8>,
+    monitor: Arc<AtomicU8>,
+    force_key: Arc<AtomicBool>,
+}
+
+/// The screens this machine could share, in protocol form.
+pub fn monitor_list(prefer_fast: bool) -> Vec<proto::MonitorInfo> {
+    capture::list_monitors(prefer_fast)
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| proto::MonitorInfo {
+            name: if m.name.trim().is_empty() {
+                format!("Bildschirm {}", i + 1)
+            } else {
+                m.name
+            },
+            w: m.w,
+            h: m.h,
+            primary: m.primary,
+        })
+        .collect()
 }
 
 impl Session {
@@ -173,6 +193,8 @@ impl Session {
             stop: Arc::new(AtomicBool::new(false)),
             input_tx: None,
             mode: Arc::new(AtomicU8::new(proto::MODE_ADMIN)),
+            monitor: Arc::new(AtomicU8::new(0)),
+            force_key: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -264,7 +286,11 @@ impl Session {
                 let shared2 = shared.clone();
                 let screen_cap = screen.clone();
                 let mode = self.mode.clone();
-                std::thread::spawn(move || capture_loop(stop, out_tx, screen_cap, shared2, mode));
+                let mon = self.monitor.clone();
+                let fkey = self.force_key.clone();
+                std::thread::spawn(move || {
+                    capture_loop(stop, out_tx, screen_cap, shared2, mode, mon, fkey)
+                });
 
                 self.cipher = Some(cipher);
                 self.input_tx = Some(in_tx);
@@ -290,6 +316,12 @@ impl Session {
                                 let sealed = c.lock().unwrap().seal(&encode(&Msg::Pong { ts }));
                                 tx.send(WsMsg::Binary(sealed.into()))?;
                             }
+                        }
+                        Msg::SetMonitor { index } => {
+                            self.monitor.store(index, Ordering::Relaxed);
+                        }
+                        Msg::NeedKeyframe => {
+                            self.force_key.store(true, Ordering::Relaxed);
                         }
                         Msg::SetMode { mode } => {
                             self.mode.store(mode, Ordering::Relaxed);
@@ -418,6 +450,8 @@ fn capture_loop(
     screen: Arc<Mutex<ScreenRect>>,
     shared: Arc<Shared>,
     mode: Arc<AtomicU8>,
+    monitor: Arc<AtomicU8>,
+    force_key: Arc<AtomicBool>,
 ) {
     // FV_NODELTA / FV_NOSKIP force a full frame every time (benchmarks)
     let force_full = std::env::var("FV_NODELTA").is_ok() || std::env::var("FV_NOSKIP").is_ok();
@@ -429,32 +463,93 @@ fn capture_loop(
     let out_grab = out.clone();
     let mode_grab = mode.clone();
     let screen_grab = screen.clone();
+    let mon_grab = monitor.clone();
+    let key_grab = force_key.clone();
 
     let grabber = std::thread::spawn(move || {
-        let mut cap = match capture::open(!no_dxgi) {
+        let mut cur_mon = mon_grab.load(Ordering::Relaxed) as usize;
+        let mut cap = match capture::open_index(!no_dxgi, cur_mon) {
             Some(c) => c,
             None => {
                 shared_grab.set_host_status("Kein Bildschirm gefunden");
                 return;
             }
         };
-        let (sw, sh) = cap.size();
-        let (ox, oy) = cap.origin();
+        let (mut sw, mut sh) = cap.size();
+        let (mut ox, mut oy) = cap.origin();
         *screen_grab.lock().unwrap() = ScreenRect {
             x: ox,
             y: oy,
             w: sw,
             h: sh,
         };
-        shared_grab.set_host_status(format!("Aufnahme: {} {}x{}", cap.name(), sw, sh));
+        let list = monitor_list(!no_dxgi);
+        shared_grab.set_host_status(format!(
+            "Aufnahme: {} {}x{} (Bildschirm {}/{})",
+            cap.name(),
+            sw,
+            sh,
+            cur_mon + 1,
+            list.len().max(1)
+        ));
         let _ = out_grab.send(encode(&Msg::ScreenInfo {
             width: sw,
             height: sh,
+        }));
+        let _ = out_grab.send(encode(&Msg::Monitors {
+            active: cur_mon as u8,
+            list,
         }));
 
         let mut last_cursor = (i32::MIN, i32::MIN, false);
         let mut fails = 0u32;
         while !stop_grab.load(Ordering::Relaxed) {
+            // the viewer can switch screens in the middle of a session
+            let want = mon_grab.load(Ordering::Relaxed) as usize;
+            if want != cur_mon {
+                match capture::open_index(!no_dxgi, want) {
+                    Some(c) => {
+                        cap = c;
+                        cur_mon = want;
+                        let list = monitor_list(!no_dxgi);
+                        shared_grab.set_host_status(format!(
+                            "Aufnahme: {} {}x{} (Bildschirm {}/{})",
+                            cap.name(),
+                            cap.size().0,
+                            cap.size().1,
+                            cur_mon + 1,
+                            list.len().max(1)
+                        ));
+                        let _ = out_grab.send(encode(&Msg::Monitors {
+                            active: cur_mon as u8,
+                            list,
+                        }));
+                    }
+                    None => {
+                        mon_grab.store(cur_mon as u8, Ordering::Relaxed);
+                    }
+                }
+            }
+            // resolution change / screen switch -> tell the viewer, force a keyframe
+            let (nw, nh) = cap.size();
+            let (nx, ny) = cap.origin();
+            if (nw, nh, nx, ny) != (sw, sh, ox, oy) {
+                sw = nw;
+                sh = nh;
+                ox = nx;
+                oy = ny;
+                *screen_grab.lock().unwrap() = ScreenRect {
+                    x: ox,
+                    y: oy,
+                    w: sw,
+                    h: sh,
+                };
+                key_grab.store(true, Ordering::Relaxed);
+                let _ = out_grab.send(encode(&Msg::ScreenInfo {
+                    width: sw,
+                    height: sh,
+                }));
+            }
             let prof = profile(mode_grab.load(Ordering::Relaxed));
             let budget = Duration::from_millis(1000 / prof.fps.max(1));
             let t0 = Instant::now();
@@ -514,6 +609,9 @@ fn capture_loop(
         };
         let prof = profile(mode.load(Ordering::Relaxed));
         delta.set_quality(prof.full_q, prof.tile_q);
+        if force_key.swap(false, Ordering::Relaxed) {
+            delta.reset();
+        }
         let res = if force_full {
             delta.encode_full(&rgb, dw, dh)
         } else {
@@ -554,6 +652,16 @@ fn input_loop(
     let mut inj = Injector::new();
     let mut clip = Clip::new();
 
+    // file transfers of this session use the same encrypted channel
+    let send_msg: Arc<dyn Fn(Msg) + Send + Sync> = {
+        let out2 = out.clone();
+        Arc::new(move |m: Msg| {
+            let _ = out2.send(encode(&m));
+        })
+    };
+    shared.xfers.lock().unwrap().clear();
+    *shared.xfer.lock().unwrap() = Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
+
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -584,6 +692,11 @@ fn input_loop(
                     Msg::Clipboard { text } => {
                         clip.set(&text);
                     }
+                    other if crate::xfer::is_file_msg(&other) => {
+                        if let Some(x) = shared.xfer.lock().unwrap().as_mut() {
+                            x.on_msg(other);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -598,6 +711,9 @@ fn input_loop(
         }
     }
 
+    if let Some(mut x) = shared.xfer.lock().unwrap().take() {
+        x.shutdown();
+    }
     // never leave keys stuck on the host when a session dies
     inj.release_all();
 }

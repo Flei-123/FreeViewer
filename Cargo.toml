@@ -30,6 +30,7 @@ xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
+rfd = "0.15"
 
 # crypto (end-to-end, the relay never sees plaintext)
 aes-gcm = "0.10"

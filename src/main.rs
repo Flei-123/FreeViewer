@@ -21,6 +21,7 @@ mod selftest;
 mod shared;
 mod viewer;
 mod vinput;
+mod xfer;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -79,6 +80,21 @@ fn main() -> eframe::Result<()> {
         .or_else(ident::fixed_password)
         .unwrap_or_else(ident::random_password);
     let shared = Arc::new(Shared::new(relay, password));
+
+    // which screens can this machine share?   freeviewer --monitors
+    if std::env::args().any(|a| a == "--monitors") {
+        for (i, m) in hostside::monitor_list(true).iter().enumerate() {
+            println!(
+                "{}: {} {}x{}{}",
+                i,
+                m.name,
+                m.w,
+                m.h,
+                if m.primary { "  (primaer)" } else { "" }
+            );
+        }
+        return Ok(());
+    }
 
     // capture self test:  freeviewer --captest   (writes <config>/captest.txt)
     if std::env::args().any(|a| a == "--captest") {
@@ -142,14 +158,84 @@ fn main() -> eframe::Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
         let game = argv.iter().any(|a| a == "--game");
+        // extra checks for this scripted session
+        let mon_arg: Option<u8> = argv
+            .iter()
+            .position(|a| a == "--monitor")
+            .and_then(|i| argv.get(i + 1))
+            .and_then(|s| s.parse().ok());
+        let file_arg: Option<String> = argv
+            .iter()
+            .position(|a| a == "--sendfile")
+            .and_then(|i| argv.get(i + 1))
+            .cloned();
         let sh = shared.clone();
         let idc = id.clone();
         rt().spawn(async move { viewer::run_viewer(sh, idc, pw).await });
         let start = std::time::Instant::now();
         let mut last = 0u64;
         let mut mode_sent = false;
+        let mut extras_done = false;
+        let mut mon_switched = false;
+        let mut mons_printed = false;
         loop {
             std::thread::sleep(Duration::from_millis(200));
+            if !mons_printed {
+                let mons = shared.monitors.lock().unwrap().clone();
+                if !mons.is_empty() {
+                    mons_printed = true;
+                    for (i, m) in mons.iter().enumerate() {
+                        println!("monitor {}: {} {}x{}", i, m.name, m.w, m.h);
+                    }
+                }
+            }
+            if !extras_done && shared.connected.load(Ordering::Relaxed) {
+                extras_done = true;
+                if let Some(idx) = mon_arg {
+                    println!("switching to monitor {}", idx);
+                    shared.send_input(Msg::SetMonitor { index: idx });
+                }
+                if let Some(f) = file_arg.clone() {
+                    let path = std::path::PathBuf::from(&f);
+                    match shared.xfer.lock().unwrap().as_mut() {
+                        Some(x) => {
+                            println!("sending file {}", f);
+                            x.send_path(path);
+                        }
+                        None => println!("FAIL: kein Transfer-Modul"),
+                    }
+                }
+            }
+            if mon_arg.is_some() && !mon_switched && shared.connected.load(Ordering::Relaxed) {
+                let act = shared.active_monitor.load(Ordering::Relaxed);
+                if Some(act) == mon_arg {
+                    let (rw, rh) = *shared.remote_size.lock().unwrap();
+                    println!("monitor active {} -> {}x{}", act, rw, rh);
+                    mon_switched = true;
+                }
+            }
+            if file_arg.is_some() {
+                let done = shared
+                    .xfers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|x| !x.incoming && x.finished)
+                    .cloned();
+                if let Some(p) = done {
+                    if p.error.is_empty() {
+                        println!("FILE OK: {} ({} Bytes)", p.name, p.done);
+                        std::process::exit(0);
+                    }
+                    println!("FILE FAIL: {} - {}", p.name, p.error);
+                    std::process::exit(1);
+                }
+                if start.elapsed() > Duration::from_secs(120) {
+                    println!("FILE FAIL: Zeitueberschreitung");
+                    std::process::exit(1);
+                }
+                continue;
+            }
             if game && !mode_sent && shared.connected.load(Ordering::Relaxed) {
                 shared.send_input(Msg::SetMode {
                     mode: proto::MODE_GAME,
@@ -300,6 +386,117 @@ impl App {
         }
     }
 
+    /// Files dropped onto the window go to the other side of the session.
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let files: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if files.is_empty() {
+            return;
+        }
+        let mut guard = self.shared.xfer.lock().unwrap();
+        match guard.as_mut() {
+            Some(x) => {
+                let n = files.len();
+                for p in files {
+                    x.send_path(p);
+                }
+                self.hint = format!("{} Datei(en) werden uebertragen", n);
+            }
+            None => {
+                self.hint = "Keine aktive Sitzung - Datei nicht gesendet".to_string();
+            }
+        }
+    }
+
+    fn pick_and_send(&mut self) {
+        let files = rfd::FileDialog::new()
+            .set_title("Datei(en) an die Gegenstelle senden")
+            .pick_files();
+        if let Some(files) = files {
+            let mut guard = self.shared.xfer.lock().unwrap();
+            if let Some(x) = guard.as_mut() {
+                for p in files {
+                    x.send_path(p);
+                }
+            } else {
+                self.hint = "Keine aktive Sitzung".to_string();
+            }
+        }
+    }
+
+    fn open_drop_dir(&self) {
+        let dir = self.shared.drop_dir.lock().unwrap().clone();
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+        }
+    }
+
+    /// Bottom bar with every running/finished transfer of this session.
+    fn transfer_ui(&mut self, ctx: &egui::Context) {
+        let list = self.shared.xfers.lock().unwrap().clone();
+        if list.is_empty() {
+            return;
+        }
+        egui::TopBottomPanel::bottom("xfer_bar").show(ctx, |ui| {
+            let mut clear = false;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Dateien").strong());
+                if ui.small_button("Ordner oeffnen").clicked() {
+                    self.open_drop_dir();
+                }
+                if ui.small_button("Liste leeren").clicked() {
+                    clear = true;
+                }
+            });
+            egui::ScrollArea::vertical()
+                .max_height(96.0)
+                .show(ui, |ui| {
+                    for p in &list {
+                        ui.horizontal(|ui| {
+                            ui.label(if p.incoming { "<-" } else { "->" });
+                            ui.label(&p.name);
+                            if !p.error.is_empty() {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(230, 120, 120),
+                                    &p.error,
+                                );
+                            } else if p.finished {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(120, 220, 120),
+                                    "fertig",
+                                );
+                            } else {
+                                ui.add(
+                                    egui::ProgressBar::new(p.percent())
+                                        .desired_width(160.0)
+                                        .show_percentage(),
+                                );
+                                ui.label(format!(
+                                    "{:.1}/{:.1} MB",
+                                    p.done as f32 / 1_048_576.0,
+                                    p.size as f32 / 1_048_576.0
+                                ));
+                            }
+                        });
+                    }
+                });
+            if clear {
+                self.shared
+                    .xfers
+                    .lock()
+                    .unwrap()
+                    .retain(|p| !p.finished && p.error.is_empty());
+            }
+        });
+    }
+
     fn pull_frame(&mut self, ctx: &egui::Context) {
         let img = {
             let guard = self.shared.frame.lock().unwrap();
@@ -371,6 +568,16 @@ impl App {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new(host_status).weak());
                 ui.label(egui::RichText::new(host_peer).weak());
+                if self.shared.xfer.lock().unwrap().is_some() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Dateien fuer die Gegenstelle einfach hier ins Fenster ziehen",
+                        )
+                        .weak()
+                        .size(11.0),
+                    );
+                }
             });
 
             // ---- right: connect to someone ----
@@ -419,7 +626,10 @@ impl App {
         let game = self.shared.game_mode();
         let mut disconnect = false;
         let mut want_mode: Option<u8> = None;
+        let mut want_mon: Option<u8> = None;
         let mut special: Option<u8> = None;
+        let mut pick = false;
+        let mut open_dir = false;
 
         egui::TopBottomPanel::top("session_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -446,6 +656,53 @@ impl App {
                     && !game
                 {
                     want_mode = Some(proto::MODE_GAME);
+                }
+
+                let mons = self.shared.monitors.lock().unwrap().clone();
+                if mons.len() > 1 {
+                    ui.separator();
+                    let act = self.shared.active_monitor.load(Ordering::Relaxed) as usize;
+                    let label = |i: usize, m: &proto::MonitorInfo| {
+                        format!("{}. {} ({}x{})", i + 1, m.name, m.w, m.h)
+                    };
+                    let cur = mons
+                        .get(act)
+                        .map(|m| label(act, m))
+                        .unwrap_or_else(|| "Bildschirm".to_string());
+                    egui::ComboBox::from_id_salt("monitor_pick")
+                        .selected_text(cur)
+                        .show_ui(ui, |ui| {
+                            for (i, m) in mons.iter().enumerate() {
+                                if ui.selectable_label(i == act, label(i, m)).clicked() {
+                                    want_mon = Some(i as u8);
+                                }
+                            }
+                        });
+                }
+
+                ui.separator();
+                let mut want_pick = false;
+                let mut want_open = false;
+                ui.menu_button("Dateien", |ui| {
+                    if ui.button("Datei senden...").clicked() {
+                        want_pick = true;
+                        ui.close();
+                    }
+                    if ui.button("Empfangsordner oeffnen").clicked() {
+                        want_open = true;
+                        ui.close();
+                    }
+                    ui.label(
+                        egui::RichText::new("Tipp: Dateien einfach ins Fenster ziehen")
+                            .weak()
+                            .size(11.0),
+                    );
+                });
+                if want_pick {
+                    pick = true;
+                }
+                if want_open {
+                    open_dir = true;
                 }
 
                 ui.separator();
@@ -530,8 +787,20 @@ impl App {
         if let Some(m) = want_mode {
             self.set_mode(m);
         }
+        if let Some(i) = want_mon {
+            self.shared.active_monitor.store(i, Ordering::Relaxed);
+            self.shared.send_input(Msg::SetMonitor { index: i });
+            self.tex = None;
+            self.last_seq = 0;
+        }
         if let Some(code) = special {
             self.shared.send_input(Msg::Special { code });
+        }
+        if pick {
+            self.pick_and_send();
+        }
+        if open_dir {
+            self.open_drop_dir();
         }
         if disconnect {
             self.stop_session();
@@ -775,6 +1044,8 @@ fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pull_frame(ctx);
+        self.handle_drops(ctx);
+        self.transfer_ui(ctx);
 
         if self.shared.connected.load(Ordering::Relaxed) {
             self.session_ui(ctx);

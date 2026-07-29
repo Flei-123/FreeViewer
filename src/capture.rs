@@ -40,18 +40,50 @@ pub trait Backend {
     fn name(&self) -> &'static str;
 }
 
-/// Opens the best available backend for `monitor` (0 = primary).
-pub fn open(prefer_fast: bool) -> Option<Box<dyn Backend>> {
+/// One screen that can be shared. Index 0 is always the primary monitor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorDesc {
+    pub name: String,
+    pub w: u32,
+    pub h: u32,
+    pub x: i32,
+    pub y: i32,
+    pub primary: bool,
+}
+
+/// Every screen attached to this machine, primary first. The order is the
+/// index space used by `open_index` and by the `SetMonitor` message.
+pub fn list_monitors(prefer_fast: bool) -> Vec<MonitorDesc> {
     #[cfg(windows)]
     if prefer_fast {
-        match dxgi::Dxgi::new() {
+        let list = dxgi::describe();
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    let _ = prefer_fast;
+    fallback::describe()
+}
+
+/// Opens the best available backend for the primary monitor.
+pub fn open(prefer_fast: bool) -> Option<Box<dyn Backend>> {
+    open_index(prefer_fast, 0)
+}
+
+/// Opens the best available backend for screen `index` of `list_monitors`.
+pub fn open_index(prefer_fast: bool, index: usize) -> Option<Box<dyn Backend>> {
+    #[cfg(windows)]
+    if prefer_fast {
+        match dxgi::Dxgi::new_index(index) {
             Ok(d) => return Some(Box::new(d)),
             Err(e) => {
                 log_line(&format!("dxgi unavailable: {}", e));
             }
         }
     }
-    fallback::Shots::new().ok().map(|s| Box::new(s) as Box<dyn Backend>)
+    fallback::Shots::new_index(index)
+        .ok()
+        .map(|s| Box::new(s) as Box<dyn Backend>)
 }
 
 pub fn log_line(s: &str) {
@@ -76,16 +108,47 @@ mod fallback {
         origin: (i32, i32),
     }
 
+    /// Same ordering as the DXGI path: primary first, then left to right.
+    fn order(monitors: &[xcap::Monitor]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..monitors.len()).collect();
+        order.sort_by_key(|&i| {
+            (
+                !monitors[i].is_primary().unwrap_or(false),
+                monitors[i].x().unwrap_or(0),
+                monitors[i].y().unwrap_or(0),
+            )
+        });
+        order
+    }
+
+    pub fn describe() -> Vec<super::MonitorDesc> {
+        let monitors = match xcap::Monitor::all() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
+        order(&monitors)
+            .into_iter()
+            .map(|i| super::MonitorDesc {
+                name: monitors[i]
+                    .name()
+                    .unwrap_or_else(|_| format!("Bildschirm {}", i + 1)),
+                w: monitors[i].width().unwrap_or(0),
+                h: monitors[i].height().unwrap_or(0),
+                x: monitors[i].x().unwrap_or(0),
+                y: monitors[i].y().unwrap_or(0),
+                primary: monitors[i].is_primary().unwrap_or(false),
+            })
+            .collect()
+    }
+
     impl Shots {
-        pub fn new() -> Result<Self> {
+        pub fn new_index(index: usize) -> Result<Self> {
             let monitors = xcap::Monitor::all().map_err(|e| anyhow!(e.to_string()))?;
             if monitors.is_empty() {
                 return Err(anyhow!("kein Monitor"));
             }
-            let idx = monitors
-                .iter()
-                .position(|m| m.is_primary().unwrap_or(false))
-                .unwrap_or(0);
+            let ord = order(&monitors);
+            let idx = ord[index.min(ord.len() - 1)];
             let w = monitors[idx].width().unwrap_or(1920);
             let h = monitors[idx].height().unwrap_or(1080);
             let origin = (
@@ -151,7 +214,7 @@ mod dxgi {
     use windows::core::Interface;
     use windows::Win32::Foundation::{HMODULE, POINT, RECT};
     use windows::Win32::Graphics::Direct3D::{
-        D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
+        D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
     };
     use windows::Win32::Graphics::Direct3D11::*;
     use windows::Win32::Graphics::Dxgi::Common::*;
@@ -161,6 +224,7 @@ mod dxgi {
     const MAX_RECTS: usize = 48;
 
     pub struct Dxgi {
+        index: usize,
         device: ID3D11Device,
         ctx: ID3D11DeviceContext,
         output: IDXGIOutput1,
@@ -187,14 +251,24 @@ mod dxgi {
         }
     }
 
-    fn make_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    fn make_device(adapter: Option<&IDXGIAdapter1>) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
         let mut device: Option<ID3D11Device> = None;
         let mut ctx: Option<ID3D11DeviceContext> = None;
         let levels = [D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0];
+        // a specific adapter has to be paired with DRIVER_TYPE_UNKNOWN
+        let base: Option<IDXGIAdapter> = match adapter {
+            Some(a) => Some(a.cast()?),
+            None => None,
+        };
+        let kind = if base.is_some() {
+            D3D_DRIVER_TYPE_UNKNOWN
+        } else {
+            D3D_DRIVER_TYPE_HARDWARE
+        };
         unsafe {
             D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
+                base.as_ref(),
+                kind,
                 HMODULE::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 Some(&levels),
@@ -211,35 +285,119 @@ mod dxgi {
         ))
     }
 
-    /// Picks the output that shows the primary monitor (desktop origin 0,0).
-    fn primary_output(device: &ID3D11Device) -> Result<(IDXGIOutput1, RECT)> {
+    /// One duplicable screen together with the adapter that drives it.
+    pub struct Out {
+        pub adapter: IDXGIAdapter1,
+        pub output: IDXGIOutput1,
+        pub rect: RECT,
+        pub name: String,
+    }
+
+    fn wide(s: &[u16]) -> String {
+        let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+        String::from_utf16_lossy(&s[..end])
+    }
+
+    /// Turns "\\\\.\\DISPLAY2" into what the user sees in the display settings.
+    fn friendly(device_name: &str) -> String {
+        use windows::core::PCWSTR;
+        use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
         unsafe {
-            let dxgi_dev: IDXGIDevice = device.cast()?;
-            let adapter = dxgi_dev.GetAdapter()?;
-            let mut best: Option<(IDXGIOutput1, RECT)> = None;
             let mut i = 0u32;
-            while let Ok(out) = adapter.EnumOutputs(i) {
-                let desc = match out.GetDesc() {
-                    Ok(d) => d,
-                    Err(_) => {
-                        i += 1;
-                        continue;
-                    }
+            loop {
+                let mut dd = DISPLAY_DEVICEW {
+                    cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+                    ..Default::default()
                 };
-                if desc.AttachedToDesktop.as_bool() {
-                    let r = desc.DesktopCoordinates;
-                    let o1: IDXGIOutput1 = out.cast()?;
-                    let is_primary = r.left == 0 && r.top == 0;
-                    if is_primary {
-                        return Ok((o1, r));
+                if !EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0).as_bool() {
+                    break;
+                }
+                if wide(&dd.DeviceName) == device_name {
+                    let mut wname: Vec<u16> = device_name.encode_utf16().collect();
+                    wname.push(0);
+                    let mut mon = DISPLAY_DEVICEW {
+                        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+                        ..Default::default()
+                    };
+                    if EnumDisplayDevicesW(PCWSTR(wname.as_ptr()), 0, &mut mon, 0).as_bool() {
+                        let s = wide(&mon.DeviceString);
+                        if !s.is_empty() {
+                            return s;
+                        }
                     }
-                    if best.is_none() {
-                        best = Some((o1, r));
+                    let s = wide(&dd.DeviceString);
+                    if !s.is_empty() {
+                        return s;
                     }
+                    break;
                 }
                 i += 1;
             }
-            best.ok_or_else(|| anyhow!("kein angeschlossener Ausgang"))
+        }
+        device_name.to_string()
+    }
+
+    /// Every attached output of every adapter, primary first. Enumerating the
+    /// factory (instead of just our own adapter) also finds virtual displays
+    /// that live on a second, software adapter.
+    pub fn enumerate() -> Result<Vec<Out>> {
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            let mut list: Vec<Out> = Vec::new();
+            let mut ai = 0u32;
+            while let Ok(adapter) = factory.EnumAdapters1(ai) {
+                let mut oi = 0u32;
+                while let Ok(out) = adapter.EnumOutputs(oi) {
+                    oi += 1;
+                    let desc = match out.GetDesc() {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    if !desc.AttachedToDesktop.as_bool() {
+                        continue;
+                    }
+                    let o1: IDXGIOutput1 = match out.cast() {
+                        Ok(o) => o,
+                        Err(_) => continue,
+                    };
+                    let dev = wide(&desc.DeviceName);
+                    list.push(Out {
+                        adapter: adapter.clone(),
+                        output: o1,
+                        rect: desc.DesktopCoordinates,
+                        name: friendly(&dev),
+                    });
+                }
+                ai += 1;
+            }
+            if list.is_empty() {
+                return Err(anyhow!("kein angeschlossener Ausgang"));
+            }
+            list.sort_by_key(|o| {
+                (
+                    !(o.rect.left == 0 && o.rect.top == 0),
+                    o.rect.left,
+                    o.rect.top,
+                )
+            });
+            Ok(list)
+        }
+    }
+
+    pub fn describe() -> Vec<super::MonitorDesc> {
+        match enumerate() {
+            Ok(list) => list
+                .iter()
+                .map(|o| super::MonitorDesc {
+                    name: o.name.clone(),
+                    w: (o.rect.right - o.rect.left).max(0) as u32,
+                    h: (o.rect.bottom - o.rect.top).max(0) as u32,
+                    x: o.rect.left,
+                    y: o.rect.top,
+                    primary: o.rect.left == 0 && o.rect.top == 0,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -270,8 +428,15 @@ mod dxgi {
 
     impl Dxgi {
         pub fn new() -> Result<Self> {
-            let (device, ctx) = make_device()?;
-            let (output, rect) = primary_output(&device)?;
+            Self::new_index(0)
+        }
+
+        pub fn new_index(index: usize) -> Result<Self> {
+            let outs = enumerate()?;
+            let i = index.min(outs.len() - 1);
+            let (device, ctx) = make_device(Some(&outs[i].adapter))?;
+            let output = outs[i].output.clone();
+            let rect = outs[i].rect;
             let w = (rect.right - rect.left).max(1) as u32;
             let h = (rect.bottom - rect.top).max(1) as u32;
             let dupl = unsafe {
@@ -280,8 +445,12 @@ mod dxgi {
                     .map_err(|e| anyhow!("DuplicateOutput: {}", e))?
             };
             let staging = make_staging(&device, w, h)?;
-            super::log_line(&format!("dxgi ready {}x{} at {},{}", w, h, rect.left, rect.top));
+            super::log_line(&format!(
+                "dxgi ready [{}] {} {}x{} at {},{}",
+                i, outs[i].name, w, h, rect.left, rect.top
+            ));
             Ok(Self {
+                index: i,
                 device,
                 ctx,
                 output,
@@ -308,10 +477,25 @@ mod dxgi {
                     self.holding = false;
                 }
             }
-            let (output, rect) = primary_output(&self.device)?;
+            let outs = enumerate()?;
+            let i = self.index.min(outs.len() - 1);
+            let output = outs[i].output.clone();
+            let rect = outs[i].rect;
             let w = (rect.right - rect.left).max(1) as u32;
             let h = (rect.bottom - rect.top).max(1) as u32;
-            self.dupl = unsafe { output.DuplicateOutput(&self.device)? };
+            // a screen can move to another GPU (hot plug, hybrid graphics), in
+            // that case the old device cannot duplicate it any more
+            self.dupl = match unsafe { output.DuplicateOutput(&self.device) } {
+                Ok(d) => d,
+                Err(_) => {
+                    let (device, ctx) = make_device(Some(&outs[i].adapter))?;
+                    self.device = device;
+                    self.ctx = ctx;
+                    self.staging = make_staging(&self.device, w, h)?;
+                    self.w = 0; // force the buffer rebuild below
+                    unsafe { output.DuplicateOutput(&self.device)? }
+                }
+            };
             self.output = output;
             if w != self.w || h != self.h {
                 self.staging = make_staging(&self.device, w, h)?;

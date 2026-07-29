@@ -44,6 +44,19 @@ pub struct Shared {
     pub connecting: AtomicBool,
     /// Active session profile (MODE_ADMIN / MODE_GAME).
     pub mode: AtomicU8,
+    /// Host side: which screen the capture thread should grab.
+    pub monitor: AtomicU8,
+    /// Viewer side: the screens the host offers plus the active one.
+    pub monitors: Mutex<Vec<crate::proto::MonitorInfo>>,
+    pub active_monitor: AtomicU8,
+    /// File transfers of this session (both directions).
+    pub xfers: Mutex<Vec<crate::xfer::Progress>>,
+    /// Transfer engine of the running session (host or viewer role).
+    pub xfer: Mutex<Option<crate::xfer::Xfer>>,
+    /// Where received files are written to.
+    pub drop_dir: Mutex<std::path::PathBuf>,
+    /// True while a direct peer to peer path carries the video.
+    pub direct: AtomicBool,
     pub stats: Mutex<Stats>,
 }
 
@@ -65,6 +78,13 @@ impl Shared {
             connected: AtomicBool::new(false),
             connecting: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADMIN),
+            monitor: AtomicU8::new(0),
+            monitors: Mutex::new(Vec::new()),
+            active_monitor: AtomicU8::new(0),
+            xfers: Mutex::new(Vec::new()),
+            xfer: Mutex::new(None),
+            drop_dir: Mutex::new(crate::xfer::default_dir()),
+            direct: AtomicBool::new(false),
             stats: Mutex::new(Stats::default()),
         }
     }

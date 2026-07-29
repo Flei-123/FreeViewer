@@ -82,6 +82,9 @@ pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
 
     shared.connected.store(false, Ordering::Relaxed);
     shared.connecting.store(false, Ordering::Relaxed);
+    if let Some(mut x) = shared.xfer.lock().unwrap().take() {
+        x.shutdown();
+    }
     *shared.input_tx.lock().unwrap() = None;
     *shared.frame.lock().unwrap() = None;
     crate::vinput::set_active(false);
@@ -198,6 +201,16 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }
                         });
 
+                        // file transfer engine for this session
+                        {
+                            let sh = shared.clone();
+                            let send_msg: Arc<dyn Fn(Msg) + Send + Sync> =
+                                Arc::new(move |m: Msg| sh.send_input(m));
+                            shared.xfers.lock().unwrap().clear();
+                            *shared.xfer.lock().unwrap() =
+                                Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
+                        }
+
                         // clipboard sync (own thread, clipboard handles are not Send)
                         let sh_clip = shared.clone();
                         std::thread::spawn(move || clipboard_worker(sh_clip));
@@ -232,6 +245,10 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         match decode(&plain) {
                             Some(Msg::ScreenInfo { width, height }) => {
                                 *shared.remote_size.lock().unwrap() = (width, height);
+                            }
+                            Some(Msg::Monitors { active, list }) => {
+                                *shared.monitors.lock().unwrap() = list;
+                                shared.active_monitor.store(active, Ordering::Relaxed);
                             }
                             Some(Msg::Cursor { x, y, visible }) => {
                                 *shared.remote_cursor.lock().unwrap() = (x, y, visible);
@@ -290,6 +307,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                     win_frames += 1;
                                     canvas.seq += 1;
                                     canvas.publish(shared);
+                                }
+                            }
+                            Some(m) if crate::xfer::is_file_msg(&m) => {
+                                if let Some(x) = shared.xfer.lock().unwrap().as_mut() {
+                                    x.on_msg(m);
                                 }
                             }
                             Some(Msg::Pong { ts }) => {
