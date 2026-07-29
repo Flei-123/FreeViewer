@@ -28,6 +28,10 @@ pub struct Profile {
     pub full_q: u8,
     pub tile_q: u8,
     pub fps: u64,
+    /// Target bitrate of the H.264 encoder in bit/s. Only an upper bound -
+    /// the encoder runs in variable bitrate mode, a still desktop costs
+    /// almost nothing.
+    pub bitrate: u32,
 }
 
 pub const ADMIN: Profile = Profile {
@@ -35,6 +39,7 @@ pub const ADMIN: Profile = Profile {
     full_q: 68,
     tile_q: 78,
     fps: 30,
+    bitrate: 8_000_000,
 };
 
 pub const GAME: Profile = Profile {
@@ -42,6 +47,7 @@ pub const GAME: Profile = Profile {
     full_q: 48,
     tile_q: 55,
     fps: 60,
+    bitrate: 15_000_000,
 };
 
 pub fn profile(mode: u8) -> Profile {
@@ -165,6 +171,8 @@ struct Session {
     mode: Arc<AtomicU8>,
     monitor: Arc<AtomicU8>,
     force_key: Arc<AtomicBool>,
+    /// The viewer told us it can decode H.264.
+    h264: Arc<AtomicBool>,
 }
 
 /// The screens this machine could share, in protocol form.
@@ -195,6 +203,7 @@ impl Session {
             mode: Arc::new(AtomicU8::new(proto::MODE_ADMIN)),
             monitor: Arc::new(AtomicU8::new(0)),
             force_key: Arc::new(AtomicBool::new(false)),
+            h264: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -288,8 +297,9 @@ impl Session {
                 let mode = self.mode.clone();
                 let mon = self.monitor.clone();
                 let fkey = self.force_key.clone();
+                let h264 = self.h264.clone();
                 std::thread::spawn(move || {
-                    capture_loop(stop, out_tx, screen_cap, shared2, mode, mon, fkey)
+                    capture_loop(stop, out_tx, screen_cap, shared2, mode, mon, fkey, h264)
                 });
 
                 self.cipher = Some(cipher);
@@ -323,6 +333,12 @@ impl Session {
                         Msg::NeedKeyframe => {
                             self.force_key.store(true, Ordering::Relaxed);
                         }
+                        Msg::Caps { h264 } => {
+                            let before = self.h264.swap(h264, Ordering::Relaxed);
+                            if before != h264 {
+                                self.force_key.store(true, Ordering::Relaxed);
+                            }
+                        }
                         Msg::SetMode { mode } => {
                             self.mode.store(mode, Ordering::Relaxed);
                             *shared.host_peer.lock().unwrap() = if mode == proto::MODE_GAME {
@@ -347,22 +363,40 @@ impl Session {
 
 /// Streaming resolution for a captured screen (downscale wide screens).
 fn target_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
-    if w > max_w {
+    let (tw, th) = if w > max_w {
         let nh = ((h as f64) * (max_w as f64) / (w as f64)).round() as u32;
         (max_w, nh.max(1))
     } else {
         (w.max(1), h.max(1))
-    }
+    };
+    // H.264 works on 4:2:0 chroma, so both edges have to be even. Rounding
+    // down by one pixel is invisible and keeps the JPEG path happy as well.
+    ((tw & !1).max(2), (th & !1).max(2))
 }
 
 /// Scaled RGB of the current frame: hardware scaler if the backend has one,
 /// otherwise the CPU box filter.
 fn frame_rgb(cap: &mut Box<dyn capture::Backend>, dw: u32, dh: u32) -> Vec<u8> {
-    if let Some(b) = cap.scaled_rgb(dw, dh) {
+    if let Some(b) = cap.scaled(dw, dh, false) {
         return b.to_vec();
     }
     let (buf, w, h, bgra) = cap.frame();
     encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra)
+}
+
+/// NV12 of the current frame for the video encoder. The GPU does scaling and
+/// colour conversion in one step; without a hardware scaler we scale on the
+/// CPU and convert afterwards.
+fn frame_nv12(cap: &mut Box<dyn capture::Backend>, dw: u32, dh: u32, out: &mut Vec<u8>) -> bool {
+    if let Some(b) = cap.scaled(dw, dh, true) {
+        out.clear();
+        out.extend_from_slice(b);
+        return true;
+    }
+    let (buf, w, h, bgra) = cap.frame();
+    let rgb = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+    crate::h264::rgb_to_nv12(&rgb, dw, dh, out);
+    false
 }
 
 /// `freeviewer --gputest [n]` - is the GPU scaler faster than the CPU one and
@@ -397,7 +431,7 @@ pub fn gpu_selftest(rounds: u32) -> String {
             Next::Lost => break,
         }
         let t = Instant::now();
-        let gpu = cap.scaled_rgb(dw, dh).map(|b| b.to_vec());
+        let gpu = cap.scaled(dw, dh, false).map(|b| b.to_vec());
         let gpu_us = t.elapsed().as_micros();
         let t = Instant::now();
         let (buf, w, h, bgra) = cap.frame();
@@ -536,9 +570,172 @@ pub fn delta_selftest(rounds: u32) -> String {
     out
 }
 
+/// `freeviewer --videotest [rounds]` - the honest comparison on the real
+/// desktop: same captured frames through the JPEG tile encoder and through
+/// hardware H.264, side by side.
+pub fn video_selftest(rounds: u32) -> String {
+    let mut out = String::new();
+    for (name, prof) in [("Fernwartung", ADMIN), ("Spiel", GAME)] {
+        let mut cap = match capture::open(true) {
+            Some(c) => c,
+            None => return "kein Capture-Backend\n".to_string(),
+        };
+        let (sw, sh) = cap.size();
+        let (dw, dh) = target_size(sw, sh, prof.max_w);
+        out.push_str(&format!(
+            "== {} == {} {}x{} -> {}x{} @{} fps\n",
+            name,
+            cap.name(),
+            sw,
+            sh,
+            dw,
+            dh,
+            prof.fps
+        ));
+
+        let mut enc = match crate::h264::Encoder::new(dw, dh, prof.fps as u32, prof.bitrate) {
+            Ok(e) => e,
+            Err(e) => {
+                out.push_str(&format!("kein H.264 Encoder: {}\n", e));
+                continue;
+            }
+        };
+        out.push_str(&format!(
+            "encoder {} ({})\n",
+            enc.name(),
+            if enc.hardware() { "GPU" } else { "CPU" }
+        ));
+        let mut delta = Delta::new();
+        delta.set_quality(prof.full_q, prof.tile_q);
+
+        let mut nv12 = Vec::new();
+        let (mut t_cap, mut t_scale, mut t_nv, mut t_264, mut t_jpg) =
+            (0u128, 0u128, 0u128, 0u128, 0u128);
+        let (mut b_264, mut b_jpg) = (0usize, 0usize);
+        let (mut n_264, mut n_jpg, mut frames, mut idle) = (0u32, 0u32, 0u32, 0u32);
+        let mut keys = 0u32;
+
+        for _ in 0..rounds {
+            let t = Instant::now();
+            match cap.next(200) {
+                Next::Frame => {}
+                Next::Unchanged => {
+                    idle += 1;
+                    continue;
+                }
+                Next::Lost => break,
+            }
+            t_cap += t.elapsed().as_micros();
+            let t = Instant::now();
+            let rgb = frame_rgb(&mut cap, dw, dh);
+            t_scale += t.elapsed().as_micros();
+            frames += 1;
+
+            let t = Instant::now();
+            let gpu_nv12 = frame_nv12(&mut cap, dw, dh, &mut nv12);
+            t_nv += t.elapsed().as_micros();
+            if frames == 1 {
+                // verify the colour conversion the GPU did against our own
+                let mut cpu = Vec::new();
+                crate::h264::rgb_to_nv12(&rgb, dw, dh, &mut cpu);
+                if gpu_nv12 && cpu.len() == nv12.len() {
+                    let n = cpu.len();
+                    let ysize = (dw * dh) as usize;
+                    let mut sum = 0f64;
+                    let mut max = 0u32;
+                    for i in 0..n {
+                        let d = (cpu[i] as i32 - nv12[i] as i32).unsigned_abs();
+                        sum += d as f64;
+                        max = max.max(d);
+                    }
+                    out.push_str(&format!(
+                        "NV12 kommt von der GPU | Abweichung zur CPU-Konvertierung: Mittel {:.2}, Max {} (Y-Ebene {} Byte)\n",
+                        sum / n as f64,
+                        max,
+                        ysize
+                    ));
+                } else if !gpu_nv12 {
+                    out.push_str("NV12 wird auf der CPU erzeugt (kein GPU-Scaler)\n");
+                }
+            }
+            let t = Instant::now();
+            match enc.encode(&nv12) {
+                Ok(cs) => {
+                    t_264 += t.elapsed().as_micros();
+                    for c in cs {
+                        b_264 += c.data.len();
+                        n_264 += 1;
+                        if c.key {
+                            keys += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    out.push_str(&format!("encode: {}\n", e));
+                    break;
+                }
+            }
+
+            let t = Instant::now();
+            let res = delta.encode(&rgb, dw, dh);
+            t_jpg += t.elapsed().as_micros();
+            if res.msg.is_some() {
+                b_jpg += res.bytes;
+                n_jpg += 1;
+            }
+        }
+
+        let f = frames.max(1) as f32;
+        out.push_str(&format!(
+            "{} Frames, {} unveraendert | capture {:.2} ms | scale {:.2} ms\n",
+            frames,
+            idle,
+            t_cap as f32 / f / 1000.0,
+            t_scale as f32 / f / 1000.0
+        ));
+        out.push_str(&format!(
+            "H.264 : RGB->NV12 {:.2} ms + encode {:.2} ms = {:.2} ms/Frame | {} Einheiten ({} Key), {:.1} KB/Frame, {:.2} Mbit/s bei {} fps\n",
+            t_nv as f32 / f / 1000.0,
+            t_264 as f32 / f / 1000.0,
+            (t_nv + t_264) as f32 / f / 1000.0,
+            n_264,
+            keys,
+            b_264 as f32 / n_264.max(1) as f32 / 1024.0,
+            b_264 as f32 * 8.0 / 1_000_000.0 / (n_264.max(1) as f32 / prof.fps as f32),
+            prof.fps
+        ));
+        out.push_str(&format!(
+            "JPEG  : encode {:.2} ms/Frame | {} gesendet, {:.1} KB/Frame, {:.2} Mbit/s bei {} fps\n",
+            t_jpg as f32 / f / 1000.0,
+            n_jpg,
+            b_jpg as f32 / n_jpg.max(1) as f32 / 1024.0,
+            b_jpg as f32 * 8.0 / 1_000_000.0 / (n_jpg.max(1) as f32 / prof.fps as f32),
+            prof.fps
+        ));
+        if b_264 > 0 && b_jpg > 0 {
+            out.push_str(&format!(
+                "=> H.264 braucht {:.2}x der JPEG-Datenmenge und {:.2}x der Encode-Zeit\n",
+                b_264 as f32 / b_jpg as f32,
+                (t_nv + t_264) as f32 / t_jpg.max(1) as f32
+            ));
+        }
+    }
+    out
+}
+
 /// Capture thread + encode thread. The grabber keeps pulling frames while the
 /// encoder is still busy with the previous one, so a session runs at roughly
 /// max(capture, encode) instead of capture + encode.
+/// Which codec carries the picture of this session.
+enum Codec {
+    Jpeg(Delta),
+    H264 {
+        enc: crate::h264::Encoder,
+        nv12: Vec<u8>,
+        mode: u8,
+    },
+}
+
 fn capture_loop(
     stop: Arc<AtomicBool>,
     out: mpsc::UnboundedSender<Vec<u8>>,
@@ -547,12 +744,14 @@ fn capture_loop(
     mode: Arc<AtomicU8>,
     monitor: Arc<AtomicU8>,
     force_key: Arc<AtomicBool>,
+    want_h264: Arc<AtomicBool>,
 ) {
     // FV_NODELTA / FV_NOSKIP force a full frame every time (benchmarks)
     let force_full = std::env::var("FV_NODELTA").is_ok() || std::env::var("FV_NOSKIP").is_ok();
     let no_dxgi = std::env::var("FV_NODXGI").is_ok();
 
-    let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32)>(1);
+    // (pixels, width, height, true = the buffer is already NV12)
+    let (raw_tx, raw_rx) = sync_channel::<(Vec<u8>, u32, u32, bool)>(1);
     let stop_grab = stop.clone();
     let shared_grab = shared.clone();
     let out_grab = out.clone();
@@ -560,6 +759,7 @@ fn capture_loop(
     let screen_grab = screen.clone();
     let mon_grab = monitor.clone();
     let key_grab = force_key.clone();
+    let h264_grab = want_h264.clone();
 
     let grabber = std::thread::spawn(move || {
         let mut cur_mon = mon_grab.load(Ordering::Relaxed) as usize;
@@ -653,9 +853,17 @@ fn capture_loop(
                     fails = 0;
                     let (cw, ch) = cap.size();
                     let (dw, dh) = target_size(cw, ch, prof.max_w);
-                    let rgb = frame_rgb(&mut cap, dw, dh);
+                    // With H.264 the GPU scales AND converts to NV12 in one
+                    // pass, so no RGB frame is ever built on the CPU.
+                    let (buf, is_nv12) = if h264_grab.load(Ordering::Relaxed) {
+                        let mut b = Vec::new();
+                        frame_nv12(&mut cap, dw, dh, &mut b);
+                        (b, true)
+                    } else {
+                        (frame_rgb(&mut cap, dw, dh), false)
+                    };
                     // channel full = encoder still busy, drop this frame
-                    let _ = raw_tx.try_send((rgb, dw, dh));
+                    let _ = raw_tx.try_send((buf, dw, dh, is_nv12));
                 }
                 Next::Unchanged => {}
                 Next::Lost => {
@@ -691,33 +899,120 @@ fn capture_loop(
         }
     });
 
-    let mut delta = Delta::new();
+    let no_h264 = std::env::var("FV_NOH264").is_ok();
+    let mut codec = Codec::Jpeg(Delta::new());
     let mut frames = 0u32;
     let mut bytes = 0usize;
     let mut window = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        let (rgb, dw, dh) = match raw_rx.recv_timeout(Duration::from_millis(300)) {
+        let (pixels, dw, dh, is_nv12) = match raw_rx.recv_timeout(Duration::from_millis(300)) {
             Ok(v) => v,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let prof = profile(mode.load(Ordering::Relaxed));
-        delta.set_quality(prof.full_q, prof.tile_q);
-        if force_key.swap(false, Ordering::Relaxed) {
-            delta.reset();
-        }
-        let res = if force_full {
-            delta.encode_full(&rgb, dw, dh)
-        } else {
-            delta.encode(&rgb, dw, dh)
+        let cur_mode = mode.load(Ordering::Relaxed);
+        let prof = profile(cur_mode);
+        let want = want_h264.load(Ordering::Relaxed) && !no_h264 && !force_full;
+
+        // (re)build the video encoder when the viewer, the resolution or the
+        // profile changed; any failure silently falls back to JPEG tiles
+        let fits = match &codec {
+            Codec::H264 { enc, mode: m, .. } => enc.size() == (dw, dh) && *m == cur_mode,
+            Codec::Jpeg(_) => false,
         };
-        if let Some(msg) = res.msg {
-            frames += 1;
-            bytes += res.bytes;
-            if out.send(encode(&msg)).is_err() {
-                break;
+        if want && !fits {
+            match crate::h264::Encoder::new(dw, dh, prof.fps as u32, prof.bitrate) {
+                Ok(enc) => {
+                    shared.set_host_status(format!(
+                        "Video: H.264 {} ({}) {}x{}",
+                        enc.name(),
+                        if enc.hardware() { "GPU" } else { "CPU" },
+                        dw,
+                        dh
+                    ));
+                    codec = Codec::H264 {
+                        enc,
+                        nv12: Vec::new(),
+                        mode: cur_mode,
+                    };
+                }
+                Err(e) => {
+                    capture::log_line(&format!("h264 aus, bleibe bei JPEG: {}", e));
+                    want_h264.store(false, Ordering::Relaxed);
+                    codec = Codec::Jpeg(Delta::new());
+                }
             }
+        } else if !want && matches!(codec, Codec::H264 { .. }) {
+            codec = Codec::Jpeg(Delta::new());
+        }
+
+        let key_now = force_key.swap(false, Ordering::Relaxed);
+        let mut failed = false;
+        match &mut codec {
+            Codec::Jpeg(delta) => {
+                if is_nv12 {
+                    // the grabber was still producing video frames when we
+                    // switched back - the next frame arrives as RGB
+                    continue;
+                }
+                let rgb = &pixels;
+                delta.set_quality(prof.full_q, prof.tile_q);
+                if key_now {
+                    delta.reset();
+                }
+                let res = if force_full {
+                    delta.encode_full(rgb, dw, dh)
+                } else {
+                    delta.encode(rgb, dw, dh)
+                };
+                if let Some(msg) = res.msg {
+                    frames += 1;
+                    bytes += res.bytes;
+                    if out.send(encode(&msg)).is_err() {
+                        break;
+                    }
+                }
+            }
+            Codec::H264 { enc, nv12, .. } => {
+                if key_now {
+                    enc.request_keyframe();
+                }
+                let frame: &[u8] = if is_nv12 {
+                    &pixels
+                } else {
+                    crate::h264::rgb_to_nv12(&pixels, dw, dh, nv12);
+                    nv12
+                };
+                match enc.encode(frame) {
+                    Ok(chunks) => {
+                        for c in chunks {
+                            frames += 1;
+                            bytes += c.data.len();
+                            if out
+                                .send(encode(&Msg::Video {
+                                    width: dw,
+                                    height: dh,
+                                    key: c.key,
+                                    data: c.data,
+                                }))
+                                .is_err()
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        capture::log_line(&format!("h264 encode: {} - zurueck auf JPEG", e));
+                        want_h264.store(false, Ordering::Relaxed);
+                        codec = Codec::Jpeg(Delta::new());
+                    }
+                }
+            }
+        }
+        if failed {
+            break;
         }
 
         if window.elapsed() >= Duration::from_secs(1) {

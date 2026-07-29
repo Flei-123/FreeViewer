@@ -56,3 +56,7 @@ t_*.bat
 t_*.ps1
 patch*.ps1
 sample.log
+
+lf.ps1
+tools/lf.ps1
+tools/append_selftest.ps1

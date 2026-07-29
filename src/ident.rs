@@ -57,16 +57,58 @@ pub fn set_auto_update(on: bool) {
     }
 }
 
+fn password_file() -> PathBuf {
+    config_dir().join("password.txt")
+}
+
 /// Optional fixed password for unattended access:
 /// put it into <config dir>/password.txt (one line). If the file is missing a
 /// fresh random session password is generated on every start.
 pub fn fixed_password() -> Option<String> {
-    let file = config_dir().join("password.txt");
-    let s = fs::read_to_string(file).ok()?;
+    let s = fs::read_to_string(password_file()).ok()?;
     let s = s.trim().to_string();
     if s.is_empty() {
         None
     } else {
         Some(s)
+    }
+}
+
+/// Is a permanent password configured on THIS machine? Every installation
+/// decides that for itself - the password is per machine, never global.
+pub fn has_fixed_password() -> bool {
+    fixed_password().is_some()
+}
+
+/// Stores (or removes) the permanent password of this machine.
+/// `None` or an empty string switches back to "new random password on every
+/// start", which is the TeamViewer-like default.
+pub fn set_fixed_password(pw: Option<&str>) -> std::io::Result<()> {
+    let file = password_file();
+    match pw.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            let _ = fs::create_dir_all(config_dir());
+            fs::write(&file, s)
+        }
+        None => match fs::remove_file(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_password_is_readable_and_long_enough() {
+        let p = random_password();
+        assert_eq!(p.len(), 8);
+        assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
+        // the confusing characters must never show up
+        assert!(!p.contains('0') && !p.contains('1') && !p.contains('l') && !p.contains('o'));
+        // two draws in a row must not be identical
+        assert_ne!(p, random_password());
     }
 }

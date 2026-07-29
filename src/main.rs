@@ -12,6 +12,7 @@ mod capture;
 mod clip;
 mod crypto;
 mod encoder;
+mod h264;
 mod hostside;
 mod ident;
 mod input;
@@ -159,6 +160,34 @@ fn main() -> eframe::Result<()> {
             .unwrap_or(60);
         let report = hostside::gpu_selftest(rounds);
         let path = ident::config_dir().join("gputest.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // H.264 codec self test:  freeviewer --h264test [rounds]
+    if std::env::args().any(|a| a == "--h264test") {
+        let rounds: u32 = std::env::args()
+            .skip_while(|a| a != "--h264test")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let report = h264::selftest(rounds);
+        let path = ident::config_dir().join("h264test.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // live H.264 vs JPEG on the real screen:  freeviewer --videotest [rounds]
+    if std::env::args().any(|a| a == "--videotest") {
+        let rounds: u32 = std::env::args()
+            .skip_while(|a| a != "--videotest")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let report = hostside::video_selftest(rounds);
+        let path = ident::config_dir().join("videotest.txt");
         let _ = std::fs::write(&path, &report);
         println!("{}", report);
         return Ok(());
@@ -372,6 +401,8 @@ struct App {
     last_mods: egui::Modifiers,
     viewer_task: Option<tokio::task::JoinHandle<()>>,
     hint: String,
+    /// Is a permanent password stored for this machine?
+    pw_fixed: bool,
 }
 
 impl App {
@@ -385,6 +416,7 @@ impl App {
             last_mods: egui::Modifiers::default(),
             viewer_task: None,
             hint: String::new(),
+            pw_fixed: ident::has_fixed_password(),
         }
     }
 
@@ -651,17 +683,48 @@ impl App {
                 );
                 ui.add_space(8.0);
                 ui.label("Passwort");
+                let mut changed;
                 {
                     let mut pw = self.shared.password.lock().unwrap();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut *pw)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(180.0),
-                    );
+                    changed = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut *pw)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(180.0),
+                        )
+                        .changed();
                 }
-                if ui.button("Neues Passwort").clicked() {
-                    *self.shared.password.lock().unwrap() = ident::random_password();
+                ui.horizontal(|ui| {
+                    if ui.button("Neues Passwort").clicked() {
+                        *self.shared.password.lock().unwrap() = ident::random_password();
+                        changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.pw_fixed, "merken")
+                        .on_hover_text(
+                            "An: dieses Passwort bleibt nach einem Neustart gleich (unbeaufsichtigter Zugriff).\nAus: bei jedem Start ein neues Zufallspasswort.\nGilt nur fuer DIESEN PC.",
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                if changed {
+                    let pw = self.shared.password.lock().unwrap().clone();
+                    let store = if self.pw_fixed { Some(pw.as_str()) } else { None };
+                    if let Err(e) = ident::set_fixed_password(store) {
+                        self.hint = format!("Passwort nicht gespeichert: {}", e);
+                    }
                 }
+                ui.label(
+                    egui::RichText::new(if self.pw_fixed {
+                        "festes Passwort - ueberlebt Neustarts"
+                    } else {
+                        "Sitzungspasswort - bei jedem Start neu"
+                    })
+                    .weak()
+                    .size(11.0),
+                );
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new(host_status).weak());
                 ui.label(egui::RichText::new(host_peer).weak());

@@ -38,10 +38,14 @@ pub trait Backend {
     /// Mouse position in desktop coordinates plus visibility.
     fn cursor(&self) -> (i32, i32, bool);
     fn name(&self) -> &'static str;
-    /// Scales the current frame to `dw` x `dh` **on the GPU** and returns it
-    /// as packed RGB. `None` means this backend has no hardware scaler, then
-    /// the caller falls back to the CPU path.
-    fn scaled_rgb(&mut self, _dw: u32, _dh: u32) -> Option<&[u8]> {
+    /// Scales the current frame to `dw` x `dh` **on the GPU**.
+    ///
+    /// `nv12 = false` returns packed RGB, `nv12 = true` returns NV12 (the
+    /// format every hardware H.264 encoder wants) - in that case the GPU also
+    /// does the colour conversion and only 1.5 bytes per pixel travel back
+    /// over PCIe instead of 3. `None` means no hardware scaler is available,
+    /// then the caller falls back to the CPU path.
+    fn scaled(&mut self, _dw: u32, _dh: u32, _nv12: bool) -> Option<&[u8]> {
         None
     }
     /// True while the GPU path is in use (diagnostics).
@@ -249,7 +253,9 @@ mod dxgi {
         dirty: Vec<RECT>,
         moves: Vec<DXGI_OUTDUPL_MOVE_RECT>,
         primed: bool,
+        /// one cached video processor per output format
         scaler: Option<Scaler>,
+        scaler_nv12: Option<Scaler>,
         gpu_ok: bool,
         last_tex: Option<ID3D11Texture2D>,
     }
@@ -414,20 +420,21 @@ mod dxgi {
         }
     }
 
-    fn make_tex(
+    fn make_tex_fmt(
         device: &ID3D11Device,
         w: u32,
         h: u32,
         usage: D3D11_USAGE,
         bind: u32,
         cpu: u32,
+        format: DXGI_FORMAT,
     ) -> Result<ID3D11Texture2D> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: w,
             Height: h,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -446,6 +453,17 @@ mod dxgi {
         tex.ok_or_else(|| anyhow!("keine Textur"))
     }
 
+    fn make_tex(
+        device: &ID3D11Device,
+        w: u32,
+        h: u32,
+        usage: D3D11_USAGE,
+        bind: u32,
+        cpu: u32,
+    ) -> Result<ID3D11Texture2D> {
+        make_tex_fmt(device, w, h, usage, bind, cpu, DXGI_FORMAT_B8G8R8A8_UNORM)
+    }
+
     /// Hardware scaler: the GPU resizes the captured desktop before anything
     /// is read back over PCIe. Uses the D3D11 video processor, the same block
     /// the media pipeline uses - no shader compilation needed.
@@ -458,7 +476,9 @@ mod dxgi {
         out_view: ID3D11VideoProcessorOutputView,
         pub in_size: (u32, u32),
         pub out_size: (u32, u32),
-        rgb: Vec<u8>,
+        /// true: the video processor writes NV12 (colour conversion included)
+        pub nv12: bool,
+        buf: Vec<u8>,
     }
 
     impl Scaler {
@@ -469,6 +489,7 @@ mod dxgi {
             ih: u32,
             ow: u32,
             oh: u32,
+            nv12: bool,
         ) -> Result<Self> {
             unsafe {
                 let vdev: ID3D11VideoDevice = device
@@ -508,21 +529,28 @@ mod dxgi {
                     D3D11_BIND_SHADER_RESOURCE.0 as u32 | D3D11_BIND_RENDER_TARGET.0 as u32,
                     0,
                 )?;
-                let dst = make_tex(
+                let fmt = if nv12 {
+                    DXGI_FORMAT_NV12
+                } else {
+                    DXGI_FORMAT_B8G8R8A8_UNORM
+                };
+                let dst = make_tex_fmt(
                     device,
                     ow,
                     oh,
                     D3D11_USAGE_DEFAULT,
-                    D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    D3D11_BIND_RENDER_TARGET.0 as u32,
                     0,
+                    fmt,
                 )?;
-                let stage = make_tex(
+                let stage = make_tex_fmt(
                     device,
                     ow,
                     oh,
                     D3D11_USAGE_STAGING,
                     0,
                     D3D11_CPU_ACCESS_READ.0 as u32,
+                    fmt,
                 )?;
 
                 let ivd = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -548,6 +576,11 @@ mod dxgi {
                 vdev.CreateVideoProcessorOutputView(&dst, &enumr, &ovd, Some(&mut out_view))
                     .map_err(|e| anyhow!("OutputView: {}", e))?;
 
+                let bytes = if nv12 {
+                    ow as usize * oh as usize * 3 / 2
+                } else {
+                    ow as usize * oh as usize * 3
+                };
                 let s = Self {
                     vctx,
                     proc,
@@ -557,12 +590,41 @@ mod dxgi {
                     out_view: out_view.ok_or_else(|| anyhow!("keine OutputView"))?,
                     in_size: (iw, ih),
                     out_size: (ow, oh),
-                    rgb: vec![0u8; ow as usize * oh as usize * 3],
+                    nv12,
+                    buf: vec![0u8; bytes],
                 };
-                // full range RGB in, full range RGB out - no colour conversion
-                s.vctx
-                    .VideoProcessorSetStreamFrameFormat(&s.proc, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-                super::log_line(&format!("gpu scaler {}x{} -> {}x{}", iw, ih, ow, oh));
+                s.vctx.VideoProcessorSetStreamFrameFormat(
+                    &s.proc,
+                    0,
+                    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                );
+                // Colour space bits of D3D11_VIDEO_PROCESSOR_COLOR_SPACE:
+                //   bit 0    Usage          (0 = playback)
+                //   bit 1    RGB_Range      (0 = full 0..255)
+                //   bit 2    YCbCr_Matrix   (0 = BT.601)
+                //   bit 3    xvYCC
+                //   bit 4-5  Nominal_Range  (1 = 16..235, 2 = 0..255)
+                //
+                // The desktop arrives as full range RGB, so the input is
+                // 0..255. NV12 goes out as BT.601 studio range, which is what
+                // the H.264 encoder and our decoder assume - getting this
+                // wrong washes the picture out.
+                const FULL: u32 = 2u32 << 4;
+                const STUDIO: u32 = 1u32 << 4;
+                let cs_in = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: FULL };
+                s.vctx.VideoProcessorSetStreamColorSpace(&s.proc, 0, &cs_in);
+                let cs_out = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: if nv12 { STUDIO } else { FULL },
+                };
+                s.vctx.VideoProcessorSetOutputColorSpace(&s.proc, &cs_out);
+                super::log_line(&format!(
+                    "gpu scaler {}x{} -> {}x{} ({})",
+                    iw,
+                    ih,
+                    ow,
+                    oh,
+                    if nv12 { "NV12" } else { "RGB" }
+                ));
                 Ok(s)
             }
         }
@@ -599,17 +661,38 @@ mod dxgi {
                     .map_err(|e| anyhow!("Map: {}", e))?;
                 let base = map.pData as *const u8;
                 let pitch = map.RowPitch as usize;
-                if self.rgb.len() != ow as usize * oh as usize * 3 {
-                    self.rgb = vec![0u8; ow as usize * oh as usize * 3];
-                }
-                for y in 0..oh as usize {
-                    let row = base.add(y * pitch);
-                    let out = &mut self.rgb[y * ow as usize * 3..(y + 1) * ow as usize * 3];
-                    for x in 0..ow as usize {
-                        let s = row.add(x * 4);
-                        out[x * 3] = *s.add(2);
-                        out[x * 3 + 1] = *s.add(1);
-                        out[x * 3 + 2] = *s;
+                let (w, h) = (ow as usize, oh as usize);
+                if self.nv12 {
+                    // Y plane, then the interleaved UV plane right behind it.
+                    // We hand out a tightly packed buffer (stride = width).
+                    let need = w * h * 3 / 2;
+                    if self.buf.len() != need {
+                        self.buf = vec![0u8; need];
+                    }
+                    for y in 0..h {
+                        let src = base.add(y * pitch);
+                        let dst = &mut self.buf[y * w..(y + 1) * w];
+                        std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), w);
+                    }
+                    for y in 0..h / 2 {
+                        let src = base.add((h + y) * pitch);
+                        let off = w * h + y * w;
+                        let dst = &mut self.buf[off..off + w];
+                        std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), w);
+                    }
+                } else {
+                    if self.buf.len() != w * h * 3 {
+                        self.buf = vec![0u8; w * h * 3];
+                    }
+                    for y in 0..h {
+                        let row = base.add(y * pitch);
+                        let out = &mut self.buf[y * w * 3..(y + 1) * w * 3];
+                        for x in 0..w {
+                            let s = row.add(x * 4);
+                            out[x * 3] = *s.add(2);
+                            out[x * 3 + 1] = *s.add(1);
+                            out[x * 3 + 2] = *s;
+                        }
                     }
                 }
                 ctx.Unmap(&self.stage, 0);
@@ -617,8 +700,8 @@ mod dxgi {
             }
         }
 
-        pub fn rgb(&self) -> &[u8] {
-            &self.rgb
+        pub fn bytes(&self) -> &[u8] {
+            &self.buf
         }
     }
 
@@ -687,6 +770,7 @@ mod dxgi {
                 moves: Vec::with_capacity(32),
                 primed: false,
                 scaler: None,
+                scaler_nv12: None,
                 gpu_ok: std::env::var("FV_NOGPU").is_err(),
                 last_tex: None,
             })
@@ -966,7 +1050,7 @@ mod dxgi {
                             }
                         }
                     }
-                    if self.scaler.is_some() {
+                    if self.scaler.is_some() || self.scaler_nv12.is_some() {
                         // nothing travels over PCIe at full resolution
                         self.primed = true;
                         return Next::Frame;
@@ -996,29 +1080,35 @@ mod dxgi {
             "dxgi"
         }
 
-        fn scaled_rgb(&mut self, dw: u32, dh: u32) -> Option<&[u8]> {
+        fn scaled(&mut self, dw: u32, dh: u32, nv12: bool) -> Option<&[u8]> {
             if !self.gpu_ok {
                 return None;
             }
             let frame = self.last_tex.clone()?;
-            let need = self
-                .scaler
+            let (iw, ih) = (self.w, self.h);
+            let slot = if nv12 {
+                &mut self.scaler_nv12
+            } else {
+                &mut self.scaler
+            };
+            let need = slot
                 .as_ref()
-                .map(|s| s.in_size != (self.w, self.h) || s.out_size != (dw, dh))
+                .map(|s| s.in_size != (iw, ih) || s.out_size != (dw, dh))
                 .unwrap_or(true);
             if need {
-                match Scaler::new(&self.device, &self.ctx, self.w, self.h, dw, dh) {
-                    Ok(s) => self.scaler = Some(s),
+                match Scaler::new(&self.device, &self.ctx, iw, ih, dw, dh, nv12) {
+                    Ok(s) => *slot = Some(s),
                     Err(e) => {
                         super::log_line(&format!("gpu scaler aus: {}", e));
                         self.gpu_ok = false;
                         self.scaler = None;
+                        self.scaler_nv12 = None;
                         return None;
                     }
                 }
             }
             let ctx = self.ctx.clone();
-            let err = match self.scaler.as_mut() {
+            let err = match slot.as_mut() {
                 Some(s) => s.scale(&ctx, &frame).err(),
                 None => Some(anyhow!("kein Scaler")),
             };
@@ -1026,13 +1116,18 @@ mod dxgi {
                 super::log_line(&format!("gpu scale fehlgeschlagen: {}", e));
                 self.gpu_ok = false;
                 self.scaler = None;
+                self.scaler_nv12 = None;
                 return None;
             }
-            self.scaler.as_ref().map(|s| s.rgb())
+            if nv12 {
+                self.scaler_nv12.as_ref().map(|s| s.bytes())
+            } else {
+                self.scaler.as_ref().map(|s| s.bytes())
+            }
         }
 
         fn gpu_scaling(&self) -> bool {
-            self.gpu_ok && self.scaler.is_some()
+            self.gpu_ok && (self.scaler.is_some() || self.scaler_nv12.is_some())
         }
     }
 }

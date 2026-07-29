@@ -50,7 +50,7 @@ impl Canvas {
             width: self.w,
             height: self.h,
             rgba: self.rgba.clone(),
-            seq: self.seq,
+            seq: shared.next_frame_seq(),
         });
     }
 }
@@ -119,6 +119,9 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     let mut win_frames = 0u32;
     let mut win_bytes = 0usize;
     let mut ping_task: Option<tokio::task::JoinHandle<()>> = None;
+    // H.264 runs on its own thread: the decoder is a COM object (not Send)
+    // and decoding must never stall the socket.
+    let mut video: Option<VideoPipe> = None;
 
     let res: Result<()> = loop {
         let item = match stream.next().await {
@@ -211,6 +214,13 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                 Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
                         }
 
+                        // tell the host what we can decode. Without this the
+                        // host keeps sending JPEG tiles, which is exactly what
+                        // older builds expect.
+                        shared.send_input(Msg::Caps {
+                            h264: cfg!(windows) && std::env::var("FV_NOH264").is_err(),
+                        });
+
                         // clipboard sync (own thread, clipboard handles are not Send)
                         let sh_clip = shared.clone();
                         std::thread::spawn(move || clipboard_worker(sh_clip));
@@ -272,6 +282,17 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                     canvas.publish(shared);
                                 }
                             }
+                            Some(Msg::Video {
+                                width,
+                                height,
+                                key,
+                                data,
+                            }) => {
+                                win_bytes += data.len();
+                                let pipe = video
+                                    .get_or_insert_with(|| VideoPipe::start(shared.clone()));
+                                pipe.push(shared, width, height, key, data);
+                            }
                             Some(Msg::Tiles {
                                 width,
                                 height,
@@ -324,6 +345,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
 
                         if win_start.elapsed() >= Duration::from_secs(1) {
                             let secs = win_start.elapsed().as_secs_f32();
+                            win_frames += shared.video_frames.swap(0, Ordering::Relaxed);
                             {
                                 let mut st = shared.stats.lock().unwrap();
                                 st.fps = win_frames as f32 / secs;
@@ -348,4 +370,111 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     let _ = tx.send(WsMsg::text(net::json_bye()));
     writer.abort();
     res
+}
+
+/// Hands encoded video to a decoder thread and keeps an eye on the backlog.
+///
+/// Dropping H.264 frames breaks the reference chain, so we never drop single
+/// pictures - if the decoder falls too far behind we throw the whole queue
+/// away and ask the host for a fresh keyframe instead.
+struct VideoPipe {
+    tx: std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)>,
+    pending: Arc<std::sync::atomic::AtomicI64>,
+    /// true while we wait for the keyframe that restarts the stream
+    resyncing: bool,
+}
+
+/// More than this many undecoded pictures means the viewer cannot keep up.
+const MAX_BACKLOG: i64 = 24;
+
+impl VideoPipe {
+    fn start(shared: Arc<Shared>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(u32, u32, bool, Vec<u8>)>();
+        let pending = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let p2 = pending.clone();
+        std::thread::spawn(move || video_worker(shared, rx, p2));
+        Self {
+            tx,
+            pending,
+            resyncing: false,
+        }
+    }
+
+    fn push(&mut self, shared: &Arc<Shared>, w: u32, h: u32, key: bool, data: Vec<u8>) {
+        if self.resyncing && !key {
+            return;
+        }
+        self.resyncing = false;
+        if self.pending.load(Ordering::Relaxed) > MAX_BACKLOG && !key {
+            self.resyncing = true;
+            shared.send_input(Msg::NeedKeyframe);
+            return;
+        }
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        if self.tx.send((w, h, key, data)).is_err() {
+            self.pending.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn video_worker(
+    shared: Arc<Shared>,
+    rx: std::sync::mpsc::Receiver<(u32, u32, bool, Vec<u8>)>,
+    pending: Arc<std::sync::atomic::AtomicI64>,
+) {
+    let mut dec: Option<crate::h264::Decoder> = None;
+    let mut rgba: Vec<u8> = Vec::new();
+
+    while let Ok((w, h, key, data)) = rx.recv() {
+        pending.fetch_sub(1, Ordering::Relaxed);
+        let stale = dec.as_ref().map(|d| d.size() != (w, h)).unwrap_or(true);
+        if stale {
+            if !key {
+                shared.send_input(Msg::NeedKeyframe);
+                continue;
+            }
+            match crate::h264::Decoder::new(w, h) {
+                Ok(d) => {
+                    shared.set_viewer_status(format!(
+                        "Verbunden - H.264 {}x{} ({})",
+                        w,
+                        h,
+                        d.name()
+                    ));
+                    dec = Some(d);
+                }
+                Err(e) => {
+                    shared.set_viewer_status(format!(
+                        "H.264 nicht verfuegbar ({}) - nutze JPEG",
+                        e
+                    ));
+                    shared.send_input(Msg::Caps { h264: false });
+                    shared.send_input(Msg::NeedKeyframe);
+                    continue;
+                }
+            }
+        }
+        let d = match dec.as_mut() {
+            Some(d) => d,
+            None => continue,
+        };
+        match d.decode(&data, &mut rgba) {
+            Ok(Some((dw, dh))) => {
+                let seq = shared.next_frame_seq();
+                *shared.frame.lock().unwrap() = Some(FrameData {
+                    width: dw,
+                    height: dh,
+                    rgba: std::mem::take(&mut rgba),
+                    seq,
+                });
+                shared.video_frames.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::capture::log_line(&format!("h264 decode: {}", e));
+                dec = None;
+                shared.send_input(Msg::NeedKeyframe);
+            }
+        }
+    }
 }

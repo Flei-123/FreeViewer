@@ -38,6 +38,18 @@ pub enum Msg {
         height: u32,
         jpeg: Vec<u8>,
     },
+    /// One H.264 access unit. `width`/`height` are the visible pixels; `key`
+    /// marks an IDR frame, which is the only place a viewer can join.
+    Video {
+        width: u32,
+        height: u32,
+        key: bool,
+        data: Vec<u8>,
+    },
+    /// Viewer tells the host what it can decode. Sent right after the
+    /// handshake. A viewer that never sends this only gets JPEG, which keeps
+    /// older builds working.
+    Caps { h264: bool },
     /// Only the parts of the frame that changed since the previous one.
     /// `width`/`height` describe the full frame the tiles belong to, so the
     /// viewer can detect a stale canvas and wait for the next keyframe.
@@ -140,6 +152,8 @@ const T_SPECIAL: u8 = 0x36;
 const T_CLIP: u8 = 0x37;
 const T_MODE: u8 = 0x38;
 const T_MONS: u8 = 0x24;
+const T_VIDEO: u8 = 0x25;
+const T_CAPS: u8 = 0x26;
 const T_SETMON: u8 = 0x39;
 const T_FOFFER: u8 = 0x50;
 const T_FCHUNK: u8 = 0x51;
@@ -153,6 +167,8 @@ const T_PONG: u8 = 0x41;
 
 /// Hard limit so a corrupt/hostile message cannot make us allocate wildly.
 const MAX_TILES: usize = 4096;
+/// Upper bound for one encoded video frame (a 4K keyframe stays well below).
+pub const MAX_VIDEO: usize = 8 * 1024 * 1024;
 /// Clipboard transfers are capped so a peer cannot exhaust our memory.
 pub const MAX_CLIP: usize = 256 * 1024;
 /// Upper bound for one file chunk on the wire.
@@ -213,6 +229,24 @@ pub fn encode(m: &Msg) -> Vec<u8> {
                 pu32(&mut v, t.jpeg.len() as u32);
                 v.extend_from_slice(&t.jpeg);
             }
+        }
+        Msg::Video {
+            width,
+            height,
+            key,
+            data,
+        } => {
+            v.reserve(data.len() + 20);
+            v.push(T_VIDEO);
+            pu32(&mut v, *width);
+            pu32(&mut v, *height);
+            v.push(if *key { 1 } else { 0 });
+            pu32(&mut v, data.len() as u32);
+            v.extend_from_slice(data);
+        }
+        Msg::Caps { h264 } => {
+            v.push(T_CAPS);
+            v.push(if *h264 { 1 } else { 0 });
         }
         Msg::Cursor { x, y, visible } => {
             v.push(T_CURSOR);
@@ -434,6 +468,23 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
                 tiles,
             })
         }
+        T_VIDEO => {
+            let width = r.u32()?;
+            let height = r.u32()?;
+            let key = r.u8()? != 0;
+            let n = r.u32()? as usize;
+            if n > MAX_VIDEO {
+                return None;
+            }
+            let data = r.take(n)?.to_vec();
+            Some(Msg::Video {
+                width,
+                height,
+                key,
+                data,
+            })
+        }
+        T_CAPS => Some(Msg::Caps { h264: r.u8()? != 0 }),
         T_CURSOR => Some(Msg::Cursor {
             x: r.i32()?,
             y: r.i32()?,
@@ -662,6 +713,13 @@ mod tests {
                 rtt_ms: 7,
             },
             Msg::NeedKeyframe,
+            Msg::Video {
+                width: 1920,
+                height: 804,
+                key: true,
+                data: vec![0, 0, 0, 1, 0x67, 42],
+            },
+            Msg::Caps { h264: true },
             Msg::Ping { ts: 1234567890 },
         ];
         for m in msgs {
@@ -724,6 +782,26 @@ mod tests {
                 h: 2,
                 primary: true,
             }],
+        });
+        for cut in 0..full.len() {
+            let _ = decode(&full[..cut]);
+        }
+    }
+
+    #[test]
+    fn oversized_video_units_are_rejected() {
+        let mut evil = vec![T_VIDEO];
+        evil.extend_from_slice(&1920u32.to_le_bytes());
+        evil.extend_from_slice(&1080u32.to_le_bytes());
+        evil.push(1);
+        evil.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode(&evil).is_none());
+        // truncation anywhere must not panic
+        let full = encode(&Msg::Video {
+            width: 8,
+            height: 8,
+            key: false,
+            data: vec![1, 2, 3, 4, 5],
         });
         for cut in 0..full.len() {
             let _ = decode(&full[..cut]);

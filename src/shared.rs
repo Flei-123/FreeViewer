@@ -1,6 +1,6 @@
 //! State shared between the GUI thread and the async worker tasks.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -40,6 +40,12 @@ pub struct Shared {
     pub clip_in: Mutex<Option<String>>,
     /// How many clipboard updates the host has sent us (diagnostics/tests).
     pub clip_from_host: AtomicU32,
+    /// Pictures the H.264 worker has decoded (feeds the fps counter).
+    pub video_frames: AtomicU32,
+    /// Monotonic picture counter. Both the JPEG canvas and the video worker
+    /// draw their sequence numbers from here, so the GUI always sees a single
+    /// increasing series no matter which codec is active.
+    pub frame_seq: AtomicU64,
     pub connected: AtomicBool,
     pub connecting: AtomicBool,
     /// Active session profile (MODE_ADMIN / MODE_GAME).
@@ -79,6 +85,8 @@ impl Shared {
             input_tx: Mutex::new(None),
             clip_in: Mutex::new(None),
             clip_from_host: AtomicU32::new(0),
+            video_frames: AtomicU32::new(0),
+            frame_seq: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             connecting: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADMIN),
@@ -112,5 +120,14 @@ impl Shared {
     }
     pub fn game_mode(&self) -> bool {
         self.mode.load(Ordering::Relaxed) == crate::proto::MODE_GAME
+    }
+}
+
+impl Shared {
+    /// Next sequence number for a freshly decoded picture.
+    pub fn next_frame_seq(&self) -> u64 {
+        self.frame_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 }
