@@ -173,6 +173,8 @@ struct Session {
     force_key: Arc<AtomicBool>,
     /// The viewer told us it can decode H.264.
     h264: Arc<AtomicBool>,
+    /// Direct UDP path of this session (video only).
+    p2p: Option<Arc<crate::p2p::P2p>>,
 }
 
 /// The screens this machine could share, in protocol form.
@@ -204,6 +206,7 @@ impl Session {
             monitor: Arc::new(AtomicU8::new(0)),
             force_key: Arc::new(AtomicBool::new(false)),
             h264: Arc::new(AtomicBool::new(false)),
+            p2p: None,
         }
     }
 
@@ -265,18 +268,63 @@ impl Session {
                 let cipher = Arc::new(Mutex::new(Cipher::new(&key, true)));
                 tx.send(WsMsg::Binary(vec![crypto::TAG_OK].into()))?;
 
-                // outgoing pipeline: plain proto bytes -> sealed -> websocket
+                // direct UDP path for the video stream (best effort)
+                let p2p = match crate::p2p::P2p::new(key, true, self.stop.clone()) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        capture::log_line(&format!("p2p aus: {}", e));
+                        None
+                    }
+                };
+
+                // outgoing pipeline: plain proto bytes -> sealed -> websocket.
+                // Video frames take the direct path whenever one is up.
                 let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
                 let c2 = cipher.clone();
                 let tx2 = tx.clone();
+                let p2p_send = p2p.clone();
                 tokio::spawn(async move {
                     while let Some(plain) = out_rx.recv().await {
+                        if proto::is_video(&plain) {
+                            if let Some(p) = p2p_send.as_ref() {
+                                if p.send_msg(&plain).await {
+                                    continue;
+                                }
+                            }
+                        }
                         let sealed = { c2.lock().unwrap().seal(&plain) };
                         if tx2.send(WsMsg::Binary(sealed.into())).is_err() {
                             break;
                         }
                     }
                 });
+
+                if let Some(p) = p2p.clone() {
+                    let offer_tx = out_tx.clone();
+                    let sh = shared.clone();
+                    let p_punch = p.clone();
+                    let p_recv = p.clone();
+                    let sh_state = shared.clone();
+                    tokio::spawn(async move {
+                        let addrs = p.candidates().await;
+                        capture::log_line(&format!("p2p eigene Kandidaten: {:?}", addrs));
+                        let _ = offer_tx.send(encode(&Msg::P2pOffer { token: 0, addrs }));
+                        let sh2 = sh.clone();
+                        tokio::spawn(p_punch.punch_loop(move |direct, rtt| {
+                            sh2.direct.store(direct, Ordering::Relaxed);
+                            *sh2.host_peer.lock().unwrap() = if direct {
+                                format!("Verbunden - direkter Weg ({} ms)", rtt)
+                            } else {
+                                "Verbunden - ueber Relay".to_string()
+                            };
+                        }));
+                        // the host only receives punches on this socket
+                        tokio::spawn(p_recv.recv_loop(move |_msg| {
+                            let _ = &sh_state;
+                        }));
+                    });
+                }
+                self.p2p = p2p;
 
                 let screen = Arc::new(Mutex::new(ScreenRect::default()));
                 let (in_tx, in_rx) = std::sync::mpsc::channel::<Msg>();
@@ -332,6 +380,11 @@ impl Session {
                         }
                         Msg::NeedKeyframe => {
                             self.force_key.store(true, Ordering::Relaxed);
+                        }
+                        Msg::P2pOffer { addrs, .. } => {
+                            if let Some(p) = self.p2p.as_ref() {
+                                p.set_remote(&addrs);
+                            }
                         }
                         Msg::Caps { h264 } => {
                             let before = self.h264.swap(h264, Ordering::Relaxed);

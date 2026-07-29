@@ -180,6 +180,12 @@ pub const MAX_NAME: usize = 512;
 const MAX_MONITORS: usize = 32;
 const MAX_ADDRS: usize = 8;
 
+/// Is this encoded message a video frame? The direct UDP path only carries
+/// those; everything else stays on the reliable relay channel.
+pub fn is_video(encoded: &[u8]) -> bool {
+    encoded.first() == Some(&T_VIDEO)
+}
+
 fn pu32(v: &mut Vec<u8>, x: u32) {
     v.extend_from_slice(&x.to_le_bytes());
 }

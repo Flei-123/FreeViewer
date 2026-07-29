@@ -17,6 +17,7 @@ mod hostside;
 mod ident;
 mod input;
 mod net;
+mod p2p;
 mod proto;
 mod selftest;
 mod shared;
@@ -193,6 +194,15 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // can we punch a hole?  freeviewer --p2ptest
+    if std::env::args().any(|a| a == "--p2ptest") {
+        let report = p2p::selftest();
+        let path = ident::config_dir().join("p2ptest.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
+
     // delta/full-frame benchmark:  freeviewer --deltatest [rounds]
     if std::env::args().any(|a| a == "--deltatest") {
         let rounds: u32 = std::env::args()
@@ -346,6 +356,7 @@ fn main() -> eframe::Result<()> {
             if last >= want {
                 let st = *shared.stats.lock().unwrap();
                 let cur = *shared.remote_cursor.lock().unwrap();
+                let udp = shared.udp_frames.load(Ordering::Relaxed);
                 println!(
                     "OK: {} Frames in {:.1}s, {:.0} fps, {:.0} kbit/s, {:.0} ms rtt, Cursor {:?}",
                     last,
@@ -354,6 +365,15 @@ fn main() -> eframe::Result<()> {
                     st.kbps,
                     st.latency_ms,
                     cur
+                );
+                println!(
+                    "Transport: {} ({} Bilder direkt per UDP, Rest ueber den Relay)",
+                    if shared.direct.load(Ordering::Relaxed) {
+                        "direkt (P2P)"
+                    } else {
+                        "Relay"
+                    },
+                    udp
                 );
                 std::process::exit(0);
             }

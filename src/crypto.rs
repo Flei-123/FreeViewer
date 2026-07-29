@@ -164,6 +164,104 @@ impl Cipher {
     }
 }
 
+/// Key for the direct UDP path. Derived from the session key so it is
+/// completely independent of the WebSocket channel - reusing the same key with
+/// two different counters would repeat a nonce, which breaks AES-GCM.
+pub fn udp_key(session: &[u8; 32]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, session);
+    let mut okm = [0u8; 32];
+    hk.expand(b"freeviewer-v1 udp", &mut okm).expect("hkdf expand");
+    okm
+}
+
+/// Same sealed format as `Cipher`, but built for datagrams: senders do not
+/// need a lock and the receiver tolerates reordering through a 64 packet
+/// sliding window (the scheme IPsec and WireGuard use) instead of demanding
+/// strictly increasing counters.
+pub struct UdpCipher {
+    aead: Aes256Gcm,
+    dir_send: u8,
+    dir_recv: u8,
+    ctr_send: std::sync::atomic::AtomicU64,
+    window: std::sync::Mutex<(u64, u64)>,
+}
+
+impl UdpCipher {
+    pub fn new(session_key: &[u8; 32], is_host: bool) -> Self {
+        let key = udp_key(session_key);
+        Self {
+            aead: Aes256Gcm::new_from_slice(&key).expect("aes key"),
+            dir_send: if is_host { 1 } else { 2 },
+            dir_recv: if is_host { 2 } else { 1 },
+            ctr_send: std::sync::atomic::AtomicU64::new(0),
+            window: std::sync::Mutex::new((0, 0)),
+        }
+    }
+
+    pub fn seal(&self, plain: &[u8]) -> Vec<u8> {
+        let ctr = self
+            .ctr_send
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let mut nonce = [0u8; 12];
+        nonce[0] = self.dir_send;
+        nonce[4..12].copy_from_slice(&ctr.to_be_bytes());
+        let ct = self
+            .aead
+            .encrypt(Nonce::from_slice(&nonce), plain)
+            .expect("aes encrypt");
+        let mut out = Vec::with_capacity(13 + ct.len());
+        out.push(TAG_DATA);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        out
+    }
+
+    pub fn open(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        if frame.len() < 14 || frame[0] != TAG_DATA {
+            return None;
+        }
+        let nonce = &frame[1..13];
+        if nonce[0] != self.dir_recv {
+            return None;
+        }
+        let mut ctr_bytes = [0u8; 8];
+        ctr_bytes.copy_from_slice(&nonce[4..12]);
+        let ctr = u64::from_be_bytes(ctr_bytes);
+        if ctr == 0 {
+            return None;
+        }
+        // check the window before spending time on decryption ...
+        {
+            let (high, mask) = *self.window.lock().unwrap();
+            if ctr <= high {
+                let d = high - ctr;
+                if d >= 64 || mask & (1u64 << d) != 0 {
+                    return None; // too old or already seen
+                }
+            }
+        }
+        let pt = self
+            .aead
+            .decrypt(Nonce::from_slice(nonce), &frame[13..])
+            .ok()?;
+        // ... and only mark it as seen once it is proven authentic
+        let mut w = self.window.lock().unwrap();
+        let (high, mask) = *w;
+        if ctr > high {
+            let shift = ctr - high;
+            let m = if shift >= 64 { 0 } else { mask << shift };
+            *w = (ctr, m | 1);
+        } else {
+            let d = high - ctr;
+            if d < 64 {
+                *w = (high, mask | (1u64 << d));
+            }
+        }
+        Some(pt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +291,37 @@ mod tests {
         assert!(v.open(&frame).is_none());
         let back = v.seal(b"hello host");
         assert_eq!(h.open(&back).unwrap(), b"hello host");
+    }
+
+    #[test]
+    fn udp_channel_tolerates_reordering_but_not_replay() {
+        let key = [7u8; 32];
+        let h = UdpCipher::new(&key, true);
+        let v = UdpCipher::new(&key, false);
+        assert_ne!(udp_key(&key), key, "UDP muss einen eigenen Schluessel haben");
+
+        let a = h.seal(b"eins");
+        let b = h.seal(b"zwei");
+        let c = h.seal(b"drei");
+        // out of order delivery is normal on UDP and must work
+        assert_eq!(v.open(&c).unwrap(), b"drei");
+        assert_eq!(v.open(&a).unwrap(), b"eins");
+        assert_eq!(v.open(&b).unwrap(), b"zwei");
+        // every packet only once
+        assert!(v.open(&b).is_none());
+        // wrong direction (our own packet) must not open
+        assert!(h.open(&a).is_none());
+        // a packet far outside the window is dropped
+        for _ in 0..80 {
+            let x = h.seal(b"fuellung");
+            assert!(v.open(&x).is_some());
+        }
+        assert!(v.open(&a).is_none());
+
+        // tampering is caught by the AEAD tag
+        let mut bad = h.seal(b"echt");
+        let n = bad.len();
+        bad[n - 1] ^= 0xff;
+        assert!(v.open(&bad).is_none());
     }
 }

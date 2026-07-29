@@ -42,6 +42,10 @@ pub struct Shared {
     pub clip_from_host: AtomicU32,
     /// Pictures the H.264 worker has decoded (feeds the fps counter).
     pub video_frames: AtomicU32,
+    /// Bytes that arrived on the direct UDP path (feeds the bitrate counter).
+    pub video_bytes: AtomicU64,
+    /// Pictures that took the direct UDP path instead of the relay.
+    pub udp_frames: AtomicU64,
     /// Monotonic picture counter. Both the JPEG canvas and the video worker
     /// draw their sequence numbers from here, so the GUI always sees a single
     /// increasing series no matter which codec is active.
@@ -86,6 +90,8 @@ impl Shared {
             clip_in: Mutex::new(None),
             clip_from_host: AtomicU32::new(0),
             video_frames: AtomicU32::new(0),
+            video_bytes: AtomicU64::new(0),
+            udp_frames: AtomicU64::new(0),
             frame_seq: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             connecting: AtomicBool::new(false),

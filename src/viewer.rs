@@ -112,6 +112,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
 
     let kp = crypto::keypair();
     let mut cipher: Option<Arc<Mutex<Cipher>>> = None;
+    let mut session_key: Option<[u8; 32]> = None;
     let started = Instant::now();
     let mut canvas = Canvas::new();
     // rolling stats for the session bar
@@ -122,6 +123,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     // H.264 runs on its own thread: the decoder is a COM object (not Send)
     // and decoding must never stall the socket.
     let mut video: Option<VideoPipe> = None;
+    let mut p2p: Option<Arc<crate::p2p::P2p>> = None;
 
     let res: Result<()> = loop {
         let item = match stream.next().await {
@@ -176,6 +178,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         let proof = crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
                         let key = crypto::session_key(&kp.secret, &host_pub, &salt);
                         cipher = Some(Arc::new(Mutex::new(Cipher::new(&key, false))));
+                        session_key = Some(key);
 
                         let mut out = Vec::with_capacity(33);
                         out.push(crypto::TAG_PROOF);
@@ -220,6 +223,54 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         shared.send_input(Msg::Caps {
                             h264: cfg!(windows) && std::env::var("FV_NOH264").is_err(),
                         });
+
+                        // direct UDP path: video only, everything else stays
+                        // on the relay. The decoder pipeline is started here
+                        // so both transports can feed the same worker.
+                        let pipe = video.get_or_insert_with(|| VideoPipe::start(shared.clone()));
+                        if std::env::var("FV_NOP2P").is_err() {
+                            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            match crate::p2p::P2p::new(session_key.unwrap_or([0u8; 32]), false, stop) {
+                                Ok(p) => {
+                                    let sink = pipe.sender();
+                                    let sh_v = shared.clone();
+                                    let p_punch = p.clone();
+                                    let p_recv = p.clone();
+                                    let sh_off = shared.clone();
+                                    let p_off = p.clone();
+                                    tokio::spawn(async move {
+                                        let addrs = p_off.candidates().await;
+                                        crate::capture::log_line(&format!(
+                                            "p2p eigene Kandidaten: {:?}",
+                                            addrs
+                                        ));
+                                        sh_off.send_input(Msg::P2pOffer { token: 0, addrs });
+                                    });
+                                    let sh_state = shared.clone();
+                                    tokio::spawn(p_punch.punch_loop(move |direct, _rtt| {
+                                        sh_state.direct.store(direct, Ordering::Relaxed);
+                                    }));
+                                    tokio::spawn(p_recv.recv_loop(move |plain| {
+                                        sh_v.video_bytes
+                                            .fetch_add(plain.len() as u64, Ordering::Relaxed);
+                                        if let Some(Msg::Video {
+                                            width,
+                                            height,
+                                            key,
+                                            data,
+                                        }) = decode(&plain)
+                                        {
+                                            sh_v.udp_frames.fetch_add(1, Ordering::Relaxed);
+                                            let _ = sink.send((width, height, key, data));
+                                        }
+                                    }));
+                                    p2p = Some(p);
+                                }
+                                Err(e) => {
+                                    crate::capture::log_line(&format!("p2p aus: {}", e))
+                                }
+                            }
+                        }
 
                         // clipboard sync (own thread, clipboard handles are not Send)
                         let sh_clip = shared.clone();
@@ -335,6 +386,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                     x.on_msg(m);
                                 }
                             }
+                            Some(Msg::P2pOffer { addrs, .. }) => {
+                                if let Some(p) = p2p.as_ref() {
+                                    p.set_remote(&addrs);
+                                }
+                            }
                             Some(Msg::Pong { ts }) => {
                                 let now = started.elapsed().as_millis() as u64;
                                 let rtt = now.saturating_sub(ts) as f32;
@@ -346,6 +402,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         if win_start.elapsed() >= Duration::from_secs(1) {
                             let secs = win_start.elapsed().as_secs_f32();
                             win_frames += shared.video_frames.swap(0, Ordering::Relaxed);
+                            win_bytes += shared.video_bytes.swap(0, Ordering::Relaxed) as usize;
                             {
                                 let mut st = shared.stats.lock().unwrap();
                                 st.fps = win_frames as f32 / secs;
@@ -388,6 +445,11 @@ struct VideoPipe {
 const MAX_BACKLOG: i64 = 24;
 
 impl VideoPipe {
+    /// A clone of the input side, for the direct UDP path.
+    fn sender(&self) -> std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)> {
+        self.tx.clone()
+    }
+
     fn start(shared: Arc<Shared>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<(u32, u32, bool, Vec<u8>)>();
         let pending = Arc::new(std::sync::atomic::AtomicI64::new(0));
