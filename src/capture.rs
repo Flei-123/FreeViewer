@@ -38,6 +38,16 @@ pub trait Backend {
     /// Mouse position in desktop coordinates plus visibility.
     fn cursor(&self) -> (i32, i32, bool);
     fn name(&self) -> &'static str;
+    /// Scales the current frame to `dw` x `dh` **on the GPU** and returns it
+    /// as packed RGB. `None` means this backend has no hardware scaler, then
+    /// the caller falls back to the CPU path.
+    fn scaled_rgb(&mut self, _dw: u32, _dh: u32) -> Option<&[u8]> {
+        None
+    }
+    /// True while the GPU path is in use (diagnostics).
+    fn gpu_scaling(&self) -> bool {
+        false
+    }
 }
 
 /// One screen that can be shared. Index 0 is always the primary monitor.
@@ -239,6 +249,9 @@ mod dxgi {
         dirty: Vec<RECT>,
         moves: Vec<DXGI_OUTDUPL_MOVE_RECT>,
         primed: bool,
+        scaler: Option<Scaler>,
+        gpu_ok: bool,
+        last_tex: Option<ID3D11Texture2D>,
     }
 
     impl Drop for Dxgi {
@@ -401,6 +414,214 @@ mod dxgi {
         }
     }
 
+    fn make_tex(
+        device: &ID3D11Device,
+        w: u32,
+        h: u32,
+        usage: D3D11_USAGE,
+        bind: u32,
+        cpu: u32,
+    ) -> Result<ID3D11Texture2D> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: usage,
+            BindFlags: bind,
+            CPUAccessFlags: cpu,
+            MiscFlags: 0,
+        };
+        let mut tex: Option<ID3D11Texture2D> = None;
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut tex))
+                .map_err(|e| anyhow!("CreateTexture2D: {}", e))?;
+        }
+        tex.ok_or_else(|| anyhow!("keine Textur"))
+    }
+
+    /// Hardware scaler: the GPU resizes the captured desktop before anything
+    /// is read back over PCIe. Uses the D3D11 video processor, the same block
+    /// the media pipeline uses - no shader compilation needed.
+    pub struct Scaler {
+        vctx: ID3D11VideoContext,
+        proc: ID3D11VideoProcessor,
+        src: ID3D11Texture2D,
+        stage: ID3D11Texture2D,
+        in_view: ID3D11VideoProcessorInputView,
+        out_view: ID3D11VideoProcessorOutputView,
+        pub in_size: (u32, u32),
+        pub out_size: (u32, u32),
+        rgb: Vec<u8>,
+    }
+
+    impl Scaler {
+        pub fn new(
+            device: &ID3D11Device,
+            ctx: &ID3D11DeviceContext,
+            iw: u32,
+            ih: u32,
+            ow: u32,
+            oh: u32,
+        ) -> Result<Self> {
+            unsafe {
+                let vdev: ID3D11VideoDevice = device
+                    .cast()
+                    .map_err(|e| anyhow!("kein Video-Device: {}", e))?;
+                let vctx: ID3D11VideoContext = ctx
+                    .cast()
+                    .map_err(|e| anyhow!("kein Video-Context: {}", e))?;
+                let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                    InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                    InputFrameRate: DXGI_RATIONAL {
+                        Numerator: 60,
+                        Denominator: 1,
+                    },
+                    InputWidth: iw,
+                    InputHeight: ih,
+                    OutputFrameRate: DXGI_RATIONAL {
+                        Numerator: 60,
+                        Denominator: 1,
+                    },
+                    OutputWidth: ow,
+                    OutputHeight: oh,
+                    Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+                };
+                let enumr = vdev
+                    .CreateVideoProcessorEnumerator(&desc)
+                    .map_err(|e| anyhow!("VideoProcessorEnumerator: {}", e))?;
+                let proc = vdev
+                    .CreateVideoProcessor(&enumr, 0)
+                    .map_err(|e| anyhow!("CreateVideoProcessor: {}", e))?;
+
+                let src = make_tex(
+                    device,
+                    iw,
+                    ih,
+                    D3D11_USAGE_DEFAULT,
+                    D3D11_BIND_SHADER_RESOURCE.0 as u32 | D3D11_BIND_RENDER_TARGET.0 as u32,
+                    0,
+                )?;
+                let dst = make_tex(
+                    device,
+                    ow,
+                    oh,
+                    D3D11_USAGE_DEFAULT,
+                    D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    0,
+                )?;
+                let stage = make_tex(
+                    device,
+                    ow,
+                    oh,
+                    D3D11_USAGE_STAGING,
+                    0,
+                    D3D11_CPU_ACCESS_READ.0 as u32,
+                )?;
+
+                let ivd = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                    FourCC: 0,
+                    ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_VPIV {
+                            MipSlice: 0,
+                            ArraySlice: 0,
+                        },
+                    },
+                };
+                let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
+                vdev.CreateVideoProcessorInputView(&src, &enumr, &ivd, Some(&mut in_view))
+                    .map_err(|e| anyhow!("InputView: {}", e))?;
+                let ovd = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                    ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                    },
+                };
+                let mut out_view: Option<ID3D11VideoProcessorOutputView> = None;
+                vdev.CreateVideoProcessorOutputView(&dst, &enumr, &ovd, Some(&mut out_view))
+                    .map_err(|e| anyhow!("OutputView: {}", e))?;
+
+                let s = Self {
+                    vctx,
+                    proc,
+                    src,
+                    stage,
+                    in_view: in_view.ok_or_else(|| anyhow!("keine InputView"))?,
+                    out_view: out_view.ok_or_else(|| anyhow!("keine OutputView"))?,
+                    in_size: (iw, ih),
+                    out_size: (ow, oh),
+                    rgb: vec![0u8; ow as usize * oh as usize * 3],
+                };
+                // full range RGB in, full range RGB out - no colour conversion
+                s.vctx
+                    .VideoProcessorSetStreamFrameFormat(&s.proc, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+                super::log_line(&format!("gpu scaler {}x{} -> {}x{}", iw, ih, ow, oh));
+                Ok(s)
+            }
+        }
+
+        /// frame (GPU) -> scaled (GPU) -> staging -> packed RGB.
+        pub fn scale(&mut self, ctx: &ID3D11DeviceContext, frame: &ID3D11Texture2D) -> Result<()> {
+            unsafe {
+                ctx.CopyResource(&self.src, frame);
+                let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                    Enable: true.into(),
+                    OutputIndex: 0,
+                    InputFrameOrField: 0,
+                    PastFrames: 0,
+                    FutureFrames: 0,
+                    ppPastSurfaces: std::ptr::null_mut(),
+                    pInputSurface: std::mem::ManuallyDrop::new(Some(self.in_view.clone())),
+                    ppFutureSurfaces: std::ptr::null_mut(),
+                    ppPastSurfacesRight: std::ptr::null_mut(),
+                    pInputSurfaceRight: std::mem::ManuallyDrop::new(None),
+                    ppFutureSurfacesRight: std::ptr::null_mut(),
+                };
+                let res = self
+                    .vctx
+                    .VideoProcessorBlt(&self.proc, &self.out_view, 0, &[stream.clone()]);
+                std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
+                res.map_err(|e| anyhow!("VideoProcessorBlt: {}", e))?;
+
+                let dst_tex: ID3D11Resource = self.out_view.GetResource()?;
+                ctx.CopyResource(&self.stage, &dst_tex);
+
+                let (ow, oh) = self.out_size;
+                let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+                ctx.Map(&self.stage, 0, D3D11_MAP_READ, 0, Some(&mut map))
+                    .map_err(|e| anyhow!("Map: {}", e))?;
+                let base = map.pData as *const u8;
+                let pitch = map.RowPitch as usize;
+                if self.rgb.len() != ow as usize * oh as usize * 3 {
+                    self.rgb = vec![0u8; ow as usize * oh as usize * 3];
+                }
+                for y in 0..oh as usize {
+                    let row = base.add(y * pitch);
+                    let out = &mut self.rgb[y * ow as usize * 3..(y + 1) * ow as usize * 3];
+                    for x in 0..ow as usize {
+                        let s = row.add(x * 4);
+                        out[x * 3] = *s.add(2);
+                        out[x * 3 + 1] = *s.add(1);
+                        out[x * 3 + 2] = *s;
+                    }
+                }
+                ctx.Unmap(&self.stage, 0);
+                Ok(())
+            }
+        }
+
+        pub fn rgb(&self) -> &[u8] {
+            &self.rgb
+        }
+    }
+
     fn make_staging(device: &ID3D11Device, w: u32, h: u32) -> Result<ID3D11Texture2D> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: w,
@@ -465,6 +686,9 @@ mod dxgi {
                 dirty: Vec::with_capacity(64),
                 moves: Vec::with_capacity(32),
                 primed: false,
+                scaler: None,
+                gpu_ok: std::env::var("FV_NOGPU").is_err(),
+                last_tex: None,
             })
         }
 
@@ -689,6 +913,65 @@ mod dxgi {
                 if !full && count == 0 {
                     return Next::Unchanged;
                 }
+
+                // Private GPU copy: the duplication surface is gone again
+                // after ReleaseFrame, the hardware scaler still needs it.
+                // Only the changed rectangles are copied - GPU to GPU.
+                if self.gpu_ok {
+                    let same = self
+                        .last_tex
+                        .as_ref()
+                        .map(|t| {
+                            let mut d = D3D11_TEXTURE2D_DESC::default();
+                            t.GetDesc(&mut d);
+                            d.Width == self.w && d.Height == self.h
+                        })
+                        .unwrap_or(false);
+                    if !same {
+                        self.last_tex = make_tex(
+                            &self.device,
+                            self.w,
+                            self.h,
+                            D3D11_USAGE_DEFAULT,
+                            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                            0,
+                        )
+                        .ok();
+                    }
+                    if let Some(dst) = self.last_tex.clone() {
+                        if full || !same {
+                            self.ctx.CopyResource(&dst, &tex);
+                        } else {
+                            let rects: Vec<RECT> = self
+                                .dirty
+                                .iter()
+                                .copied()
+                                .chain(self.moves.iter().map(|m| m.DestinationRect))
+                                .collect();
+                            for r in rects {
+                                let bx = D3D11_BOX {
+                                    left: r.left.max(0) as u32,
+                                    top: r.top.max(0) as u32,
+                                    front: 0,
+                                    right: (r.right.max(0) as u32).min(self.w),
+                                    bottom: (r.bottom.max(0) as u32).min(self.h),
+                                    back: 1,
+                                };
+                                if bx.right <= bx.left || bx.bottom <= bx.top {
+                                    continue;
+                                }
+                                self.ctx.CopySubresourceRegion(
+                                    &dst, 0, bx.left, bx.top, 0, &tex, 0, Some(&bx),
+                                );
+                            }
+                        }
+                    }
+                    if self.scaler.is_some() {
+                        // nothing travels over PCIe at full resolution
+                        self.primed = true;
+                        return Next::Frame;
+                    }
+                }
                 if self.read_back(&tex, full).is_err() {
                     return Next::Lost;
                 }
@@ -711,6 +994,45 @@ mod dxgi {
         }
         fn name(&self) -> &'static str {
             "dxgi"
+        }
+
+        fn scaled_rgb(&mut self, dw: u32, dh: u32) -> Option<&[u8]> {
+            if !self.gpu_ok {
+                return None;
+            }
+            let frame = self.last_tex.clone()?;
+            let need = self
+                .scaler
+                .as_ref()
+                .map(|s| s.in_size != (self.w, self.h) || s.out_size != (dw, dh))
+                .unwrap_or(true);
+            if need {
+                match Scaler::new(&self.device, &self.ctx, self.w, self.h, dw, dh) {
+                    Ok(s) => self.scaler = Some(s),
+                    Err(e) => {
+                        super::log_line(&format!("gpu scaler aus: {}", e));
+                        self.gpu_ok = false;
+                        self.scaler = None;
+                        return None;
+                    }
+                }
+            }
+            let ctx = self.ctx.clone();
+            let err = match self.scaler.as_mut() {
+                Some(s) => s.scale(&ctx, &frame).err(),
+                None => Some(anyhow!("kein Scaler")),
+            };
+            if let Some(e) = err {
+                super::log_line(&format!("gpu scale fehlgeschlagen: {}", e));
+                self.gpu_ok = false;
+                self.scaler = None;
+                return None;
+            }
+            self.scaler.as_ref().map(|s| s.rgb())
+        }
+
+        fn gpu_scaling(&self) -> bool {
+            self.gpu_ok && self.scaler.is_some()
         }
     }
 }

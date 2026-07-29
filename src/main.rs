@@ -150,6 +150,20 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // GPU vs CPU scaling:  freeviewer --gputest [rounds]
+    if std::env::args().any(|a| a == "--gputest") {
+        let rounds: u32 = std::env::args()
+            .skip_while(|a| a != "--gputest")
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let report = hostside::gpu_selftest(rounds);
+        let path = ident::config_dir().join("gputest.txt");
+        let _ = std::fs::write(&path, &report);
+        println!("{}", report);
+        return Ok(());
+    }
+
     // delta/full-frame benchmark:  freeviewer --deltatest [rounds]
     if std::env::args().any(|a| a == "--deltatest") {
         let rounds: u32 = std::env::args()

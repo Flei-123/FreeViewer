@@ -355,6 +355,102 @@ fn target_size(w: u32, h: u32, max_w: u32) -> (u32, u32) {
     }
 }
 
+/// Scaled RGB of the current frame: hardware scaler if the backend has one,
+/// otherwise the CPU box filter.
+fn frame_rgb(cap: &mut Box<dyn capture::Backend>, dw: u32, dh: u32) -> Vec<u8> {
+    if let Some(b) = cap.scaled_rgb(dw, dh) {
+        return b.to_vec();
+    }
+    let (buf, w, h, bgra) = cap.frame();
+    encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra)
+}
+
+/// `freeviewer --gputest [n]` - is the GPU scaler faster than the CPU one and
+/// does it produce the same picture?
+pub fn gpu_selftest(rounds: u32) -> String {
+    let mut out = String::new();
+    let mut cap = match capture::open(true) {
+        Some(c) => c,
+        None => return "kein Capture-Backend\n".to_string(),
+    };
+    let (sw, sh) = cap.size();
+    let (dw, dh) = target_size(sw, sh, ADMIN.max_w);
+    out.push_str(&format!(
+        "backend {} {}x{} -> {}x{}\n",
+        cap.name(),
+        sw,
+        sh,
+        dw,
+        dh
+    ));
+
+    let (mut t_gpu, mut t_cpu) = (0u128, 0u128);
+    let (mut n_gpu, mut n_cpu) = (0u32, 0u32);
+    let mut diff_sum = 0f64;
+    let mut diff_max = 0u32;
+    let mut samples = 0u64;
+
+    for _ in 0..rounds {
+        match cap.next(200) {
+            Next::Frame => {}
+            Next::Unchanged => continue,
+            Next::Lost => break,
+        }
+        let t = Instant::now();
+        let gpu = cap.scaled_rgb(dw, dh).map(|b| b.to_vec());
+        let gpu_us = t.elapsed().as_micros();
+        let t = Instant::now();
+        let (buf, w, h, bgra) = cap.frame();
+        let cpu = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+        let cpu_us = t.elapsed().as_micros();
+
+        t_cpu += cpu_us;
+        n_cpu += 1;
+        if let Some(g) = gpu {
+            t_gpu += gpu_us;
+            n_gpu += 1;
+            // Once the hardware scaler runs, the full resolution CPU buffer is
+            // not refreshed any more (that is the whole point), so only the
+            // first frame can be compared pixel by pixel.
+            if g.len() != cpu.len() {
+                out.push_str("WARN: Groessen unterschiedlich\n");
+            }
+            if n_gpu == 1 && g.len() == cpu.len() {
+                // compare a subsample so the check itself stays cheap
+                let step = (g.len() / 30_000).max(1);
+                let mut i = 0;
+                while i < g.len() {
+                    let d = (g[i] as i32 - cpu[i] as i32).unsigned_abs();
+                    diff_sum += d as f64;
+                    diff_max = diff_max.max(d);
+                    samples += 1;
+                    i += step;
+                }
+            }
+        }
+    }
+
+    if n_gpu == 0 {
+        out.push_str("GPU-Scaler nicht verfuegbar (Fallback CPU)\n");
+    } else {
+        out.push_str(&format!(
+            "GPU {:.2} ms/Frame ({} Frames) | CPU {:.2} ms/Frame ({} Frames) => {:.1}x\n",
+            t_gpu as f32 / n_gpu as f32 / 1000.0,
+            n_gpu,
+            t_cpu as f32 / n_cpu.max(1) as f32 / 1000.0,
+            n_cpu,
+            (t_cpu as f32 / n_cpu.max(1) as f32) / (t_gpu as f32 / n_gpu as f32).max(1.0)
+        ));
+        out.push_str(&format!(
+            "Bildabweichung zur CPU-Skalierung: Mittel {:.2}, Max {} (von 255) ueber {} Stichproben\n",
+            diff_sum / samples.max(1) as f64,
+            diff_max,
+            samples
+        ));
+    }
+    out
+}
+
 /// `freeviewer --captest` - which backend do we get and how fast is it?
 pub fn capture_selftest(rounds: u32) -> String {
     let mut out = String::new();
@@ -397,9 +493,8 @@ pub fn delta_selftest(rounds: u32) -> String {
                 Next::Lost => break,
             }
             n_cap += t.elapsed().as_micros();
-            let (buf, w, h, bgra) = cap.frame();
             let t1 = Instant::now();
-            let rgb = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+            let rgb = frame_rgb(&mut cap, dw, dh);
             n_scale += t1.elapsed().as_micros();
             let t2 = Instant::now();
             let res = delta.encode(&rgb, dw, dh);
@@ -556,9 +651,9 @@ fn capture_loop(
             match cap.next(budget.as_millis() as u32) {
                 Next::Frame => {
                     fails = 0;
-                    let (buf, w, h, bgra) = cap.frame();
-                    let (dw, dh) = target_size(w, h, prof.max_w);
-                    let rgb = encoder::scale_to_rgb_ex(buf, w, h, dw, dh, bgra);
+                    let (cw, ch) = cap.size();
+                    let (dw, dh) = target_size(cw, ch, prof.max_w);
+                    let rgb = frame_rgb(&mut cap, dw, dh);
                     // channel full = encoder still busy, drop this frame
                     let _ = raw_tx.try_send((rgb, dw, dh));
                 }
