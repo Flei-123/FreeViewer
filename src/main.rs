@@ -596,6 +596,58 @@ fn main() -> eframe::Result<()> {
     vinput::init(shared.clone());
     update::watcher(shared.clone());
 
+    // Bild der eigenen Oberflaeche:
+    //   freeviewer --shot C:\bild.jpg [--view start|devices|settings] [--demo]
+    // Die App zeichnet sich selbst und speichert das Ergebnis - das klappt auch
+    // dann, wenn der Bildschirm gesperrt ist und ein Fensterfoto nur weiss waere.
+    if let Some(i) = std::env::args().position(|a| a == "--shot") {
+        let path = std::env::args()
+            .nth(i + 1)
+            .unwrap_or_else(|| "freeviewer-shot.jpg".to_string());
+        let want = std::env::args().skip_while(|a| a != "--view").nth(1);
+        let demo = std::env::args().any(|a| a == "--demo");
+        let knock = std::env::args().any(|a| a == "--knock");
+        let shot_shared = shared.clone();
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1180.0, 800.0])
+                .with_visible(true)
+                .with_icon(app_icon())
+                .with_title("FreeViewer"),
+            ..Default::default()
+        };
+        return eframe::run_native(
+            "FreeViewer",
+            options,
+            Box::new(move |cc| {
+                install_theme(&cc.egui_ctx);
+                let mut app = App::new(shot_shared.clone(), false);
+                if demo {
+                    app.book.started("123456789", "geheim", true);
+                    app.book.rename("123456789", "Buero-PC");
+                    app.book.started("987654321", "", false);
+                    app.selected = Some("123456789".to_string());
+                    app.partner_id = "123456789".to_string();
+                    *shot_shared.my_id.lock().unwrap() = "497628420".to_string();
+                }
+                if knock {
+                    *shot_shared.knock.lock().unwrap() = Some(shared::Knock {
+                        from: "Laptop von Justin".to_string(),
+                        code: "1234".to_string(),
+                        at: std::time::Instant::now(),
+                    });
+                }
+                app.view = match want.as_deref() {
+                    Some("devices") => View::Devices,
+                    Some("settings") => View::Settings,
+                    _ => View::Start,
+                };
+                app.shot = Some(std::path::PathBuf::from(path));
+                Ok(Box::new(app))
+            }),
+        );
+    }
+
     // Started by the autostart entry (or by the service): no window in the
     // user's face, only the tray icon. The host runs either way.
     let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--background");
@@ -613,6 +665,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([700.0, 470.0])
             .with_visible(!start_hidden)
+            .with_icon(app_icon())
             .with_title("FreeViewer"),
         ..Default::default()
     };
@@ -670,6 +723,10 @@ struct App {
     selected: Option<String>,
     /// Who is online right now (asked at the relay).
     presence: Arc<presence::Watch>,
+    /// --shot: wohin das Bild der eigenen Oberflaeche geschrieben wird.
+    shot: Option<std::path::PathBuf>,
+    /// Gezeichnete Frames seit dem Start im --shot-Modus.
+    shot_n: u32,
 }
 
 impl App {
@@ -702,6 +759,8 @@ impl App {
             search: String::new(),
             selected: None,
             presence: watch,
+            shot: None,
+            shot_n: 0,
         }
     }
 
@@ -963,7 +1022,7 @@ impl App {
         });
     }
 
-    /// Update line at the bottom of the home screen.
+    /// Zeile fuer die Selbstaktualisierung.
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let pending = self.shared.update.lock().unwrap().clone();
         let status = self.shared.update_status.lock().unwrap().clone();
@@ -973,48 +1032,8 @@ impl App {
                 self.shared.auto_update.store(auto, Ordering::Relaxed);
                 ident::set_auto_update(auto);
             }
-            let mut boot = self.autostart;
-            if ui
-                .checkbox(&mut boot, "Mit Windows starten")
-                .on_hover_text(
-                    "Startet FreeViewer bei der Anmeldung unsichtbar in den Infobereich",
-                )
-                .changed()
-            {
-                match autostart::set(boot) {
-                    Ok(()) => self.autostart = boot,
-                    Err(e) => self
-                        .shared
-                        .set_update_status(format!("Autostart ging nicht: {}", e)),
-                }
-            }
-            let mut svc = self.service_on;
-            if ui
-                .checkbox(&mut svc, "Auch am Anmeldebildschirm (Dienst)")
-                .on_hover_text(
-                    "Installiert einen Windows-Dienst, der FreeViewer schon vor der Anmeldung \
-                     bereithaelt und den Sperrbildschirm zeigen kann. Fragt nach \
-                     Administrator-Rechten.",
-                )
-                .changed()
-            {
-                let flag = if svc {
-                    "--install-service"
-                } else {
-                    "--uninstall-service"
-                };
-                match service::elevate(flag) {
-                    Ok(()) => self
-                        .shared
-                        .set_update_status("Bitte die Windows-Abfrage bestaetigen..."),
-                    Err(e) => self.shared.set_update_status(format!("{}", e)),
-                }
-            }
             if let Some(rel) = pending {
-                if ui
-                    .button(format!("Update {} jetzt installieren", rel.version))
-                    .clicked()
-                {
+                if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
                     self.shared
                         .set_update_status(format!("Installiere {} ...", rel.version));
                     let sh = self.shared.clone();
@@ -1025,12 +1044,12 @@ impl App {
                     });
                 }
             }
-            if !status.is_empty() {
-                ui.label(egui::RichText::new(status).weak().size(11.0));
-            }
         });
+        if !status.is_empty() {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(status).color(MUTED).size(11.5));
+        }
     }
-
     fn pull_frame(&mut self, ctx: &egui::Context) {
         let img = {
             let guard = self.shared.frame.lock().unwrap();
@@ -1058,40 +1077,47 @@ impl App {
     // ----------------------------------------------------------- Oberflaeche
 
     /// Kopfzeile mit den drei Bereichen.
+    // ----------------------------------------------------------- Oberfläche
+
+    /// Kopfzeile: Marke links, die drei Bereiche als Pillen, Status rechts.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let my_id = self.shared.my_id.lock().unwrap().clone();
         let online = !my_id.is_empty();
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("FreeViewer")
-                    .size(20.0)
-                    .strong()
-                    .color(ACCENT),
-            );
-            ui.label(
-                egui::RichText::new(format!("v{}", update::VERSION))
-                    .size(11.0)
-                    .color(MUTED),
-            );
-            ui.add_space(12.0);
+            ui.add_space(2.0);
+            logo(ui);
+            ui.add_space(2.0);
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("FreeViewer").size(17.0).strong());
+                ui.label(
+                    egui::RichText::new(format!("Version {}", update::VERSION))
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            });
+            ui.add_space(10.0);
             for (v, name) in [
                 (View::Start, "Start"),
-                (View::Devices, "Geraete"),
+                (View::Devices, "Geräte"),
                 (View::Settings, "Einstellungen"),
             ] {
-                let sel = self.view == v;
-                let text = egui::RichText::new(name).color(if sel { TEXT } else { MUTED });
-                if ui.selectable_label(sel, text).clicked() {
+                if tab(ui, name, self.view == v).clicked() {
                     self.view = v;
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                status_pill(ui, online, if online { "Bereit" } else { "Verbinde..." });
+                status_pill(ui, online, if online { "Bereit" } else { "Verbinde …" });
             });
         });
         ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(10.0);
+        let line = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            line.left()..=line.right(),
+            line.top(),
+            egui::Stroke::new(1.0, LINE),
+        );
+        ui.add_space(8.0);
     }
 
     fn home_ui(&mut self, ui: &mut egui::Ui) {
@@ -1103,7 +1129,7 @@ impl App {
         }
     }
 
-    /// Startseite: links dieser PC, rechts der Weg nach draussen.
+    /// Startseite: links dieser PC, rechts der Weg nach draußen.
     fn start_view(&mut self, ui: &mut egui::Ui) {
         let my_id = self.shared.my_id.lock().unwrap().clone();
         let host_status = self.shared.host_status.lock().unwrap().clone();
@@ -1116,26 +1142,29 @@ impl App {
             let ui = &mut cols[0];
             section(ui, "Fernsteuerung zulassen");
             card(ui, |ui| {
-                ui.label(egui::RichText::new("Ihre ID").color(MUTED).size(12.0));
+                label_small(ui, "Ihre ID");
                 ui.horizontal(|ui| {
                     let id_text = if my_id.len() == 9 {
                         partners::pretty_id(&my_id)
                     } else {
-                        "--- --- ---".to_string()
+                        "— — —".to_string()
                     };
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(id_text).monospace().size(30.0).strong(),
+                            egui::RichText::new(id_text).size(27.0).strong().color(TEXT),
                         )
                         .selectable(true),
                     );
-                    if !my_id.is_empty() && ui.small_button("kopieren").clicked() {
-                        ui.ctx().copy_text(partners::pretty_id(&my_id));
-                        self.hint = "ID kopiert".to_string();
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !my_id.is_empty() && ghost_button(ui, "kopieren").clicked() {
+                            ui.ctx().copy_text(partners::pretty_id(&my_id));
+                            self.hint = "ID kopiert".to_string();
+                        }
+                    });
                 });
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("Passwort").color(MUTED).size(12.0));
+
+                ui.add_space(6.0);
+                label_small(ui, "Passwort");
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     {
@@ -1143,18 +1172,18 @@ impl App {
                         changed = ui
                             .add(
                                 egui::TextEdit::singleline(&mut *pw)
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_width(150.0),
+                                    .font(egui::FontId::new(19.0, egui::FontFamily::Monospace))
+                                    .desired_width(160.0)
+                                    .margin(egui::Margin::symmetric(8, 4)),
                             )
                             .changed();
                     }
-                    if ui.small_button("kopieren").clicked() {
+                    if ghost_button(ui, "kopieren").clicked() {
                         let pw = self.shared.password.lock().unwrap().clone();
                         ui.ctx().copy_text(pw);
                         self.hint = "Passwort kopiert".to_string();
                     }
-                    if ui
-                        .small_button("neu")
+                    if ghost_button(ui, "neu")
                         .on_hover_text("Neues Zufallspasswort erzeugen")
                         .clicked()
                     {
@@ -1162,10 +1191,11 @@ impl App {
                         changed = true;
                     }
                 });
+                ui.add_space(4.0);
                 if ui
                     .checkbox(&mut self.pw_fixed, "Passwort behalten")
                     .on_hover_text(
-                        "An: das Passwort bleibt nach einem Neustart gleich - noetig fuer unbeaufsichtigten Zugriff.\nAus: bei jedem Start ein neues.",
+                        "An: das Passwort bleibt nach einem Neustart gleich – nötig für unbeaufsichtigten Zugriff.\nAus: bei jedem Start ein neues.",
                     )
                     .changed()
                 {
@@ -1178,12 +1208,15 @@ impl App {
                         self.hint = format!("Passwort nicht gespeichert: {}", e);
                     }
                 }
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(host_status).color(MUTED).size(12.0));
-                ui.label(egui::RichText::new(host_peer).color(MUTED).size(12.0));
+
+                ui.add_space(7.0);
+                divider(ui);
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(host_status).size(12.5).color(MUTED));
+                ui.label(egui::RichText::new(host_peer).size(12.5).color(MUTED));
             });
 
-            ui.add_space(14.0);
+            ui.add_space(8.0);
             section(ui, "Unbeaufsichtigter Zugriff");
             card(ui, |ui| {
                 let mut boot = self.autostart;
@@ -1197,9 +1230,10 @@ impl App {
                         Err(e) => self.hint = format!("Autostart ging nicht: {}", e),
                     }
                 }
+                ui.add_space(2.0);
                 let mut svc = self.service_on;
                 if ui
-                    .checkbox(&mut svc, "Einfachen Zugriff gewaehren (Dienst)")
+                    .checkbox(&mut svc, "Einfachen Zugriff gewähren (Dienst)")
                     .on_hover_text(
                         "Windows-Dienst: dieser PC ist auch am Sperr- und Anmeldebildschirm erreichbar, \
                          schon bevor sich jemand anmeldet. Fragt nach Administrator-Rechten.",
@@ -1212,15 +1246,16 @@ impl App {
                         "--uninstall-service"
                     };
                     match service::elevate(flag) {
-                        Ok(()) => self.hint = "Bitte die Windows-Abfrage bestaetigen...".to_string(),
+                        Ok(()) => self.hint = "Bitte die Windows-Abfrage bestätigen …".to_string(),
                         Err(e) => self.hint = format!("{}", e),
                     }
                 }
                 if self.service_on {
+                    ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("Dienst laeuft - auch ohne angemeldeten Benutzer")
+                        egui::RichText::new("Dienst läuft – auch ohne angemeldeten Benutzer")
                             .color(GREEN)
-                            .size(11.0),
+                            .size(11.5),
                     );
                 }
             });
@@ -1229,97 +1264,105 @@ impl App {
             let ui = &mut cols[1];
             section(ui, "Computer fernsteuern");
             card(ui, |ui| {
-                ui.label(egui::RichText::new("Partner-ID").color(MUTED).size(12.0));
+                label_small(ui, "Partner-ID");
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.partner_id)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(190.0)
+                            .font(egui::FontId::new(19.0, egui::FontFamily::Monospace))
+                            .desired_width(210.0)
+                            .margin(egui::Margin::symmetric(8, 4))
                             .hint_text("123 456 789"),
                     );
-                    egui::ComboBox::from_id_salt("letzte_ids")
-                        .selected_text("")
-                        .width(28.0)
-                        .show_ui(ui, |ui| {
-                            for p in self.book.sorted().iter().take(10) {
-                                if ui.selectable_label(false, p.label()).clicked() {
-                                    self.partner_id = p.id.clone();
-                                    if let Some(pw) = self.book.password(&p.id) {
-                                        self.partner_pw = pw;
-                                        self.remember_pw = true;
+                    let list = self.book.sorted();
+                    if !list.is_empty() {
+                        egui::ComboBox::from_id_salt("letzte_ids")
+                            .selected_text("zuletzt")
+                            .width(90.0)
+                            .show_ui(ui, |ui| {
+                                for p in list.iter().take(10) {
+                                    if ui.selectable_label(false, p.label()).clicked() {
+                                        self.partner_id = p.id.clone();
+                                        if let Some(pw) = self.book.password(&p.id) {
+                                            self.partner_pw = pw;
+                                            self.remember_pw = true;
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
+                    }
                 });
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Passwort").color(MUTED).size(12.0));
+
+                ui.add_space(7.0);
+                label_small(ui, "Passwort");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.partner_pw)
                         .password(true)
-                        .desired_width(190.0)
-                        .hint_text("leer lassen fuer Anfrage"),
+                        .desired_width(210.0)
+                        .margin(egui::Margin::symmetric(8, 4))
+                        .hint_text("leer lassen für Anfrage"),
                 );
+                ui.add_space(2.0);
                 ui.checkbox(&mut self.remember_pw, "Passwort merken");
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if accent_button(ui, "Verbinden", !connecting).clicked() {
-                        self.start_session();
-                    }
-                    if ui
-                        .add_enabled(!connecting, egui::Button::new("Bestaetigung anfordern"))
-                        .on_hover_text(
-                            "Ohne Passwort verbinden: die Person am anderen Rechner bekommt eine \
-                             Anfrage und muss sie zulassen.",
-                        )
-                        .clicked()
-                    {
-                        self.start_ask_session();
-                    }
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let mut game = self.shared.mode.load(Ordering::Relaxed) == proto::MODE_GAME;
-                    if ui
-                        .checkbox(&mut game, "Spielmodus")
-                        .on_hover_text(
-                            "Rohe relative Maus, ganze Tastatur, 60 fps - fuer Spiele. \
-                             Sonst Fernwartung mit scharfem Bild.",
-                        )
-                        .changed()
-                    {
-                        self.shared.mode.store(
-                            if game {
-                                proto::MODE_GAME
-                            } else {
-                                proto::MODE_ADMIN
-                            },
-                            Ordering::Relaxed,
-                        );
-                    }
-                });
+
+                ui.add_space(8.0);
+                if accent_button(ui, "Verbinden", !connecting).clicked() {
+                    self.start_session();
+                }
+                ui.add_space(5.0);
+                if ui
+                    .add_enabled(!connecting, ghost(egui::vec2(200.0, 30.0), "Bestätigung anfordern"))
+                    .on_hover_text(
+                        "Ohne Passwort verbinden: die Person am anderen Rechner bekommt eine \
+                         Anfrage und muss sie zulassen.",
+                    )
+                    .clicked()
+                {
+                    self.start_ask_session();
+                }
+
+                ui.add_space(7.0);
+                let mut game = self.shared.mode.load(Ordering::Relaxed) == proto::MODE_GAME;
+                if ui
+                    .checkbox(&mut game, "Spielmodus (rohe Maus, ganze Tastatur)")
+                    .changed()
+                {
+                    self.shared.mode.store(
+                        if game {
+                            proto::MODE_GAME
+                        } else {
+                            proto::MODE_ADMIN
+                        },
+                        Ordering::Relaxed,
+                    );
+                }
                 if !viewer_status.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new(viewer_status).color(MUTED).size(12.0));
+                    ui.add_space(6.0);
+                    divider(ui);
+                    ui.add_space(5.0);
+                    ui.label(egui::RichText::new(viewer_status).size(12.5).color(MUTED));
                 }
             });
 
-            ui.add_space(14.0);
+            ui.add_space(8.0);
             section(ui, "Letzte Verbindungen");
             card(ui, |ui| {
                 let list = self.book.sorted();
                 if list.is_empty() {
                     ui.label(
-                        egui::RichText::new("Noch niemand - oben eine ID eingeben.")
+                        egui::RichText::new("Noch niemand – oben eine ID eingeben.")
                             .color(MUTED)
-                            .size(12.0),
+                            .size(12.5),
                     );
                 }
                 let mut go: Option<String> = None;
-                for p in list.iter().take(4) {
+                for (i, p) in list.iter().take(4).enumerate() {
+                    if i > 0 {
+                        ui.add_space(2.0);
+                    }
                     let online = self.presence.online(&p.id);
                     ui.horizontal(|ui| {
                         dot(ui, online);
+                        ui.add_space(2.0);
                         let label = ui.add(
                             egui::Label::new(egui::RichText::new(p.label()).strong())
                                 .sense(egui::Sense::click()),
@@ -1335,13 +1378,13 @@ impl App {
                             go = Some(p.id.clone());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("verbinden").clicked() {
+                            if ghost_button(ui, "verbinden").clicked() {
                                 go = Some(p.id.clone());
                             }
                             ui.label(
                                 egui::RichText::new(if online { "Online" } else { "Offline" })
                                     .color(if online { GREEN } else { MUTED })
-                                    .size(11.0),
+                                    .size(11.5),
                             );
                         });
                     });
@@ -1360,12 +1403,12 @@ impl App {
         });
 
         if !self.hint.is_empty() {
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(&self.hint).color(ACCENT).size(12.0));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&self.hint).color(ACCENT).size(12.5));
         }
     }
 
-    /// Geraeteliste mit Detailspalte - der Aufbau aus TeamViewer.
+    /// Geräteliste mit Detailspalte – der Aufbau aus TeamViewer.
     fn devices_view(&mut self, ui: &mut egui::Ui) {
         let connecting = self.shared.connecting.load(Ordering::Relaxed);
         let list = self.book.sorted();
@@ -1377,23 +1420,19 @@ impl App {
         let mut fav: Option<String> = None;
         let mut del: Option<String> = None;
 
-        let detail_w = 320.0_f32.min(ui.available_width() * 0.45);
-        let list_w = (ui.available_width() - detail_w - 16.0).max(220.0);
+        let detail_w = 340.0_f32.min(ui.available_width() * 0.42);
+        let list_w = (ui.available_width() - detail_w - 20.0).max(240.0);
 
         ui.horizontal_top(|ui| {
             // ---------------- Liste ----------------
             ui.vertical(|ui| {
                 ui.set_width(list_w);
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .desired_width(list_w - 90.0)
-                            .hint_text("Suchen (Name oder ID)"),
-                    );
-                    if ui.small_button("neu").on_hover_text("ID von Hand eintragen").clicked() {
-                        self.view = View::Start;
-                    }
-                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(list_w)
+                        .margin(egui::Margin::symmetric(8, 5))
+                        .hint_text("Suchen (Name oder ID)"),
+                );
                 ui.add_space(6.0);
 
                 let needle = self.search.to_lowercase();
@@ -1402,7 +1441,6 @@ impl App {
                         || p.label().to_lowercase().contains(&needle)
                         || p.id.contains(&needle)
                 };
-                let now_online = |id: &str| self.presence.online(id);
 
                 let recent: Vec<_> = list
                     .iter()
@@ -1410,19 +1448,31 @@ impl App {
                     .take(5)
                     .cloned()
                     .collect();
+                let shown: std::collections::HashSet<String> =
+                    recent.iter().map(|p| p.id.clone()).collect();
                 let favs: Vec<_> = list
                     .iter()
-                    .filter(|p| p.favorite && matches(p))
+                    .filter(|p| p.favorite && !shown.contains(&p.id) && matches(p))
                     .cloned()
                     .collect();
                 let online: Vec<_> = list
                     .iter()
-                    .filter(|p| !p.favorite && now_online(&p.id) && matches(p))
+                    .filter(|p| {
+                        !p.favorite
+                            && !shown.contains(&p.id)
+                            && self.presence.online(&p.id)
+                            && matches(p)
+                    })
                     .cloned()
                     .collect();
                 let offline: Vec<_> = list
                     .iter()
-                    .filter(|p| !p.favorite && !now_online(&p.id) && matches(p))
+                    .filter(|p| {
+                        !p.favorite
+                            && !shown.contains(&p.id)
+                            && !self.presence.online(&p.id)
+                            && matches(p)
+                    })
                     .cloned()
                     .collect();
 
@@ -1440,11 +1490,12 @@ impl App {
                             }
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(format!("{}  ({})", title, group.len()))
+                                egui::RichText::new(format!("{}  ·  {}", title, group.len()))
                                     .color(MUTED)
-                                    .size(12.0)
+                                    .size(11.5)
                                     .strong(),
                             );
+                            ui.add_space(2.0);
                             for p in group.iter() {
                                 let selected = self.selected.as_deref() == Some(p.id.as_str());
                                 let online = self.presence.online(&p.id);
@@ -1455,10 +1506,13 @@ impl App {
                                         if selected { ACCENT } else { LINE },
                                     ))
                                     .corner_radius(10)
-                                    .inner_margin(egui::Margin::symmetric(10, 7))
+                                    .inner_margin(egui::Margin::symmetric(11, 6))
+                                    .outer_margin(egui::Margin::symmetric(0, 2))
                                     .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             dot(ui, online);
+                                            ui.add_space(2.0);
                                             ui.label(egui::RichText::new(p.label()).strong());
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1470,15 +1524,16 @@ impl App {
                                                             "Offline"
                                                         })
                                                         .color(if online { GREEN } else { MUTED })
-                                                        .size(11.0),
+                                                        .size(11.5),
                                                     );
+                                                    ui.add_space(6.0);
                                                     ui.label(
                                                         egui::RichText::new(partners::pretty_id(
                                                             &p.id,
                                                         ))
                                                         .monospace()
                                                         .color(MUTED)
-                                                        .size(12.0),
+                                                        .size(12.5),
                                                     );
                                                 },
                                             );
@@ -1498,20 +1553,31 @@ impl App {
                                 }
                             }
                         }
-                        if recent.is_empty() && favs.is_empty() && online.is_empty() && offline.is_empty()
+                        if recent.is_empty()
+                            && favs.is_empty()
+                            && online.is_empty()
+                            && offline.is_empty()
                         {
-                            ui.add_space(20.0);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Noch keine Geraete. Verbinde dich einmal, dann steht der Partner hier.",
-                                )
-                                .color(MUTED),
-                            );
+                            ui.add_space(14.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Noch keine Geräte")
+                                        .strong()
+                                        .size(15.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Verbinde dich einmal – danach steht der Partner hier.",
+                                    )
+                                    .color(MUTED)
+                                    .size(12.5),
+                                );
+                            });
                         }
                     });
             });
 
-            ui.add_space(12.0);
+            ui.add_space(8.0);
 
             // ---------------- Detailspalte ----------------
             ui.vertical(|ui| {
@@ -1523,14 +1589,15 @@ impl App {
                 let Some(p) = sel else {
                     card(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Kein Geraet ausgewaehlt")
+                            egui::RichText::new("Kein Gerät ausgewählt")
                                 .strong()
                                 .size(15.0),
                         );
+                        ui.add_space(2.0);
                         ui.label(
-                            egui::RichText::new("Links ein Geraet anklicken.")
+                            egui::RichText::new("Links ein Gerät anklicken.")
                                 .color(MUTED)
-                                .size(12.0),
+                                .size(12.5),
                         );
                     });
                     return;
@@ -1541,57 +1608,61 @@ impl App {
                 card(ui, |ui| {
                     ui.horizontal(|ui| {
                         dot(ui, online);
+                        ui.add_space(2.0);
                         ui.label(egui::RichText::new(p.label()).strong().size(17.0));
                     });
                     ui.label(
                         egui::RichText::new(partners::pretty_id(&p.id))
                             .monospace()
+                            .size(13.0)
                             .color(MUTED),
                     );
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Passwort").color(MUTED).size(12.0));
+
+                    ui.add_space(6.0);
+                    label_small(ui, "Passwort");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.partner_pw)
                             .password(true)
-                            .desired_width(detail_w - 40.0),
+                            .desired_width(detail_w - 56.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
                     );
+                    ui.add_space(2.0);
                     ui.checkbox(&mut self.remember_pw, "merken");
-                    ui.add_space(10.0);
+
+                    ui.add_space(6.0);
                     if accent_button(ui, "Verbinden", !connecting && online).clicked() {
                         connect_now = Some(p.id.clone());
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(5.0);
                     if ui
                         .add_enabled(
                             !connecting && online,
-                            egui::Button::new("Bestaetigung anfordern"),
+                            ghost(egui::vec2(detail_w - 56.0, 28.0), "Bestätigung anfordern"),
                         )
                         .on_hover_text(
-                            "Sendet eine Anfrage an den Benutzer am anderen Rechner - kein Passwort noetig.",
+                            "Sendet eine Anfrage an den Benutzer am anderen Rechner – kein Passwort nötig.",
                         )
                         .clicked()
                     {
                         ask_now = Some(p.id.clone());
                     }
                     if !online {
+                        ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new("Geraet ist offline")
+                            egui::RichText::new("Gerät ist offline")
                                 .color(MUTED)
-                                .size(11.0),
+                                .size(11.5),
                         );
                     }
                 });
 
-                ui.add_space(10.0);
-                section(ui, "Geraeteinformationen");
+                ui.add_space(6.0);
+                section(ui, "Geräteinformationen");
                 card(ui, |ui| {
-                    let name_from_relay = info
-                        .as_ref()
-                        .map(|i| i.name.clone())
-                        .unwrap_or_default();
+                    let relay_name = info.as_ref().map(|i| i.name.clone()).unwrap_or_default();
                     info_row(ui, "Name", &p.label());
-                    if !name_from_relay.is_empty() && name_from_relay != p.label() {
-                        info_row(ui, "Meldet sich als", &name_from_relay);
+                    if !relay_name.is_empty() && relay_name != p.label() {
+                        info_row(ui, "Meldet sich als", &relay_name);
                     }
                     info_row(ui, "FreeViewer-ID", &partners::pretty_id(&p.id));
                     info_row(
@@ -1611,20 +1682,20 @@ impl App {
                         if p.secret.is_some() {
                             "gespeichert"
                         } else {
-                            "--"
+                            "—"
                         },
                     );
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 card(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if let Some((rid, buf)) = self.renaming.as_mut() {
                             if rid == &p.id {
                                 let r = ui.add(
-                                    egui::TextEdit::singleline(buf).desired_width(160.0),
+                                    egui::TextEdit::singleline(buf).desired_width(150.0),
                                 );
-                                let done = ui.small_button("speichern").clicked()
+                                let done = ghost_button(ui, "speichern").clicked()
                                     || (r.lost_focus()
                                         && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                                 if done {
@@ -1635,20 +1706,22 @@ impl App {
                                 return;
                             }
                         }
-                        if ui.button("Umbenennen").clicked() {
+                        if ghost_button(ui, "Umbenennen").clicked() {
                             self.renaming = Some((p.id.clone(), p.name.clone()));
                         }
-                        if ui
-                            .button(if p.favorite {
+                        if ghost_button(
+                            ui,
+                            if p.favorite {
                                 "Nicht mehr anheften"
                             } else {
                                 "Anheften"
-                            })
-                            .clicked()
+                            },
+                        )
+                        .clicked()
                         {
                             fav = Some(p.id.clone());
                         }
-                        if ui.button("Entfernen").clicked() {
+                        if ghost_button(ui, "Entfernen").clicked() {
                             del = Some(p.id.clone());
                         }
                     });
@@ -1684,16 +1757,18 @@ impl App {
     }
 
     fn settings_view(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Dieser Computer");
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Name").color(MUTED).size(12.0));
+        ui.columns(2, |cols| {
+            let ui = &mut cols[0];
+            section(ui, "Dieser Computer");
+            card(ui, |ui| {
+                label_small(ui, "Name in fremden Listen");
                 let mut name = self.shared.device_name.lock().unwrap().clone();
                 if ui
                     .add(
                         egui::TextEdit::singleline(&mut name)
-                            .desired_width(220.0)
-                            .hint_text("wie dieser PC in fremden Listen heisst"),
+                            .desired_width(240.0)
+                            .margin(egui::Margin::symmetric(8, 4))
+                            .hint_text("z. B. Büro-PC"),
                     )
                     .changed()
                 {
@@ -1701,59 +1776,64 @@ impl App {
                     *self.shared.device_name.lock().unwrap() = clean.clone();
                     let _ = presence::save_device_name(&clean);
                 }
+                ui.add_space(6.0);
+                divider(ui);
+                ui.add_space(5.0);
+                info_row(
+                    ui,
+                    "Einstellungen",
+                    &ident::config_dir().display().to_string(),
+                );
+                info_row(ui, "Relay", &self.shared.relay_url);
+                info_row(ui, "Version", update::VERSION);
             });
-            info_row(ui, "Konfiguration", &ident::config_dir().display().to_string());
-            info_row(ui, "Relay", &self.shared.relay_url);
-            info_row(ui, "Version", update::VERSION);
-        });
 
-        ui.add_space(12.0);
-        section(ui, "Start und Zugriff");
-        card(ui, |ui| {
-            let mut boot = self.autostart;
-            if ui
-                .checkbox(&mut boot, "Mit Windows starten (unsichtbar im Infobereich)")
-                .changed()
-            {
-                match autostart::set(boot) {
-                    Ok(()) => self.autostart = boot,
-                    Err(e) => self.hint = format!("Autostart ging nicht: {}", e),
+            let ui = &mut cols[1];
+            section(ui, "Start und Zugriff");
+            card(ui, |ui| {
+                let mut boot = self.autostart;
+                if ui
+                    .checkbox(&mut boot, "Mit Windows starten (unsichtbar im Infobereich)")
+                    .changed()
+                {
+                    match autostart::set(boot) {
+                        Ok(()) => self.autostart = boot,
+                        Err(e) => self.hint = format!("Autostart ging nicht: {}", e),
+                    }
                 }
-            }
-            let mut svc = self.service_on;
-            if ui
-                .checkbox(
-                    &mut svc,
-                    "Dienst: auch am Sperr- und Anmeldebildschirm erreichbar",
-                )
-                .changed()
-            {
-                let flag = if svc {
-                    "--install-service"
-                } else {
-                    "--uninstall-service"
-                };
-                match service::elevate(flag) {
-                    Ok(()) => self.hint = "Bitte die Windows-Abfrage bestaetigen...".to_string(),
-                    Err(e) => self.hint = format!("{}", e),
+                ui.add_space(2.0);
+                let mut svc = self.service_on;
+                if ui
+                    .checkbox(
+                        &mut svc,
+                        "Dienst: auch am Sperr- und Anmeldebildschirm erreichbar",
+                    )
+                    .changed()
+                {
+                    let flag = if svc {
+                        "--install-service"
+                    } else {
+                        "--uninstall-service"
+                    };
+                    match service::elevate(flag) {
+                        Ok(()) => self.hint = "Bitte die Windows-Abfrage bestätigen …".to_string(),
+                        Err(e) => self.hint = format!("{}", e),
+                    }
                 }
-            }
-        });
-
-        ui.add_space(12.0);
-        section(ui, "Aktualisierung");
-        card(ui, |ui| {
-            self.update_ui(ui);
+                ui.add_space(7.0);
+                divider(ui);
+                ui.add_space(5.0);
+                self.update_ui(ui);
+            });
         });
 
         if !self.hint.is_empty() {
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(&self.hint).color(ACCENT).size(12.0));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&self.hint).color(ACCENT).size(12.5));
         }
     }
 
-    /// Der Dialog, den TeamViewer "Bestaetigung anfordern" nennt - hier die
-    /// Seite, die gefragt wird.
+    /// Die Seite, die gefragt wird: „X möchte sich verbinden“.
     fn knock_ui(&mut self, ctx: &egui::Context) {
         let knock = self.shared.knock.lock().unwrap().clone();
         let Some(k) = knock else {
@@ -1764,40 +1844,53 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(CARD)
+                    .stroke(egui::Stroke::new(1.0, ACCENT))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.set_min_width(340.0);
                 ui.label(
-                    egui::RichText::new(format!("\"{}\" moechte sich verbinden.", k.from))
-                        .size(15.0)
+                    egui::RichText::new(format!("„{}“ möchte sich verbinden", k.from))
+                        .size(16.0)
                         .strong(),
                 );
                 ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(format!("Sitzungscode {}", k.code))
-                        .monospace()
-                        .color(ACCENT)
-                        .size(18.0),
-                );
+                ui.horizontal(|ui| {
+                    label_small(ui, "Sitzungscode");
+                    ui.label(
+                        egui::RichText::new(&k.code)
+                            .monospace()
+                            .color(ACCENT)
+                            .size(22.0)
+                            .strong(),
+                    );
+                });
                 ui.label(
                     egui::RichText::new(
-                        "Lass dir den Code nennen - stimmt er ueberein, redet ihr wirklich miteinander.",
+                        "Lass dir den Code nennen – stimmt er überein, redet ihr wirklich miteinander.",
                     )
                     .color(MUTED)
-                    .size(11.0),
+                    .size(11.5),
                 );
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if accent_button(ui, "Zulassen", true).clicked() {
                         self.shared.knock_answer.store(1, Ordering::Relaxed);
                     }
-                    if ui.button("Ablehnen").clicked() {
+                    if ui.add(ghost(egui::vec2(110.0, 34.0), "Ablehnen")).clicked() {
                         self.shared.knock_answer.store(2, Ordering::Relaxed);
                     }
-                    ui.label(
-                        egui::RichText::new(format!("noch {} s", left))
-                            .color(MUTED)
-                            .size(11.0),
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("noch {} s", left))
+                                .color(MUTED)
+                                .size(11.5),
+                        );
+                    });
                 });
             });
         ctx.request_repaint_after(Duration::from_millis(250));
@@ -2294,8 +2387,54 @@ impl eframe::App for App {
             if vinput::is_active() {
                 vinput::set_active(false);
             }
-            egui::CentralPanel::default().show(ctx, |ui| self.home_ui(ui));
+            paint_background(ctx);
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(egui::Color32::TRANSPARENT)
+                        .inner_margin(egui::Margin::symmetric(16, 10)),
+                )
+                .show(ctx, |ui| {
+                    // Inhalt nicht ueber die ganze Breite ziehen
+                    let full = ui.available_width();
+                    let w = full.min(CONTENT_MAX);
+                    let pad = ((full - w) / 2.0).max(0.0);
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(pad);
+                        ui.vertical(|ui| {
+                            ui.set_width(w);
+                            self.home_ui(ui);
+                        });
+                    });
+                });
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+
+        // --shot: ein paar Frames zeichnen lassen, dann ein Bild anfordern
+        if let Some(path) = self.shot.clone() {
+            self.shot_n += 1;
+            if self.shot_n == 6 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                    egui::UserData::default(),
+                ));
+            }
+            if self.shot_n > 6 {
+                let img = ctx.input(|i| {
+                    i.events.iter().rev().find_map(|e| match e {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    })
+                });
+                if let Some(img) = img {
+                    save_shot(&img, &path);
+                    std::process::exit(0);
+                }
+                if self.shot_n > 150 {
+                    eprintln!("SHOT: kein Bild bekommen");
+                    std::process::exit(2);
+                }
+            }
+            ctx.request_repaint();
         }
     }
 }
@@ -2310,64 +2449,245 @@ enum View {
     Settings,
 }
 
-const BG: egui::Color32 = egui::Color32::from_rgb(0x0b, 0x0f, 0x1a);
-const CARD: egui::Color32 = egui::Color32::from_rgb(0x14, 0x1b, 0x2c);
-const ROW_SEL: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x26, 0x3d);
-const FIELD: egui::Color32 = egui::Color32::from_rgb(0x0e, 0x14, 0x22);
-const LINE: egui::Color32 = egui::Color32::from_rgb(0x25, 0x2e, 0x45);
+// Hausstil von fleitec: tiefer Grund, Panels darüber, ein Akzent.
+const BG: egui::Color32 = egui::Color32::from_rgb(0x07, 0x09, 0x0f);
+const CARD: egui::Color32 = egui::Color32::from_rgb(0x0e, 0x12, 0x20);
+const CARD_HI: egui::Color32 = egui::Color32::from_rgb(0x12, 0x17, 0x28);
+const ROW_SEL: egui::Color32 = egui::Color32::from_rgb(0x16, 0x1e, 0x36);
+const FIELD: egui::Color32 = egui::Color32::from_rgb(0x0a, 0x0e, 0x1a);
+const LINE: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x25, 0x38);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x38, 0xbd, 0xf8);
+const VIOLET: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x5c, 0xf6);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(0x22, 0xc5, 0x5e);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xab);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(0xe7, 0xeb, 0xf3);
 
-/// Dark FreeViewer look: same palette as the product page.
+/// Breite, ab der der Inhalt nicht weiter auseinandergezogen wird.
+const CONTENT_MAX: f32 = 1180.0;
+
+/// Schriften: die von Windows mitgelieferte Segoe UI sieht auf einem
+/// Windows-Rechner richtig aus - die eingebaute egui-Schrift wirkt fremd.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut body: Option<&str> = None;
+    let mut head: Option<&str> = None;
+    for (key, files) in [
+        (
+            "ui",
+            [
+                "C:/Windows/Fonts/segoeui.ttf",
+                "C:/Windows/Fonts/SegUIVar.ttf",
+            ],
+        ),
+        (
+            "ui_bold",
+            [
+                "C:/Windows/Fonts/seguisb.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
+            ],
+        ),
+    ] {
+        for f in files {
+            if let Ok(bytes) = std::fs::read(f) {
+                fonts.font_data.insert(
+                    key.to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                );
+                if key == "ui" {
+                    body = Some(key);
+                } else {
+                    head = Some(key);
+                }
+                break;
+            }
+        }
+    }
+    if let Some(b) = body {
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, b.to_owned());
+    }
+    if let Some(h) = head {
+        fonts
+            .families
+            .entry(egui::FontFamily::Name("head".into()))
+            .or_default()
+            .insert(0, h.to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Kräftige Schrift für Überschriften, sonst die normale.
+fn head_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name("head".into()))
+}
+
 fn install_theme(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut style = (*ctx.style()).clone();
+    {
+        use egui::{FontFamily::Proportional, FontId, TextStyle};
+        style.text_styles = [
+            (TextStyle::Heading, FontId::new(20.0, Proportional)),
+            (TextStyle::Body, FontId::new(14.0, Proportional)),
+            (TextStyle::Button, FontId::new(14.0, Proportional)),
+            (
+                TextStyle::Monospace,
+                FontId::new(14.0, egui::FontFamily::Monospace),
+            ),
+            (TextStyle::Small, FontId::new(11.5, Proportional)),
+        ]
+        .into();
+    }
     {
         let v = &mut style.visuals;
         v.dark_mode = true;
         v.panel_fill = BG;
         v.window_fill = CARD;
         v.extreme_bg_color = FIELD;
-        v.faint_bg_color = CARD;
+        v.faint_bg_color = CARD_HI;
         v.override_text_color = Some(TEXT);
         v.hyperlink_color = ACCENT;
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.30);
         v.selection.stroke = egui::Stroke::new(1.0, TEXT);
         v.window_stroke = egui::Stroke::new(1.0, LINE);
+        v.window_corner_radius = 14.into();
         v.widgets.noninteractive.bg_fill = CARD;
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, LINE);
-        v.widgets.inactive.weak_bg_fill = CARD;
+        v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        v.widgets.inactive.weak_bg_fill = CARD_HI;
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, LINE);
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        v.widgets.inactive.corner_radius = 8.into();
         v.widgets.hovered.weak_bg_fill = ROW_SEL;
-        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.7));
+        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        v.widgets.hovered.corner_radius = 8.into();
         v.widgets.active.weak_bg_fill = ROW_SEL;
         v.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+        v.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        v.widgets.active.corner_radius = 8.into();
+        v.widgets.open.weak_bg_fill = ROW_SEL;
     }
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.interact_size.y = 26.0;
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(11.0, 5.0);
+    style.spacing.interact_size.y = 24.0;
+    style.spacing.window_margin = egui::Margin::same(10);
     ctx.set_style(style);
 }
 
-/// Small headline above a card.
+/// Farbnebel und feines Raster hinter allem - derselbe Trick wie auf
+/// fleitec-Seiten, nur eben gemalt statt per CSS.
+fn paint_background(ctx: &egui::Context) {
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let r = ctx.screen_rect();
+    painter.rect_filled(r, 0.0, BG);
+
+    // zwei weiche Farborbs (viele Kreise mit wenig Deckkraft = Verlauf)
+    for (rel_x, rel_y, radius, color) in [
+        (0.18, 0.05, 0.55, ACCENT),
+        (0.92, 0.75, 0.50, VIOLET),
+    ] {
+        let center = egui::pos2(r.left() + r.width() * rel_x, r.top() + r.height() * rel_y);
+        let max = r.width().max(r.height()) * radius;
+        let steps = 14;
+        for i in 0..steps {
+            let f = 1.0 - i as f32 / steps as f32;
+            painter.circle_filled(center, max * f, color.gamma_multiply(0.012));
+        }
+    }
+
+    // 64px-Raster, das nach unten ausblendet
+    let step = 64.0;
+    let mut y = r.top();
+    while y < r.bottom() {
+        let fade = (1.0 - (y - r.top()) / r.height()).clamp(0.0, 1.0);
+        painter.hline(
+            r.left()..=r.right(),
+            y,
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha((10.0 * fade) as u8)),
+        );
+        y += step;
+    }
+    let mut x = r.left();
+    while x < r.right() {
+        painter.vline(
+            x,
+            r.top()..=r.bottom(),
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(5)),
+        );
+        x += step;
+    }
+}
+
+/// Marke oben links: abgerundetes Quadrat mit Auge.
+fn logo(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, ACCENT.gamma_multiply(0.18));
+    p.rect_stroke(
+        rect,
+        10.0,
+        egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.55)),
+        egui::StrokeKind::Inside,
+    );
+    p.circle_stroke(rect.center(), 8.0, egui::Stroke::new(2.0, ACCENT));
+    p.circle_filled(rect.center(), 3.0, ACCENT);
+}
+
+/// Reiter in der Kopfzeile.
+fn tab(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let label = egui::RichText::new(text)
+        .size(13.5)
+        .color(if selected { BG } else { MUTED });
+    let btn = egui::Button::new(label)
+        .fill(if selected {
+            ACCENT
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(9)
+        .min_size(egui::vec2(0.0, 24.0));
+    ui.add(btn)
+}
+
+/// Überschrift über einer Karte.
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
-            .size(15.0)
-            .strong()
-            .color(egui::Color32::from_rgb(0xc9, 0xd2, 0xe3)),
+            .font(head_font(15.5))
+            .color(egui::Color32::from_rgb(0xd4, 0xdc, 0xea)),
     );
-    ui.add_space(4.0);
+    ui.add_space(3.0);
 }
 
-/// One rounded panel.
+/// Kleine graue Beschriftung über einem Feld.
+fn label_small(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(11.5).color(MUTED));
+    ui.add_space(2.0);
+}
+
+/// Dünne Trennlinie innerhalb einer Karte.
+fn divider(ui: &mut egui::Ui) {
+    let r = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        r.left()..=r.right(),
+        r.top(),
+        egui::Stroke::new(1.0, LINE),
+    );
+    ui.add_space(1.0);
+}
+
+/// Eine Karte im Hausstil.
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::group(ui.style())
         .fill(CARD)
         .stroke(egui::Stroke::new(1.0, LINE))
-        .corner_radius(12)
-        .inner_margin(egui::Margin::same(14))
+        .corner_radius(13)
+        .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -2375,55 +2695,136 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// The one blue button per card.
+/// Der eine blaue Knopf.
 fn accent_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
-    let btn = egui::Button::new(egui::RichText::new(text).strong().color(BG))
-        .fill(if enabled { ACCENT } else { LINE })
-        .corner_radius(8)
-        .min_size(egui::vec2(120.0, 30.0));
+    let btn = egui::Button::new(
+        egui::RichText::new(text)
+            .size(14.5)
+            .color(if enabled { BG } else { MUTED }),
+    )
+    .fill(if enabled { ACCENT } else { CARD_HI })
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(10)
+    .min_size(egui::vec2(200.0, 31.0));
     ui.add_enabled(enabled, btn)
 }
 
-/// Green or grey dot in front of a device.
-fn dot(ui: &mut egui::Ui, online: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().circle_filled(
-        rect.center(),
-        4.5,
-        if online { GREEN } else { MUTED.gamma_multiply(0.6) },
-    );
+/// Zweitrangiger Knopf mit Rand.
+fn ghost(size: egui::Vec2, text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text).size(13.5).color(TEXT))
+        .fill(CARD_HI)
+        .stroke(egui::Stroke::new(1.0, LINE))
+        .corner_radius(10)
+        .min_size(size)
 }
 
-/// State of our own machine, top right.
+/// Kleiner zweitrangiger Knopf.
+fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).size(12.5).color(MUTED))
+            .fill(CARD_HI)
+            .stroke(egui::Stroke::new(1.0, LINE))
+            .corner_radius(8),
+    )
+}
+
+/// Grüner oder grauer Punkt vor einem Gerät.
+fn dot(ui: &mut egui::Ui, online: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let c = if online { GREEN } else { MUTED.gamma_multiply(0.55) };
+    if online {
+        ui.painter().circle_filled(rect.center(), 6.5, c.gamma_multiply(0.25));
+    }
+    ui.painter().circle_filled(rect.center(), 4.0, c);
+}
+
+/// Zustand des eigenen Rechners, oben rechts.
 fn status_pill(ui: &mut egui::Ui, ok: bool, text: &str) {
     egui::Frame::group(ui.style())
         .fill(if ok {
-            GREEN.gamma_multiply(0.15)
+            GREEN.gamma_multiply(0.14)
         } else {
-            LINE
+            CARD_HI
         })
-        .stroke(egui::Stroke::new(1.0, if ok { GREEN } else { LINE }))
-        .corner_radius(10)
+        .stroke(egui::Stroke::new(
+            1.0,
+            if ok { GREEN.gamma_multiply(0.6) } else { LINE },
+        ))
+        .corner_radius(12)
         .inner_margin(egui::Margin::symmetric(10, 3))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(text)
-                    .size(11.0)
+                    .size(11.5)
                     .color(if ok { GREEN } else { MUTED }),
             );
         });
 }
 
-/// "Schluessel   Wert" line inside the info card.
+/// „Schlüssel   Wert“-Zeile in der Info-Karte.
 fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(key).color(MUTED).size(11.0));
+        ui.label(egui::RichText::new(key).color(MUTED).size(11.5));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(
-                egui::Label::new(egui::RichText::new(value).size(12.0))
+                egui::Label::new(egui::RichText::new(value).size(12.5))
                     .selectable(true)
                     .truncate(),
             );
         });
     });
+    ui.add_space(2.0);
+}
+
+/// Fenstersymbol: dasselbe Auge wie im Infobereich, 32x32 RGBA.
+fn app_icon() -> egui::IconData {
+    const N: i32 = 32;
+    let mut rgba = vec![0u8; (N * N * 4) as usize];
+    let c = (N as f32 - 1.0) / 2.0;
+    for y in 0..N {
+        for x in 0..N {
+            let (dx, dy) = (x as f32 - c, y as f32 - c);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > 15.0 {
+                continue;
+            }
+            let (r, g, b) = if d <= 5.0 {
+                (0xff, 0xff, 0xff)
+            } else if d <= 8.5 {
+                (0x07, 0x09, 0x0f)
+            } else {
+                (0x38, 0xbd, 0xf8)
+            };
+            let i = ((y * N + x) * 4) as usize;
+            rgba[i] = r;
+            rgba[i + 1] = g;
+            rgba[i + 2] = b;
+            rgba[i + 3] = 0xff;
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: N as u32,
+        height: N as u32,
+    }
+}
+
+/// Speichert ein Bild der Oberflaeche als JPEG (fuer --shot).
+fn save_shot(img: &egui::ColorImage, path: &std::path::Path) {
+    use image::ImageEncoder;
+    let [w, h] = img.size;
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for p in &img.pixels {
+        rgb.extend_from_slice(&[p.r(), p.g(), p.b()]);
+    }
+    match std::fs::File::create(path) {
+        Ok(mut f) => {
+            let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut f, 92);
+            match enc.write_image(&rgb, w as u32, h as u32, image::ExtendedColorType::Rgb8) {
+                Ok(()) => println!("SHOT {}x{} -> {}", w, h, path.display()),
+                Err(e) => eprintln!("SHOT FAIL: {}", e),
+            }
+        }
+        Err(e) => eprintln!("SHOT FAIL: {}", e),
+    }
 }
