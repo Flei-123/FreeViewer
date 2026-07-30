@@ -849,8 +849,30 @@ fn capture_loop(
             list,
         }));
 
+        capture::log_line(&format!(
+            "Sitzung startet: backend {} {}x{} bei {},{} (Bildschirm {})",
+            cap.name(),
+            sw,
+            sh,
+            ox,
+            oy,
+            cur_mon
+        ));
+
         let mut last_cursor = (i32::MIN, i32::MIN, false);
         let mut fails = 0u32;
+        // A picture has to arrive even when nothing moves. Desktop
+        // Duplication only reports *changes*, and the lock screen is
+        // perfectly still - without this the viewer would stare at a black
+        // window until somebody wiggles the mouse.
+        let mut sent_any = false;
+        let mut last_push = Instant::now();
+        let mut tried_fallback = false;
+        // first seconds of a session are logged, that is where problems show
+        let session_start = Instant::now();
+        let mut grabbed = 0u64;
+        let mut pushed = 0u64;
+        let mut trace = Instant::now();
         while !stop_grab.load(Ordering::Relaxed) {
             // the viewer can switch screens in the middle of a session
             let want = mon_grab.load(Ordering::Relaxed) as usize;
@@ -904,6 +926,9 @@ fn capture_loop(
             match cap.next(budget.as_millis() as u32) {
                 Next::Frame => {
                     fails = 0;
+                    sent_any = true;
+                    grabbed += 1;
+                    last_push = Instant::now();
                     let (cw, ch) = cap.size();
                     let (dw, dh) = target_size(cw, ch, prof.max_w);
                     // With H.264 the GPU scales AND converts to NV12 in one
@@ -916,9 +941,44 @@ fn capture_loop(
                         (frame_rgb(&mut cap, dw, dh), false)
                     };
                     // channel full = encoder still busy, drop this frame
-                    let _ = raw_tx.try_send((buf, dw, dh, is_nv12));
+                    pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
                 }
-                Next::Unchanged => {}
+                Next::Unchanged => {
+                    let quiet = last_push.elapsed();
+                    let have_pixels = !cap.frame().0.is_empty();
+                    let due = Duration::from_millis(if sent_any { 1000 } else { 300 });
+                    if have_pixels && quiet > due {
+                        // repeat the last picture as a keyframe
+                        last_push = Instant::now();
+                        sent_any = true;
+                        key_grab.store(true, Ordering::Relaxed);
+                        let (cw, ch) = cap.size();
+                        let (dw, dh) = target_size(cw, ch, prof.max_w);
+                        let (buf, is_nv12) = if h264_grab.load(Ordering::Relaxed) {
+                            let mut b = Vec::new();
+                            frame_nv12(&mut cap, dw, dh, &mut b);
+                            (b, true)
+                        } else {
+                            (frame_rgb(&mut cap, dw, dh), false)
+                        };
+                        pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
+                    } else if !have_pixels
+                        && !tried_fallback
+                        && quiet > Duration::from_millis(700)
+                    {
+                        // The duplication API never handed us a single frame
+                        // (happens on some secure desktops). The screenshot
+                        // backend is slower but always delivers something.
+                        tried_fallback = true;
+                        capture::log_line(
+                            "keine Bilder von der Duplication - wechsle auf den Screenshot-Weg",
+                        );
+                        if let Some(c) = capture::open_index(false, cur_mon) {
+                            cap = c;
+                            key_grab.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
                 Next::Lost => {
                     fails += 1;
                     if fails == 5 {
@@ -945,6 +1005,18 @@ fn capture_loop(
                 }));
             }
 
+            if session_start.elapsed() < Duration::from_secs(12)
+                && trace.elapsed() >= Duration::from_secs(1)
+            {
+                trace = Instant::now();
+                capture::log_line(&format!(
+                    "grabber: {} Bilder geholt, {} an den Encoder, backend {}",
+                    grabbed,
+                    pushed,
+                    cap.name()
+                ));
+            }
+
             let dt = t0.elapsed();
             if dt < budget {
                 std::thread::sleep(budget - dt);
@@ -953,6 +1025,7 @@ fn capture_loop(
     });
 
     let no_h264 = std::env::var("FV_NOH264").is_ok();
+    let encoder_start = Instant::now();
     let mut codec = Codec::Jpeg(Delta::new());
     let mut frames = 0u32;
     let mut bytes = 0usize;
@@ -1070,6 +1143,17 @@ fn capture_loop(
 
         if window.elapsed() >= Duration::from_secs(1) {
             let secs = window.elapsed().as_secs_f32();
+            if encoder_start.elapsed() < Duration::from_secs(12) {
+                capture::log_line(&format!(
+                    "encoder: {} Pakete, {} kB, codec {}",
+                    frames,
+                    bytes / 1024,
+                    match &codec {
+                        Codec::H264 { .. } => "h264",
+                        Codec::Jpeg(_) => "jpeg",
+                    }
+                ));
+            }
             {
                 let mut st = shared.stats.lock().unwrap();
                 st.fps = frames as f32 / secs;

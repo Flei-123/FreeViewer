@@ -47,6 +47,26 @@ No account, no subscription, no telemetry.
 - **Clipboard sync in both directions** (text, max 256 KB) - copy on one side,
   paste on the other; echo suppressed so the two machines cannot ping-pong.
 - **Live stats** - resolution, fps, kbit/s and round trip time in the session bar.
+- **Always reachable (v0.11)** - tray icon, "start with Windows" and an
+  optional Windows service, so the machine can be reached without anybody
+  clicking anything:
+  - Closing the window folds FreeViewer into the **tray** instead of killing
+    the host; the icon shows the state (grey = offline, blue = ready, green =
+    session) and its menu opens the window, copies the ID, toggles autostart
+    and quits.
+  - **Start with Windows** writes one value into the user's `Run` key, and the
+    program comes up hidden in the tray (`--tray`).
+  - The **service** (`--install-service`, or the checkbox in the settings
+    line) starts an agent inside the console session and follows the input
+    desktop: normal desktop, lock screen and the secure desktop of the
+    password/UAC prompt. That is what makes a machine reachable *before*
+    anybody logs in - and the identity moves to `%ProgramData%\FreeViewer`, so
+    the 9 digit ID stays the same no matter which account runs the host.
+  - A perfectly still screen (the lock screen never moves) is re-sent once a
+    second as a keyframe, so a viewer that just joined never stares at a black
+    window.
+  - `freeviewer --status` prints version, config folder, autostart, service
+    state and what the running agent published.
 
 ## Quick start
 
@@ -175,11 +195,14 @@ idea what the sessions contain.
 - [x] DXGI desktop duplication capture (v0.4)
 - [x] game mode: raw relative mouse, full keyboard grab, key combos (v0.4)
 - [x] clipboard sync (v0.4)
-- [ ] file transfer (drag & drop)
-- [ ] multi monitor selection
-- [ ] hardware video encode (H.264/AV1), GPU scaling
-- [ ] direct P2P (UDP hole punching) with relay fallback
-- [ ] unattended access as a service, Linux/macOS builds
+- [x] file transfer (drag & drop, both directions) (v0.5)
+- [x] multi monitor selection during the session (v0.5)
+- [x] self update over the relay (v0.6)
+- [x] GPU scaling + hardware H.264 (Media Foundation/NVENC) (v0.7-v0.8)
+- [x] direct P2P (UDP hole punching) with relay fallback (v0.9)
+- [x] address book with history, favourites and stored passwords (v0.10)
+- [x] tray icon, autostart and unattended access as a Windows service (v0.11)
+- [ ] installer (MSI), Linux/macOS builds
 - [ ] session recording, chat
 
 ## License

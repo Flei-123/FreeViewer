@@ -95,9 +95,25 @@ pub fn open_index(prefer_fast: bool, index: usize) -> Option<Box<dyn Backend>> {
             }
         }
     }
-    fallback::Shots::new_index(index)
-        .ok()
-        .map(|s| Box::new(s) as Box<dyn Backend>)
+    // The screenshot path opens fine in places where it cannot actually
+    // deliver (secure desktop), so it has to prove itself once.
+    if let Ok(mut s) = fallback::Shots::new_index(index) {
+        if delivers(&mut s) {
+            return Some(Box::new(s));
+        }
+        log_line("xcap liefert keine Bilder - versuche den GDI-Weg");
+    }
+    #[cfg(windows)]
+    match gdi::GdiCap::new_index(index) {
+        Ok(g) => return Some(Box::new(g)),
+        Err(e) => log_line(&format!("gdi unavailable: {}", e)),
+    }
+    None
+}
+
+/// Does this backend really hand out pixels? One grab is enough to find out.
+fn delivers(b: &mut impl Backend) -> bool {
+    matches!(b.next(400), Next::Frame) && !b.frame().0.is_empty()
 }
 
 pub fn log_line(s: &str) {
@@ -108,6 +124,247 @@ pub fn log_line(s: &str) {
     }
 }
 
+// --------------------------------------------------------------------- gdi --
+
+/// Last resort: plain GDI `BitBlt`.
+///
+/// Slower than everything else (the whole screen travels through the CPU
+/// every frame), but it is the only thing that still works on the secure
+/// desktop - the lock and login screen refuse Desktop Duplication with
+/// "access denied", and that is exactly where unattended access has to work.
+///
+/// Which device context works there is not obvious, so the constructor simply
+/// tries them: the desktop DC of this thread first (that one follows the
+/// desktop the process was started on), then a fresh display driver DC, each
+/// with and without `CAPTUREBLT`. The first combination that really copies
+/// pixels wins and is written into the log.
+#[cfg(windows)]
+mod gdi {
+    use super::{Backend, Next};
+    use anyhow::{anyhow, Result};
+    use windows::core::w;
+    use windows::Win32::Foundation::{GetLastError, HWND};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,
+        HBITMAP, HDC, HGDIOBJ, ROP_CODE, SRCCOPY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    pub struct GdiCap {
+        screen: HDC,
+        /// true = made with CreateDC (needs DeleteDC), false = GetDC
+        owned: bool,
+        rop: ROP_CODE,
+        mem: HDC,
+        bmp: HBITMAP,
+        bits: *mut u8,
+        buf: Vec<u8>,
+        w: u32,
+        h: u32,
+        x: i32,
+        y: i32,
+        logged: bool,
+    }
+
+    impl GdiCap {
+        pub fn new_index(index: usize) -> Result<Self> {
+            let list = super::list_monitors(false);
+            let (x, y, w, h) = match list.get(index) {
+                Some(m) if m.w > 0 && m.h > 0 => (m.x, m.y, m.w, m.h),
+                _ => unsafe {
+                    (
+                        GetSystemMetrics(SM_XVIRTUALSCREEN),
+                        GetSystemMetrics(SM_YVIRTUALSCREEN),
+                        GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1) as u32,
+                        GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1) as u32,
+                    )
+                },
+            };
+            unsafe {
+                let desktop_dc = GetDC(HWND::default());
+                let display_dc = CreateDCW(w!("DISPLAY"), None, None, None);
+                if desktop_dc.is_invalid() && display_dc.is_invalid() {
+                    return Err(anyhow!("kein Bildschirm-DC zu bekommen"));
+                }
+                let base = if !desktop_dc.is_invalid() {
+                    desktop_dc
+                } else {
+                    display_dc
+                };
+                let mem = CreateCompatibleDC(base);
+                if mem.is_invalid() {
+                    return Err(anyhow!("CreateCompatibleDC fehlgeschlagen"));
+                }
+                let mut info = BITMAPINFO::default();
+                info.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w as i32,
+                    // negative = top down, same row order as everybody else
+                    biHeight: -(h as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                };
+                let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                let bmp = match CreateDIBSection(base, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = DeleteDC(mem);
+                        return Err(anyhow!("CreateDIBSection: {}", e));
+                    }
+                };
+                SelectObject(mem, HGDIOBJ(bmp.0));
+
+                let both = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
+                let mut chosen: Option<(HDC, bool, ROP_CODE)> = None;
+                let mut last_err = 0u32;
+                for (dc, owned) in [(desktop_dc, false), (display_dc, true)] {
+                    if dc.is_invalid() {
+                        continue;
+                    }
+                    for rop in [both, SRCCOPY] {
+                        if BitBlt(mem, 0, 0, w as i32, h as i32, dc, x, y, rop).is_ok() {
+                            chosen = Some((dc, owned, rop));
+                            break;
+                        }
+                        last_err = GetLastError().0;
+                    }
+                    if chosen.is_some() {
+                        break;
+                    }
+                }
+                match chosen {
+                    Some((dc, owned, rop)) => {
+                        super::log_line(&format!(
+                            "gdi: Quelle {}, rop {:#x}, {}x{} bei {},{}",
+                            if owned { "CreateDC(DISPLAY)" } else { "GetDC(desktop)" },
+                            rop.0,
+                            w,
+                            h,
+                            x,
+                            y
+                        ));
+                        // give back whichever handle we do not keep
+                        if owned && !desktop_dc.is_invalid() {
+                            ReleaseDC(HWND::default(), desktop_dc);
+                        }
+                        if !owned && !display_dc.is_invalid() {
+                            let _ = DeleteDC(display_dc);
+                        }
+                        Ok(Self {
+                            screen: dc,
+                            owned,
+                            rop,
+                            mem,
+                            bmp,
+                            bits: bits as *mut u8,
+                            buf: vec![0u8; (w as usize) * (h as usize) * 4],
+                            w,
+                            h,
+                            x,
+                            y,
+                            logged: false,
+                        })
+                    }
+                    None => {
+                        let _ = DeleteObject(HGDIOBJ(bmp.0));
+                        let _ = DeleteDC(mem);
+                        if !desktop_dc.is_invalid() {
+                            ReleaseDC(HWND::default(), desktop_dc);
+                        }
+                        if !display_dc.is_invalid() {
+                            let _ = DeleteDC(display_dc);
+                        }
+                        Err(anyhow!("BitBlt geht nicht (Fehler {})", last_err))
+                    }
+                }
+            }
+        }
+    }
+
+    impl Backend for GdiCap {
+        fn next(&mut self, _timeout_ms: u32) -> Next {
+            unsafe {
+                if BitBlt(
+                    self.mem,
+                    0,
+                    0,
+                    self.w as i32,
+                    self.h as i32,
+                    self.screen,
+                    self.x,
+                    self.y,
+                    self.rop,
+                )
+                .is_err()
+                {
+                    if !self.logged {
+                        self.logged = true;
+                        super::log_line(&format!(
+                            "gdi: BitBlt fehlgeschlagen (Fehler {})",
+                            GetLastError().0
+                        ));
+                    }
+                    return Next::Lost;
+                }
+                if self.bits.is_null() {
+                    return Next::Lost;
+                }
+                std::ptr::copy_nonoverlapping(self.bits, self.buf.as_mut_ptr(), self.buf.len());
+            }
+            Next::Frame
+        }
+
+        fn frame(&self) -> (&[u8], u32, u32, bool) {
+            (&self.buf, self.w, self.h, true)
+        }
+
+        fn size(&self) -> (u32, u32) {
+            (self.w, self.h)
+        }
+
+        fn origin(&self) -> (i32, i32) {
+            (self.x, self.y)
+        }
+
+        fn cursor(&self) -> (i32, i32, bool) {
+            unsafe {
+                let mut ci = CURSORINFO {
+                    cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetCursorInfo(&mut ci).is_ok() {
+                    (ci.ptScreenPos.x, ci.ptScreenPos.y, ci.flags == CURSOR_SHOWING)
+                } else {
+                    (0, 0, false)
+                }
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "gdi"
+        }
+    }
+
+    impl Drop for GdiCap {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(self.bmp.0));
+                let _ = DeleteDC(self.mem);
+                if self.owned {
+                    let _ = DeleteDC(self.screen);
+                } else {
+                    ReleaseDC(HWND::default(), self.screen);
+                }
+            }
+        }
+    }
+}
 // ---------------------------------------------------------------- fallback --
 
 mod fallback {

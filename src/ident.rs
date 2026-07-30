@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::crypto::random_bytes;
 
-pub fn config_dir() -> PathBuf {
+/// Per user configuration - the normal case without a service.
+pub fn user_config_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
         return PathBuf::from(appdata).join("FreeViewer");
     }
@@ -15,6 +16,31 @@ pub fn config_dir() -> PathBuf {
         return PathBuf::from(home).join(".config").join("freeviewer");
     }
     PathBuf::from(".freeviewer")
+}
+
+/// Machine wide folder. The service agent can run as SYSTEM or as the logged
+/// in user, so identity, password and address book must not live in a user
+/// profile - otherwise the FreeViewer ID would change with the account.
+pub fn machine_config_dir() -> Option<PathBuf> {
+    let pd = std::env::var("ProgramData").ok()?;
+    Some(PathBuf::from(pd).join("FreeViewer"))
+}
+
+/// Where this installation keeps its files. As soon as a machine wide
+/// identity exists (the service installer creates it) that one wins, so every
+/// account sees the same FreeViewer ID.
+pub fn config_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("FV_CONFIG") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    if let Some(d) = machine_config_dir() {
+        if d.join("identity.txt").exists() {
+            return d;
+        }
+    }
+    user_config_dir()
 }
 
 pub fn load_or_create_secret() -> String {

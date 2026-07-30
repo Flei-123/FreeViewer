@@ -8,6 +8,7 @@
 //! Relay can be overridden with the FV_RELAY environment variable,
 //! the session password with FV_PASSWORD.
 
+mod autostart;
 mod capture;
 mod clip;
 mod crypto;
@@ -21,7 +22,9 @@ mod p2p;
 mod partners;
 mod proto;
 mod selftest;
+mod service;
 mod shared;
+mod tray;
 mod update;
 mod viewer;
 mod vinput;
@@ -88,6 +91,80 @@ fn main() -> eframe::Result<()> {
     // print the version:  freeviewer --version
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("FreeViewer {}", update::VERSION);
+        return Ok(());
+    }
+
+    // ---- the Windows service -------------------------------------------
+    // "freeviewer --service" is what the service control manager starts.
+    if std::env::args().any(|a| a == "--service") {
+        if let Err(e) = service::run() {
+            service::log(&format!("Dienst konnte nicht starten: {}", e));
+        }
+        return Ok(());
+    }
+    // install / remove, asking for admin rights when we do not have them yet
+    for (flag, install) in [("--install-service", true), ("--uninstall-service", false)] {
+        if std::env::args().any(|a| a == flag) {
+            if !service::is_elevated() {
+                println!("Administrator-Rechte anfordern...");
+                match service::elevate(flag) {
+                    Ok(()) => println!("Windows fragt jetzt nach der Bestaetigung."),
+                    Err(e) => println!("FAIL: {}", e),
+                }
+                return Ok(());
+            }
+            let r = if install {
+                service::install()
+            } else {
+                service::uninstall()
+            };
+            match r {
+                Ok(()) => println!(
+                    "{}",
+                    if install {
+                        "Dienst installiert und gestartet."
+                    } else {
+                        "Dienst gestoppt und entfernt."
+                    }
+                ),
+                Err(e) => println!("FAIL: {}", e),
+            }
+            return Ok(());
+        }
+    }
+    // state of service and autostart:  freeviewer --status
+    if std::env::args().any(|a| a == "--status") {
+        println!("Version:    {}", update::VERSION);
+        println!("Config:     {}", ident::config_dir().display());
+        println!("Autostart:  {}", match autostart::current() {
+            Some(c) => c,
+            None => "aus".to_string(),
+        });
+        println!("Dienst:     installiert={} laeuft={}", service::installed(), service::running());
+        match service::published() {
+            Some(p) => println!("Agent:      ID {} Passwort {} (vor {} s, Desktop {})",
+                p.id, p.password,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs()).unwrap_or(0).saturating_sub(p.at),
+                p.desktop),
+            None => println!("Agent:      nichts veroeffentlicht"),
+        }
+        return Ok(());
+    }
+    // switch autostart from a script:  freeviewer --autostart on|off
+    if let Some(pos) = std::env::args().position(|a| a == "--autostart") {
+        let arg: Vec<String> = std::env::args().collect();
+        match arg.get(pos + 1).map(|s| s.as_str()) {
+            Some("on") | Some("off") => {
+                let on = arg[pos + 1] == "on";
+                match autostart::set(on) {
+                    Ok(()) => println!("Autostart {}", if on { "an" } else { "aus" }),
+                    Err(e) => println!("FAIL: {}", e),
+                }
+            }
+            _ => {}
+        }
+        println!("Autostart jetzt: {:?} (zeigt hierher: {})", autostart::current(), autostart::points_here());
         return Ok(());
     }
 
@@ -220,11 +297,34 @@ fn main() -> eframe::Result<()> {
     // in --connect test mode we only act as a viewer (otherwise this process
     // would register the same machine identity and kick the real host offline)
     let viewer_only = std::env::args().any(|a| a == "--connect" || a == "--inputtest");
-    if !viewer_only {
+    // Started by the service? Then we ARE the host of this machine.
+    let is_agent = std::env::args().any(|a| a == "--agent");
+    // Two processes with the same identity would kick each other off the
+    // relay, so the GUI keeps its hands off while the service does the job.
+    let service_owns_host = !is_agent && service::running();
+    if !viewer_only && !service_owns_host {
         let host_shared = shared.clone();
         let host_secret = secret.clone();
         rt().spawn(async move {
             hostside::run_host(host_shared, host_secret).await;
+        });
+    }
+    if is_agent {
+        // let the user's GUI show ID and password of this host
+        service::publish_loop(shared.clone());
+        service::log(&format!("Agent laeuft: {}", service::desktop_report()));
+        // follow the input desktop (lock screen, UAC prompt, ...)
+        service::watch_desktop();
+    }
+    if service_owns_host {
+        shared.set_host_status("Der Dienst betreibt den Host - auch am Anmeldebildschirm");
+        let sh = shared.clone();
+        std::thread::spawn(move || loop {
+            if let Some(p) = service::published() {
+                *sh.my_id.lock().unwrap() = p.id;
+                *sh.password.lock().unwrap() = p.password;
+            }
+            std::thread::sleep(Duration::from_secs(2));
         });
     }
 
@@ -398,10 +498,23 @@ fn main() -> eframe::Result<()> {
     vinput::init(shared.clone());
     update::watcher(shared.clone());
 
+    // Started by the autostart entry (or by the service): no window in the
+    // user's face, only the tray icon. The host runs either way.
+    let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--background");
+    // A second window of the same user is pointless - bring the first one to
+    // the front instead.
+    if !tray::claim_single_instance() {
+        println!("FreeViewer laeuft bereits - Fenster nach vorne geholt.");
+        return Ok(());
+    }
+    autostart::refresh();
+    tray::start(shared.clone());
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([700.0, 470.0])
+            .with_visible(!start_hidden)
             .with_title("FreeViewer"),
         ..Default::default()
     };
@@ -409,7 +522,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "FreeViewer",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(shared)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(shared, start_hidden)))),
     )
 }
 
@@ -434,10 +547,24 @@ struct App {
     session: Option<(String, std::time::Instant)>,
     /// Until when the "how do I get out" hint stays on screen.
     hint_until: Option<std::time::Instant>,
+    /// Started into the tray, so the window has to disappear once winit has
+    /// created it.
+    start_hidden: bool,
+    first_frame: bool,
+    /// Does the Run key point at us? Re-read every few seconds, because the
+    /// tray menu can change it behind the GUI's back.
+    autostart: bool,
+    autostart_checked: std::time::Instant,
+    /// The "I am still running down there" balloon is shown only once.
+    told_about_tray: bool,
+    /// Is the Windows service installed and running?
+    service_on: bool,
+    /// Until when a start into the tray keeps forcing the window away.
+    hide_until: Option<std::time::Instant>,
 }
 
 impl App {
-    fn new(shared: Arc<Shared>) -> Self {
+    fn new(shared: Arc<Shared>, start_hidden: bool) -> Self {
         Self {
             shared,
             partner_id: String::new(),
@@ -453,6 +580,65 @@ impl App {
             renaming: None,
             session: None,
             hint_until: None,
+            start_hidden,
+            first_frame: true,
+            autostart: autostart::enabled(),
+            autostart_checked: std::time::Instant::now(),
+            told_about_tray: false,
+            service_on: service::running(),
+            hide_until: None,
+        }
+    }
+
+    /// Everything around the tray icon: hide instead of quit, pick up what
+    /// the menu did, keep the checkbox in sync.
+    fn tray_ui(&mut self, ctx: &egui::Context) {
+        if self.first_frame {
+            self.first_frame = false;
+            if self.start_hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                tray::hide_window();
+                self.hide_until =
+                    Some(std::time::Instant::now() + Duration::from_secs(3));
+            }
+        }
+        // eframe pushes the window back on screen during the first frames, so
+        // insist for a moment - but only for that moment, otherwise the tray
+        // menu could never open the window again.
+        if let Some(until) = self.hide_until {
+            if std::time::Instant::now() < until {
+                if tray::is_hidden() {
+                    tray::hide_window();
+                }
+            } else {
+                self.hide_until = None;
+            }
+        }
+        if let Some(err) = tray::take_error() {
+            self.shared.set_update_status(err);
+        }
+        if self.autostart_checked.elapsed() > Duration::from_secs(2) {
+            self.autostart_checked = std::time::Instant::now();
+            self.autostart = autostart::enabled();
+            self.service_on = service::running();
+        }
+        // The X button folds the window away instead of killing the host -
+        // that is what "runs in the background" means. Quitting for real is
+        // in the tray menu.
+        if ctx.input(|i| i.viewport().close_requested()) && tray::is_running() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            tray::hide_window();
+            if !self.told_about_tray {
+                self.told_about_tray = true;
+                tray::balloon(
+                    "FreeViewer laeuft weiter",
+                    "Das Fenster ist nur zugeklappt. Ueber das Symbol im Infobereich kommst du zurueck - oder beendest FreeViewer ganz.",
+                );
+            }
+        }
+        if tray::is_hidden() {
+            // no picture to draw, but the menu must stay responsive
+            ctx.request_repaint_after(Duration::from_millis(400));
         }
     }
 
@@ -646,6 +832,43 @@ impl App {
             if ui.checkbox(&mut auto, "Automatisch aktualisieren").changed() {
                 self.shared.auto_update.store(auto, Ordering::Relaxed);
                 ident::set_auto_update(auto);
+            }
+            let mut boot = self.autostart;
+            if ui
+                .checkbox(&mut boot, "Mit Windows starten")
+                .on_hover_text(
+                    "Startet FreeViewer bei der Anmeldung unsichtbar in den Infobereich",
+                )
+                .changed()
+            {
+                match autostart::set(boot) {
+                    Ok(()) => self.autostart = boot,
+                    Err(e) => self
+                        .shared
+                        .set_update_status(format!("Autostart ging nicht: {}", e)),
+                }
+            }
+            let mut svc = self.service_on;
+            if ui
+                .checkbox(&mut svc, "Auch am Anmeldebildschirm (Dienst)")
+                .on_hover_text(
+                    "Installiert einen Windows-Dienst, der FreeViewer schon vor der Anmeldung \
+                     bereithaelt und den Sperrbildschirm zeigen kann. Fragt nach \
+                     Administrator-Rechten.",
+                )
+                .changed()
+            {
+                let flag = if svc {
+                    "--install-service"
+                } else {
+                    "--uninstall-service"
+                };
+                match service::elevate(flag) {
+                    Ok(()) => self
+                        .shared
+                        .set_update_status("Bitte die Windows-Abfrage bestaetigen..."),
+                    Err(e) => self.shared.set_update_status(format!("{}", e)),
+                }
             }
             if let Some(rel) = pending {
                 if ui
@@ -1426,6 +1649,7 @@ fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tray_ui(ctx);
         self.pull_frame(ctx);
         self.handle_drops(ctx);
         self.transfer_ui(ctx);

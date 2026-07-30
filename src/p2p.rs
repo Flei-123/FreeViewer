@@ -84,6 +84,11 @@ impl P2p {
     /// candidates below refer to. Synchronous on purpose so a session can set
     /// the direct path up without waiting for anything.
     pub fn new(key: [u8; 32], is_host: bool, stop: Arc<AtomicBool>) -> Result<Arc<Self>> {
+        // FV_NOP2P keeps everything on the relay - useful when a firewall
+        // eats the direct path, and for isolating problems during tests.
+        if std::env::var("FV_NOP2P").is_ok() {
+            return Err(anyhow!("per FV_NOP2P abgeschaltet"));
+        }
         let raw = std::net::UdpSocket::bind("0.0.0.0:0")?;
         raw.set_nonblocking(true)?;
         let sock = UdpSocket::from_std(raw)?;
