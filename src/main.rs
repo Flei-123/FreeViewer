@@ -30,6 +30,7 @@ mod pwlist;
 mod proto;
 mod selftest;
 mod service;
+mod setup;
 mod shared;
 mod theme;
 mod tray;
@@ -115,6 +116,36 @@ fn main() -> eframe::Result<()> {
             Err(e) => {
                 eprintln!("Update fehlgeschlagen: {}", e);
                 std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        }
+        return Ok(());
+    }
+
+    // Installieren / Deinstallieren (kommt vom Knopf in den Einstellungen,
+    // der sich vorher per UAC Administrator-Rechte holt).
+    if std::env::args().any(|a| a == "--install") {
+        let with_service = std::env::args().any(|a| a == "--with-service");
+        match setup::install(with_service) {
+            Ok(()) => {
+                println!("installiert nach {}", setup::install_dir().display());
+                // die installierte Fassung als normaler Nutzer starten
+                let _ = std::process::Command::new("explorer.exe")
+                    .arg(setup::installed_exe().as_os_str())
+                    .spawn();
+            }
+            Err(e) => {
+                eprintln!("Installation fehlgeschlagen: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        }
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--uninstall") {
+        match setup::uninstall() {
+            Ok(()) => println!("deinstalliert"),
+            Err(e) => {
+                eprintln!("Deinstallation fehlgeschlagen: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         }
         return Ok(());
@@ -803,6 +834,8 @@ struct App {
     pw_new_label: String,
     /// Welcher Eintrag gerade im Klartext zu sehen ist.
     pw_show: Option<usize>,
+    /// Soll beim Installieren gleich der Dienst mit eingerichtet werden?
+    install_service: bool,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -853,6 +886,7 @@ impl App {
             pw_new: String::new(),
             pw_new_label: String::new(),
             pw_show: None,
+            install_service: true,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -2174,21 +2208,39 @@ impl App {
                     (SettingsTab::About, "eye", i18n::t("set.about")),
                 ] {
                     let sel = self.stab == tab;
-                    let fg = if sel { p.accent } else { p.muted };
-                    let r = ui.add(
-                        egui::Button::image_and_text(
-                            icons::image(icon, 16.0, fg),
-                            egui::RichText::new(label)
-                                .size(13.0)
-                                .color(if sel { p.text } else { p.muted }),
-                        )
-                        .fill(if sel {
-                            p.accent.gamma_multiply(0.14)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .stroke(egui::Stroke::NONE)
-                        .min_size(egui::vec2(166.0, 32.0)),
+                    // selbst zeichnen, sonst schluckt die feste Fuellung des
+                    // egui-Knopfes jede Reaktion auf die Maus
+                    let (rect, r) =
+                        ui.allocate_exact_size(egui::vec2(166.0, 32.0), egui::Sense::click());
+                    let hov = r.hovered();
+                    let fill = if sel {
+                        p.accent.gamma_multiply(0.14)
+                    } else if hov {
+                        p.card_hi
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    if fill != egui::Color32::TRANSPARENT {
+                        ui.painter().rect_filled(rect, 7.0, fill);
+                    }
+                    let fg = if sel {
+                        p.accent
+                    } else if hov {
+                        p.text
+                    } else {
+                        p.muted
+                    };
+                    let icon_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.min.x + 9.0, rect.center().y - 8.0),
+                        egui::vec2(16.0, 16.0),
+                    );
+                    ui.put(icon_rect, icons::image(icon, 16.0, fg));
+                    ui.painter().text(
+                        egui::pos2(rect.min.x + 34.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        egui::FontId::proportional(13.0),
+                        if sel { p.text } else { fg },
                     );
                     if r.clicked() {
                         self.stab = tab;
@@ -2255,6 +2307,63 @@ impl App {
             if a != self.look {
                 self.apply_look(ui.ctx(), a);
             }
+        });
+        ui.add_space(10.0);
+        self.install_card(ui);
+    }
+
+    /// Installation: portabel laufen lassen oder richtig einrichten.
+    fn install_card(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        label_small(ui, i18n::t("set.install"));
+        card(ui, |ui| {
+            let installed = setup::is_installed();
+            let here = setup::running_installed();
+            let state = if here {
+                i18n::tf("set.install_here", &setup::install_dir().display().to_string())
+            } else if installed {
+                i18n::tf("set.install_other", &setup::install_dir().display().to_string())
+            } else {
+                i18n::t("set.install_portable").to_string()
+            };
+            ui.horizontal(|ui| {
+                dot(ui, here);
+                ui.label(egui::RichText::new(state).size(12.5).color(p.text));
+            });
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(i18n::t("set.install_note"))
+                    .size(11.5)
+                    .color(p.muted),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if !here {
+                    if ghost_button(ui, i18n::t("set.install_do")).clicked() {
+                        let flags = if self.install_service {
+                            "--install --with-service"
+                        } else {
+                            "--install"
+                        };
+                        match service::elevate(flags) {
+                            Ok(()) => self.hint = i18n::t("set.install_running").to_string(),
+                            Err(e) => self.hint = format!("{}", e),
+                        }
+                    }
+                    ui.add_space(8.0);
+                    check(
+                        ui,
+                        &mut self.install_service,
+                        i18n::t("set.install_with_service"),
+                    )
+                    .on_hover_text(i18n::t("set.service_tip"));
+                } else if ghost_button(ui, i18n::t("set.uninstall_do")).clicked() {
+                    match service::elevate("--uninstall") {
+                        Ok(()) => self.hint = i18n::t("set.uninstall_running").to_string(),
+                        Err(e) => self.hint = format!("{}", e),
+                    }
+                }
+            });
         });
     }
 

@@ -196,6 +196,33 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Bild, Ton, Tastatur und Dateien laufen verschlüsselt (AES-256-GCM) direkt zwischen den beiden Rechnern. Der Relay leitet nur weiter und kann nichts mitlesen; nichts wird dort gespeichert.",
         "Picture, sound, keyboard and files run encrypted (AES-256-GCM) straight between the two machines. The relay only forwards and cannot read anything; nothing is stored there.",
     ),
+    // Installation
+    ("set.install", "Installation", "Installation"),
+    (
+        "set.install_portable",
+        "Portabel gestartet - nichts installiert",
+        "Running portable - nothing installed",
+    ),
+    ("set.install_here", "Installiert in {}", "Installed in {}"),
+    (
+        "set.install_other",
+        "Installiert in {} - diese Datei liegt woanders",
+        "Installed in {} - this file lives somewhere else",
+    ),
+    (
+        "set.install_note",
+        "Installieren legt FreeViewer nach Programme, macht einen Startmenü-Eintrag (dann findet ihn die Windows-Suche) und traegt ihn in Apps & Features ein. Fragt einmal nach Administrator-Rechten.",
+        "Installing puts FreeViewer into Program Files, adds a start menu entry (so Windows search finds it) and registers it in Apps & Features. Asks once for administrator rights.",
+    ),
+    ("set.install_do", "FreeViewer installieren", "Install FreeViewer"),
+    ("set.install_with_service", "Dienst gleich mit einrichten", "Set up the service as well"),
+    ("set.install_running", "Installation läuft - bitte die Rückfrage bestätigen.", "Installing - please confirm the prompt."),
+    ("set.uninstall_do", "Deinstallieren", "Uninstall"),
+    (
+        "set.uninstall_running",
+        "Wird entfernt - ID, Geräteliste und Passwörter bleiben erhalten.",
+        "Removing - your ID, device list and passwords stay.",
+    ),
     // Dauerpasswoerter
     ("set.pw_perm", "Feste Passwörter", "Permanent passwords"),
     (
