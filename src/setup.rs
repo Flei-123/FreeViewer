@@ -159,14 +159,58 @@ mod imp {
         let dst = installed_exe();
         std::fs::create_dir_all(install_dir())?;
         if !same_path(&src, &dst) {
+            // Der Dienst haelt die alte Datei fest - erst anhalten, dann tauschen.
+            let dienst_lief = std::process::Command::new("sc")
+                .args(["query", crate::service::SERVICE_NAME])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
+                .unwrap_or(false);
+            if dienst_lief {
+                let _ = std::process::Command::new("sc")
+                    .args(["stop", crate::service::SERVICE_NAME])
+                    .output();
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+            }
             // Eine laufende Exe kann man nicht ueberschreiben, aber umbenennen.
+            // Klemmt auch das (weil noch ein alter Stand aus der .old-Datei
+            // laeuft), nehmen wir den naechsten freien Namen.
             if dst.exists() {
-                let old = dst.with_extension("old");
-                let _ = std::fs::remove_file(&old);
-                let _ = std::fs::rename(&dst, &old);
+                let mut weg = false;
+                for i in 0..12 {
+                    let old = if i == 0 {
+                        dst.with_extension("old")
+                    } else {
+                        dst.with_extension(format!("old{}", i))
+                    };
+                    let _ = std::fs::remove_file(&old);
+                    if std::fs::rename(&dst, &old).is_ok() {
+                        weg = true;
+                        break;
+                    }
+                }
+                if !weg {
+                    return Err(anyhow!(
+                        "{} liess sich nicht beiseite legen - laeuft dort noch etwas?",
+                        dst.display()
+                    ));
+                }
             }
             std::fs::copy(&src, &dst)
                 .map_err(|e| anyhow!("Kopieren nach {} fehlgeschlagen: {}", dst.display(), e))?;
+            if dienst_lief {
+                let _ = std::process::Command::new("sc")
+                    .args(["start", crate::service::SERVICE_NAME])
+                    .output();
+            }
+        }
+        // Reste frueherer Installationen wegraeumen, soweit sie freigegeben sind
+        if let Ok(list) = std::fs::read_dir(install_dir()) {
+            for e in list.flatten() {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("freeviewer.old") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
         }
         let size_kb = std::fs::metadata(&dst).map(|m| (m.len() / 1024) as u32).unwrap_or(0);
 

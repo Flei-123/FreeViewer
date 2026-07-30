@@ -21,6 +21,7 @@ mod hostside;
 mod i18n;
 mod icons;
 mod ident;
+mod meet;
 mod input;
 mod net;
 mod p2p;
@@ -715,6 +716,7 @@ fn main() -> eframe::Result<()> {
                 }
                 app.view = match want.as_deref() {
                     Some("devices") => View::Devices,
+                    Some("meet") => View::Meet,
                     Some("settings") => View::Settings,
                     Some("settings2") => View::Settings,
                     _ => View::Start,
@@ -836,6 +838,15 @@ struct App {
     pw_show: Option<usize>,
     /// Soll beim Installieren gleich der Dienst mit eingerichtet werden?
     install_service: bool,
+    /// Meet: Eingaben und was der Server zuletzt gesagt hat.
+    meet_title: String,
+    meet_id: String,
+    meet_pw: String,
+    meet_last: Option<meet::Meeting>,
+    meet_list: Arc<std::sync::Mutex<Vec<meet::Meeting>>>,
+    meet_busy: Arc<std::sync::atomic::AtomicBool>,
+    meet_err: Arc<std::sync::Mutex<String>>,
+    meet_loaded: bool,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -887,6 +898,14 @@ impl App {
             pw_new_label: String::new(),
             pw_show: None,
             install_service: true,
+            meet_title: String::new(),
+            meet_id: String::new(),
+            meet_pw: String::new(),
+            meet_last: None,
+            meet_list: Arc::new(std::sync::Mutex::new(Vec::new())),
+            meet_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            meet_err: Arc::new(std::sync::Mutex::new(String::new())),
+            meet_loaded: false,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1282,6 +1301,7 @@ impl App {
         match self.view {
             View::Start => self.start_view(ui),
             View::Devices => self.devices_view(ui),
+            View::Meet => self.meet_view(ui),
             View::Settings => self.settings_view(ui),
 
         }
@@ -1561,6 +1581,7 @@ impl App {
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
+                        (View::Meet, "meet", i18n::t("nav.meet")),
                         (View::Settings, "settings", i18n::t("nav.settings")),
                     ] {
                         let sel = self.view == v;
@@ -1609,6 +1630,189 @@ impl App {
             });
     }
 
+    /// Konferenzen. Das Verzeichnis liegt auf dem Meet-Server, darum laufen
+    /// alle Abfragen in einem eigenen Faden - eine haengende Leitung darf die
+    /// Oberflaeche nicht einfrieren.
+    fn meet_refresh(&mut self) {
+        if self.meet_busy.load(Ordering::Relaxed) {
+            return;
+        }
+        self.meet_busy.store(true, Ordering::Relaxed);
+        let list = self.meet_list.clone();
+        let err = self.meet_err.clone();
+        let busy = self.meet_busy.clone();
+        std::thread::spawn(move || {
+            match meet::list() {
+                Ok(v) => {
+                    *list.lock().unwrap() = v;
+                    err.lock().unwrap().clear();
+                }
+                Err(e) => *err.lock().unwrap() = format!("{}", e),
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
+    }
+
+    fn meet_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        if !self.meet_loaded {
+            self.meet_loaded = true;
+            self.meet_refresh();
+        }
+
+        ui.columns(2, |cols| {
+            // ---------------------------------------------- neues Meeting
+            let ui = &mut cols[0];
+            section(ui, i18n::t("meet.new"));
+            card(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.meet_title)
+                        .desired_width(240.0)
+                        .hint_text(i18n::t("meet.title_hint"))
+                        .margin(egui::Margin::symmetric(8, 5)),
+                );
+                ui.add_space(8.0);
+                if ghost_button(ui, i18n::t("meet.start")).clicked() {
+                    match meet::create(&self.meet_title) {
+                        Ok(m) => {
+                            self.meet_id = m.id.clone();
+                            self.meet_pw = m.passwort.clone();
+                            self.meet_last = Some(m);
+                            self.hint = i18n::t("meet.created").to_string();
+                            self.meet_loaded = false;
+                        }
+                        Err(e) => self.hint = format!("{}: {}", i18n::t("meet.err"), e),
+                    }
+                }
+                if let Some(m) = self.meet_last.clone() {
+                    ui.add_space(10.0);
+                    divider(ui);
+                    ui.add_space(8.0);
+                    label_small(ui, i18n::t("meet.id"));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&m.id)
+                                .size(24.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(p.text),
+                        )
+                        .selectable(true),
+                    );
+                    ui.add_space(4.0);
+                    label_small(ui, i18n::t("meet.pw"));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&m.passwort)
+                                .size(18.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(p.text),
+                        )
+                        .selectable(true),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ghost_button(ui, i18n::t("meet.join")).clicked() {
+                            let url = meet::join_url(&m.id, &m.passwort);
+                            if let Err(e) = meet::open_window(&url) {
+                                self.hint = format!("{}", e);
+                            }
+                        }
+                        ui.add_space(6.0);
+                        if ghost_button(ui, i18n::t("meet.copy_invite")).clicked() {
+                            ui.ctx().copy_text(meet::invite(&m));
+                            self.hint = i18n::t("meet.copied").to_string();
+                        }
+                    });
+                }
+            });
+
+            // ---------------------------------------------- beitreten
+            let ui = &mut cols[1];
+            section(ui, i18n::t("meet.join_head"));
+            card(ui, |ui| {
+                label_small(ui, i18n::t("meet.id"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.meet_id)
+                        .desired_width(180.0)
+                        .hint_text("123-456-789")
+                        .font(egui::FontId::new(16.0, egui::FontFamily::Monospace))
+                        .margin(egui::Margin::symmetric(8, 5)),
+                );
+                ui.add_space(6.0);
+                label_small(ui, i18n::t("meet.pw"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.meet_pw)
+                        .desired_width(180.0)
+                        .password(true)
+                        .margin(egui::Margin::symmetric(8, 5)),
+                );
+                ui.add_space(10.0);
+                if ghost_button(ui, i18n::t("meet.join")).clicked() {
+                    let id = self.meet_id.trim().to_string();
+                    if id.is_empty() {
+                        self.hint = i18n::t("meet.need_id").to_string();
+                    } else {
+                        let url = meet::join_url(&id, &self.meet_pw);
+                        match meet::open_window(&url) {
+                            Ok(()) => self.hint = i18n::t("meet.opening").to_string(),
+                            Err(e) => self.hint = format!("{}", e),
+                        }
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(i18n::t("meet.note"))
+                        .size(11.5)
+                        .color(p.muted),
+                );
+            });
+
+            ui.add_space(12.0);
+            section(ui, i18n::t("meet.running"));
+            card(ui, |ui| {
+                let err = self.meet_err.lock().unwrap().clone();
+                let list = self.meet_list.lock().unwrap().clone();
+                if !err.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("{}: {}", i18n::t("meet.err"), err))
+                            .size(12.0)
+                            .color(p.violet),
+                    );
+                } else if list.is_empty() {
+                    ui.label(
+                        egui::RichText::new(i18n::t("meet.none"))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                }
+                for m in list.iter() {
+                    ui.horizontal(|ui| {
+                        dot(ui, true);
+                        ui.label(
+                            egui::RichText::new(&m.id)
+                                .size(13.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(p.text),
+                        );
+                        if !m.titel.is_empty() {
+                            ui.label(egui::RichText::new(&m.titel).size(12.0).color(p.muted));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icon_ghost(ui, "connect", i18n::t("meet.join")).clicked() {
+                                self.meet_id = m.id.clone();
+                            }
+                        });
+                    });
+                    ui.add_space(3.0);
+                }
+                ui.add_space(6.0);
+                if ghost_button(ui, i18n::t("meet.refresh")).clicked() {
+                    self.meet_loaded = false;
+                }
+            });
+        });
+    }
+
     /// Kopfzeile: Seitenname, Suche, eigener Zustand.
     fn header(&mut self, ctx: &egui::Context) {
         let p = theme::palette();
@@ -1626,6 +1830,7 @@ impl App {
                     let title = match self.view {
                         View::Start => i18n::t("nav.start"),
                         View::Devices => i18n::t("nav.devices"),
+                        View::Meet => i18n::t("nav.meet"),
                         View::Settings => i18n::t("nav.settings"),
                     };
                     ui.label(egui::RichText::new(title).size(16.0).strong().color(p.text));
@@ -3518,6 +3723,8 @@ impl eframe::App for App {
 /// Which page the window shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    /// Konferenzen (FreeViewer Meet)
+    Meet,
     Start,
     Devices,
     Settings,
