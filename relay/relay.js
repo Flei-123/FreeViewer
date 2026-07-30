@@ -45,6 +45,25 @@ function newId() {
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
 
+// ---------- device directory: id -> { name, seen } ----------
+// Only what a partner list needs: the machine name a host reports about
+// itself and when it was last online. No screens, no passwords - the relay
+// still cannot decrypt anything.
+const META = process.env.FV_META || path.join(path.dirname(DATA), 'devices.json');
+let meta = {};
+try { meta = JSON.parse(fs.readFileSync(META, 'utf8')); } catch (_) { meta = {}; }
+let metaTimer = null;
+function saveMeta() {
+  if (metaTimer) return;
+  metaTimer = setTimeout(() => {
+    metaTimer = null;
+    try { fs.writeFileSync(META, JSON.stringify(meta)); } catch (e) { log('meta save failed: ' + e.message); }
+  }, 1000);
+}
+function cleanName(s) {
+  return String(s || '').replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 40);
+}
+
 // ---------- live state ----------
 const hosts = new Map();    // id -> ws (host connection)
 const sessions = new Map(); // sid -> {host, viewer}
@@ -82,6 +101,20 @@ const server = http.createServer((req, res) => {
       uptime_s: Math.round((Date.now() - stats.started) / 1000),
       relayed_mb: +(stats.bytes / 1048576).toFixed(1),
     }));
+    return;
+  }
+  // ---- who is online:  GET /fv/online?ids=1,2,3 ----
+  if (req.method === 'GET' && req.url.startsWith('/fv/online')) {
+    const q = new URL(req.url, 'http://x').searchParams.get('ids') || '';
+    const out = {};
+    for (const raw of q.split(',').slice(0, 200)) {
+      const id = raw.replace(/\D/g, '');
+      if (!id) continue;
+      const e = meta[id] || {};
+      out[id] = { online: hosts.has(id), name: e.name || '', seen: e.seen || 0 };
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ids: out }));
     return;
   }
   res.writeHead(404); res.end('freeviewer-relay');
@@ -122,6 +155,14 @@ wss.on('connection', (ws, req) => {
         ws.fvRole = 'host';
         ws.fvId = id;
         hosts.set(id, ws);
+        {
+          const nm = cleanName(m.name);
+          const e = meta[id] || {};
+          if (nm) e.name = nm;
+          e.seen = Date.now();
+          meta[id] = e;
+          saveMeta();
+        }
         log('host online', id, req.socket.remoteAddress);
         return send(ws, { t: 'registered', id });
       }
@@ -159,6 +200,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (ws.fvRole === 'host' && ws.fvId && hosts.get(ws.fvId) === ws) {
       hosts.delete(ws.fvId);
+      if (meta[ws.fvId]) { meta[ws.fvId].seen = Date.now(); saveMeta(); }
       log('host offline', ws.fvId);
     }
     unpair(ws, 'closed');

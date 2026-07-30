@@ -21,6 +21,17 @@ pub struct Stats {
     pub latency_ms: f32,
 }
 
+/// Somebody is knocking: a viewer without a password wants in and the person
+/// sitting here has to allow it.
+#[derive(Clone, Debug)]
+pub struct Knock {
+    /// what the other side calls itself
+    pub from: String,
+    /// four digits both sides can compare
+    pub code: String,
+    pub at: std::time::Instant,
+}
+
 pub struct Shared {
     pub relay_url: String,
     // host side
@@ -28,6 +39,14 @@ pub struct Shared {
     pub password: Mutex<String>,
     pub host_status: Mutex<String>,
     pub host_peer: Mutex<String>,
+    /// Name of this machine in other people's lists.
+    pub device_name: Mutex<String>,
+    /// A viewer is waiting to be let in (host side).
+    pub knock: Mutex<Option<Knock>>,
+    /// 0 = still deciding, 1 = allowed, 2 = refused.
+    pub knock_answer: AtomicU8,
+    /// Session code of the running session, shown on both sides.
+    pub session_code: Mutex<String>,
     // viewer side
     pub viewer_status: Mutex<String>,
     pub frame: Mutex<Option<FrameData>>,
@@ -85,6 +104,10 @@ impl Shared {
             password: Mutex::new(password),
             host_status: Mutex::new("Starte...".to_string()),
             host_peer: Mutex::new("Keine aktive Sitzung".to_string()),
+            device_name: Mutex::new(crate::presence::device_name()),
+            knock: Mutex::new(None),
+            knock_answer: AtomicU8::new(0),
+            session_code: Mutex::new(String::new()),
             viewer_status: Mutex::new(String::new()),
             frame: Mutex::new(None),
             remote_size: Mutex::new((1920, 1080)),

@@ -84,12 +84,34 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
         }
     });
 
-    tx.send(WsMsg::text(net::json_register(secret)))?;
+    let my_name = shared.device_name.lock().unwrap().clone();
+    tx.send(WsMsg::text(net::json_register(secret, &my_name)))?;
 
     let mut sess: Option<Session> = None;
 
-    while let Some(item) = stream.next().await {
-        let msg = item?;
+    let mut ticker = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        let msg = tokio::select! {
+            item = stream.next() => match item {
+                Some(i) => i?,
+                None => break,
+            },
+            _ = ticker.tick() => {
+                let mut drop_session = false;
+                if let Some(s) = sess.as_mut() {
+                    if let Err(e) = s.poll_confirm(&tx, shared) {
+                        *shared.host_peer.lock().unwrap() = format!("Sitzung beendet: {}", e);
+                        drop_session = true;
+                    }
+                }
+                if drop_session {
+                    if let Some(s) = sess.take() {
+                        s.stop();
+                    }
+                }
+                continue;
+            }
+        };
         match msg {
             WsMsg::Text(t) => {
                 let v: serde_json::Value =
@@ -159,6 +181,12 @@ enum Stage {
         client_pub: [u8; 32],
         host_pub: [u8; 32],
         salt: [u8; 16],
+    },
+    /// The viewer asked to be let in without a password; we are waiting for
+    /// the person sitting in front of this machine to decide.
+    WaitConfirm {
+        key: [u8; 32],
+        since: Instant,
     },
     Live,
 }
@@ -265,6 +293,118 @@ impl Session {
                     return Err(anyhow!("falsches Passwort"));
                 }
                 let key = crypto::session_key(secret, client_pub, salt);
+                self.go_live(key, tx, shared)
+            }
+            (
+                Stage::WaitProof {
+                    secret,
+                    client_pub,
+                    salt,
+                    ..
+                },
+                crypto::TAG_ASK,
+            ) => {
+                // No password - the viewer asks to be let in and the person
+                // sitting in front of this machine decides. The key exchange
+                // already happened, so both sides can show the same four
+                // digit code and see they are talking to each other.
+                let from: String = String::from_utf8_lossy(&data[1..])
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(48)
+                    .collect();
+                let key = crypto::session_key(secret, client_pub, salt);
+                let code = crypto::session_code(&key);
+                shared.knock_answer.store(0, Ordering::Relaxed);
+                *shared.knock.lock().unwrap() = Some(crate::shared::Knock {
+                    from: if from.trim().is_empty() {
+                        "Unbekanntes Geraet".to_string()
+                    } else {
+                        from.trim().to_string()
+                    },
+                    code,
+                    at: Instant::now(),
+                });
+                *shared.host_peer.lock().unwrap() =
+                    "Verbindungsanfrage - bitte bestaetigen".to_string();
+                // make sure the question is actually visible
+                crate::tray::show_window();
+                crate::tray::balloon(
+                    "FreeViewer",
+                    "Jemand moechte sich mit diesem Computer verbinden.",
+                );
+                self.stage = Stage::WaitConfirm {
+                    key,
+                    since: Instant::now(),
+                };
+                Ok(())
+            }
+            (Stage::Live, crypto::TAG_DATA) => {
+                let plain = {
+                    let c = self
+                        .cipher
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("kein Schluessel"))?;
+                    let mut c = c.lock().unwrap();
+                    c.open(data)
+                        .ok_or_else(|| anyhow!("Entschluesselung fehlgeschlagen"))?
+                };
+                if let Some(m) = decode(&plain) {
+                    match m {
+                        Msg::Ping { ts } => {
+                            if let Some(c) = self.cipher.as_ref() {
+                                let sealed = c.lock().unwrap().seal(&encode(&Msg::Pong { ts }));
+                                tx.send(WsMsg::Binary(sealed.into()))?;
+                            }
+                        }
+                        Msg::SetMonitor { index } => {
+                            self.monitor.store(index, Ordering::Relaxed);
+                        }
+                        Msg::NeedKeyframe => {
+                            self.force_key.store(true, Ordering::Relaxed);
+                        }
+                        Msg::P2pOffer { addrs, .. } => {
+                            if let Some(p) = self.p2p.as_ref() {
+                                p.set_remote(&addrs);
+                            }
+                        }
+                        Msg::Caps { h264 } => {
+                            let before = self.h264.swap(h264, Ordering::Relaxed);
+                            if before != h264 {
+                                self.force_key.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        Msg::SetMode { mode } => {
+                            self.mode.store(mode, Ordering::Relaxed);
+                            *shared.host_peer.lock().unwrap() = if mode == proto::MODE_GAME {
+                                "Verbunden - Spielmodus (relative Maus)".to_string()
+                            } else {
+                                "Verbunden - Fernwartung".to_string()
+                            };
+                        }
+                        other => {
+                            if let Some(itx) = self.input_tx.as_ref() {
+                                let _ = itx.send(other);
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Everything that has to happen once a session is allowed. Identical for
+    /// the password path and for the "please confirm" path, so both really do
+    /// end up with the same encryption and the same workers.
+    fn go_live(
+        &mut self,
+        key: [u8; 32],
+        tx: &mpsc::UnboundedSender<WsMsg>,
+        shared: &Arc<Shared>,
+    ) -> Result<()> {
+        *shared.session_code.lock().unwrap() = crypto::session_code(&key);
                 let cipher = Arc::new(Mutex::new(Cipher::new(&key, true)));
                 tx.send(WsMsg::Binary(vec![crypto::TAG_OK].into()))?;
 
@@ -356,61 +496,45 @@ impl Session {
                 *shared.host_peer.lock().unwrap() =
                     "Verbunden - Bildschirm wird geteilt".to_string();
                 Ok(())
-            }
-            (Stage::Live, crypto::TAG_DATA) => {
-                let plain = {
-                    let c = self
-                        .cipher
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("kein Schluessel"))?;
-                    let mut c = c.lock().unwrap();
-                    c.open(data)
-                        .ok_or_else(|| anyhow!("Entschluesselung fehlgeschlagen"))?
-                };
-                if let Some(m) = decode(&plain) {
-                    match m {
-                        Msg::Ping { ts } => {
-                            if let Some(c) = self.cipher.as_ref() {
-                                let sealed = c.lock().unwrap().seal(&encode(&Msg::Pong { ts }));
-                                tx.send(WsMsg::Binary(sealed.into()))?;
-                            }
-                        }
-                        Msg::SetMonitor { index } => {
-                            self.monitor.store(index, Ordering::Relaxed);
-                        }
-                        Msg::NeedKeyframe => {
-                            self.force_key.store(true, Ordering::Relaxed);
-                        }
-                        Msg::P2pOffer { addrs, .. } => {
-                            if let Some(p) = self.p2p.as_ref() {
-                                p.set_remote(&addrs);
-                            }
-                        }
-                        Msg::Caps { h264 } => {
-                            let before = self.h264.swap(h264, Ordering::Relaxed);
-                            if before != h264 {
-                                self.force_key.store(true, Ordering::Relaxed);
-                            }
-                        }
-                        Msg::SetMode { mode } => {
-                            self.mode.store(mode, Ordering::Relaxed);
-                            *shared.host_peer.lock().unwrap() = if mode == proto::MODE_GAME {
-                                "Verbunden - Spielmodus (relative Maus)".to_string()
-                            } else {
-                                "Verbunden - Fernwartung".to_string()
-                            };
-                        }
-                        other => {
-                            if let Some(itx) = self.input_tx.as_ref() {
-                                let _ = itx.send(other);
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+    }
+
+    /// While a viewer waits at the door: has the user decided yet? Called
+    /// from the host loop a few times per second.
+    fn poll_confirm(
+        &mut self,
+        tx: &mpsc::UnboundedSender<WsMsg>,
+        shared: &Arc<Shared>,
+    ) -> Result<()> {
+        let (key, since) = match &self.stage {
+            Stage::WaitConfirm { key, since } => (*key, *since),
+            _ => return Ok(()),
+        };
+        // FV_AUTOCONFIRM lets scripted tests answer the question. Only a
+        // process started with that environment variable does it, so nobody
+        // can turn it on from the outside.
+        let auto = std::env::var("FV_AUTOCONFIRM").is_ok();
+        let answer = if auto {
+            1
+        } else {
+            shared.knock_answer.load(Ordering::Relaxed)
+        };
+        let too_late = since.elapsed() > Duration::from_secs(60);
+        if answer == 1 {
+            shared.knock_answer.store(0, Ordering::Relaxed);
+            *shared.knock.lock().unwrap() = None;
+            return self.go_live(key, tx, shared);
         }
+        if answer == 2 || too_late {
+            shared.knock_answer.store(0, Ordering::Relaxed);
+            *shared.knock.lock().unwrap() = None;
+            tx.send(WsMsg::Binary(vec![crypto::TAG_FAIL].into()))?;
+            return Err(anyhow!(if too_late {
+                "Anfrage wurde nicht beantwortet"
+            } else {
+                "Anfrage abgelehnt"
+            }));
+        }
+        Ok(())
     }
 }
 

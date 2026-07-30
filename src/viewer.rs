@@ -74,11 +74,29 @@ fn clipboard_worker(shared: Arc<Shared>) {
     }
 }
 
+/// How this viewer wants to get in.
+#[derive(Clone, Debug)]
+pub enum Auth {
+    /// classic: the session password of the host
+    Password(String),
+    /// no password - the person over there has to allow the session
+    Ask,
+}
+
 pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
+    run_viewer_auth(shared, id, Auth::Password(password)).await
+}
+
+/// Knock instead of unlocking: the host shows a dialog and decides.
+pub async fn run_viewer_ask(shared: Arc<Shared>, id: String) {
+    run_viewer_auth(shared, id, Auth::Ask).await
+}
+
+pub async fn run_viewer_auth(shared: Arc<Shared>, id: String, auth: Auth) {
     shared.connecting.store(true, Ordering::Relaxed);
     shared.set_viewer_status(format!("Verbinde mit {} ...", id));
 
-    let result = viewer_once(&shared, &id, &password).await;
+    let result = viewer_once(&shared, &id, &auth).await;
 
     shared.connected.store(false, Ordering::Relaxed);
     shared.connecting.store(false, Ordering::Relaxed);
@@ -95,7 +113,7 @@ pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
     }
 }
 
-async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<()> {
+async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> {
     let ws = net::connect(&shared.relay_url).await?;
     let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
@@ -174,16 +192,35 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         let mut salt = [0u8; 16];
                         salt.copy_from_slice(&data[33..49]);
 
-                        let pw_key = crypto::password_key(password, &salt);
-                        let proof = crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
                         let key = crypto::session_key(&kp.secret, &host_pub, &salt);
                         cipher = Some(Arc::new(Mutex::new(Cipher::new(&key, false))));
                         session_key = Some(key);
+                        let code = crypto::session_code(&key);
+                        *shared.session_code.lock().unwrap() = code.clone();
 
-                        let mut out = Vec::with_capacity(33);
-                        out.push(crypto::TAG_PROOF);
-                        out.extend_from_slice(&proof);
-                        tx.send(WsMsg::Binary(out.into()))?;
+                        match auth {
+                            Auth::Password(password) => {
+                                let pw_key = crypto::password_key(password, &salt);
+                                let proof =
+                                    crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
+                                let mut out = Vec::with_capacity(33);
+                                out.push(crypto::TAG_PROOF);
+                                out.extend_from_slice(&proof);
+                                tx.send(WsMsg::Binary(out.into()))?;
+                            }
+                            Auth::Ask => {
+                                // tell them who is knocking, then wait
+                                let me = shared.device_name.lock().unwrap().clone();
+                                let mut out = Vec::with_capacity(1 + me.len());
+                                out.push(crypto::TAG_ASK);
+                                out.extend_from_slice(me.as_bytes());
+                                tx.send(WsMsg::Binary(out.into()))?;
+                                shared.set_viewer_status(format!(
+                                    "Warte auf Bestaetigung ... (Code {})",
+                                    code
+                                ));
+                            }
+                        }
                     }
                     crypto::TAG_OK => {
                         let c = match cipher.as_ref() {
@@ -295,7 +332,12 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }
                         }));
                     }
-                    crypto::TAG_FAIL => break Err(anyhow!("Passwort falsch")),
+                    crypto::TAG_FAIL => {
+                        break Err(anyhow!(match auth {
+                            Auth::Password(_) => "Passwort falsch",
+                            Auth::Ask => "Anfrage abgelehnt oder nicht beantwortet",
+                        }))
+                    }
                     crypto::TAG_DATA => {
                         let plain = {
                             let c = match cipher.as_ref() {

@@ -14,8 +14,14 @@ pub async fn connect(url: &str) -> Result<Ws> {
     Ok(ws)
 }
 
-pub fn json_register(secret: &str) -> String {
-    format!("{{\"t\":\"host_register\",\"secret\":\"{}\"}}", secret)
+/// Registers this machine. The name is what other people see in their partner
+/// list; it is the only thing besides the ID the relay ever learns about us.
+pub fn json_register(secret: &str, name: &str) -> String {
+    format!(
+        "{{\"t\":\"host_register\",\"secret\":\"{}\",\"name\":\"{}\"}}",
+        secret,
+        crate::presence::clean(name)
+    )
 }
 
 pub fn json_connect(id: &str) -> String {
