@@ -203,6 +203,8 @@ struct Session {
     h264: Arc<AtomicBool>,
     /// Direct UDP path of this session (video only).
     p2p: Option<Arc<crate::p2p::P2p>>,
+    /// Speech both ways while the session runs.
+    voice: Option<crate::audio::Voice>,
 }
 
 /// The screens this machine could share, in protocol form.
@@ -235,6 +237,7 @@ impl Session {
             force_key: Arc::new(AtomicBool::new(false)),
             h264: Arc::new(AtomicBool::new(false)),
             p2p: None,
+            voice: None,
         }
     }
 
@@ -382,7 +385,11 @@ impl Session {
                                 "Verbunden - Fernwartung".to_string()
                             };
                         }
-                        other => {
+                        Msg::Audio { seq, data } => {
+                            if let Some(v) = self.voice.as_ref() {
+                                v.feed(seq, &data);
+                            }
+                        }                        other => {
                             if let Some(itx) = self.input_tx.as_ref() {
                                 let _ = itx.send(other);
                             }
@@ -465,6 +472,15 @@ impl Session {
                     });
                 }
                 self.p2p = p2p;
+                // voice link: speech in both directions, same encrypted channel
+                {
+                    let vtx = out_tx.clone();
+                    let vsend: std::sync::Arc<dyn Fn(Msg) + Send + Sync> =
+                        std::sync::Arc::new(move |m: Msg| {
+                            let _ = vtx.send(encode(&m));
+                        });
+                    self.voice = Some(crate::audio::Voice::start(shared.voice.clone(), vsend));
+                }
 
                 let screen = Arc::new(Mutex::new(ScreenRect::default()));
                 let (in_tx, in_rx) = std::sync::mpsc::channel::<Msg>();

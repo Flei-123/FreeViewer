@@ -1,0 +1,562 @@
+    /// Left rail with the pages - the narrow bar TeamViewer has on the left.
+    fn rail(&mut self, ctx: &egui::Context) {
+        let p = theme::palette();
+        let rail_bg = if p.dark { p.card } else { p.accent };
+        egui::SidePanel::left("fv_rail")
+            .exact_width(58.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(rail_bg)
+                    .inner_margin(egui::Margin::symmetric(0, 12)),
+            )
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    logo(ui);
+                    ui.add_space(12.0);
+                    for (v, name, tip) in [
+                        (View::Start, "home", "Start"),
+                        (View::Devices, "devices", "Geraete"),
+                        (View::Settings, "settings", "Einstellungen"),
+                        (View::Appearance, "palette", "Darstellung"),
+                    ] {
+                        let sel = self.view == v;
+                        let fg = if p.dark {
+                            if sel {
+                                p.accent
+                            } else {
+                                p.muted
+                            }
+                        } else if sel {
+                            p.on_accent
+                        } else {
+                            p.on_accent.gamma_multiply(0.72)
+                        };
+                        let fill = if sel {
+                            if p.dark {
+                                p.accent.gamma_multiply(0.16)
+                            } else {
+                                egui::Color32::from_white_alpha(46)
+                            }
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let r = ui
+                            .add(
+                                egui::Button::image(icons::image(name, 20.0, fg))
+                                    .fill(fill)
+                                    .stroke(egui::Stroke::NONE)
+                                    .corner_radius(9)
+                                    .min_size(egui::vec2(40.0, 36.0)),
+                            )
+                            .on_hover_text(tip);
+                        if r.clicked() {
+                            self.view = v;
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+    }
+
+    /// Page title, the search field and our own state.
+    fn header(&mut self, ctx: &egui::Context) {
+        let p = theme::palette();
+        let my_id = self.shared.my_id.lock().unwrap().clone();
+        let online = !my_id.is_empty();
+        egui::TopBottomPanel::top("fv_header")
+            .exact_height(52.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .inner_margin(egui::Margin::symmetric(16, 8)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let title = match self.view {
+                        View::Start => "Start",
+                        View::Devices => "Geraete",
+                        View::Settings => "Einstellungen",
+                        View::Appearance => "Darstellung",
+                    };
+                    ui.label(egui::RichText::new(title).size(17.0).strong().color(p.text));
+                    ui.add_space(14.0);
+                    icons::show(ui, "search", 15.0, p.muted);
+                    let mut q = self.search.clone();
+                    let te = ui.add(
+                        egui::TextEdit::singleline(&mut q)
+                            .desired_width(250.0)
+                            .hint_text("Suchen und verbinden")
+                            .margin(egui::Margin::symmetric(8, 4)),
+                    );
+                    if te.changed() {
+                        self.search = q;
+                        if !self.search.is_empty() {
+                            self.view = View::Devices;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        status_pill(ui, online, if online { "Bereit" } else { "Verbinde ..." });
+                        if !my_id.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(partners::pretty_id(&my_id))
+                                    .size(12.5)
+                                    .color(p.muted),
+                            );
+                        }
+                    });
+                });
+            });
+    }
+
+    /// The device list as a real table: groups, columns, status pills.
+    fn devices_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        let all = self.book.sorted();
+        self.presence
+            .watch(all.iter().map(|x| x.id.clone()).collect());
+        let q = self.search.trim().to_lowercase();
+        let hit = |x: &partners::Partner| {
+            q.is_empty() || x.label().to_lowercase().contains(&q) || x.id.contains(&q)
+        };
+
+        let mut connect: Option<String> = None;
+        let mut rename: Option<String> = None;
+        let mut fav: Option<String> = None;
+        let mut remove: Option<String> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} Geraete", all.len()))
+                    .size(12.5)
+                    .color(p.muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::text_button(ui, "plus", "Hinzufuegen", false)
+                    .on_hover_text("Die ID aus dem Suchfeld in die Liste legen")
+                    .clicked()
+                {
+                    let id: String = self
+                        .search
+                        .chars()
+                        .filter(|c| c.is_ascii_digit())
+                        .collect();
+                    if id.len() == 9 {
+                        self.book.started(&id, "", false);
+                        self.book.save();
+                        self.search.clear();
+                    } else {
+                        self.hint = "Erst eine 9-stellige ID ins Suchfeld tippen".to_string();
+                    }
+                }
+                if icons::button(ui, "refresh", 15.0, p.muted)
+                    .on_hover_text("Zustand neu abfragen")
+                    .clicked()
+                {
+                    self.presence
+                        .watch(all.iter().map(|x| x.id.clone()).collect());
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        egui::Frame::NONE
+            .fill(p.card)
+            .stroke(egui::Stroke::new(1.0, p.line))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(0, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("NAME").size(10.5).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(34.0);
+                        ui.label(egui::RichText::new("STATUS").size(10.5).color(p.muted));
+                        ui.add_space(40.0);
+                        ui.label(
+                            egui::RichText::new("FREEVIEWER-ID")
+                                .size(10.5)
+                                .color(p.muted),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+                divider(ui);
+                ui.add_space(4.0);
+
+                let recent: Vec<partners::Partner> =
+                    all.iter().filter(|x| hit(x)).take(3).cloned().collect();
+                let favs: Vec<partners::Partner> = all
+                    .iter()
+                    .filter(|x| hit(x) && x.favorite)
+                    .cloned()
+                    .collect();
+                let onl: Vec<partners::Partner> = all
+                    .iter()
+                    .filter(|x| hit(x) && self.presence.online(&x.id))
+                    .cloned()
+                    .collect();
+                let offl: Vec<partners::Partner> = all
+                    .iter()
+                    .filter(|x| hit(x) && !self.presence.online(&x.id))
+                    .cloned()
+                    .collect();
+
+                let mut shown = 0usize;
+                for (title, list) in [
+                    ("Letzte Verbindungen", recent),
+                    ("Favoriten", favs),
+                    ("Online", onl),
+                    ("Offline", offl),
+                ] {
+                    if list.is_empty() {
+                        continue;
+                    }
+                    shown += list.len();
+                    let gid = ui.make_persistent_id(("fv_group", title));
+                    let open = ui.data_mut(|d| *d.get_temp_mut_or(gid, true));
+                    let head = ui.add(
+                        egui::Button::image_and_text(
+                            icons::image(
+                                if open { "chevron-down" } else { "chevron-right" },
+                                13.0,
+                                p.muted,
+                            ),
+                            egui::RichText::new(format!("{}   {}", title, list.len()))
+                                .size(12.5)
+                                .strong()
+                                .color(p.text),
+                        )
+                        .fill(p.card_hi)
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(0)
+                        .min_size(egui::vec2(ui.available_width(), 26.0)),
+                    );
+                    if head.clicked() {
+                        ui.data_mut(|d| d.insert_temp(gid, !open));
+                    }
+                    if !open {
+                        continue;
+                    }
+                    for x in list.iter() {
+                        let on = self.presence.online(&x.id);
+                        let sel = self.selected.as_deref() == Some(x.id.as_str());
+                        egui::Frame::NONE
+                            .fill(if sel {
+                                p.row_sel
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .inner_margin(egui::Margin::symmetric(10, 4))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let low = x.label().to_lowercase();
+                                    let sym = if low.contains("laptop") || low.contains("book") {
+                                        "laptop"
+                                    } else {
+                                        "monitor"
+                                    };
+                                    icons::show(ui, sym, 16.0, if on { p.green } else { p.muted });
+                                    let name = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(x.label()).size(13.0).color(p.text),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if name.clicked() {
+                                        self.selected = Some(x.id.clone());
+                                    }
+                                    if name.double_clicked() {
+                                        connect = Some(x.id.clone());
+                                    }
+                                    if x.favorite {
+                                        icons::show(ui, "star", 12.0, p.accent);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.menu_image_button(
+                                                icons::image("dots", 14.0, p.muted),
+                                                |ui| {
+                                                    if ui.button("Verbinden").clicked() {
+                                                        connect = Some(x.id.clone());
+                                                        ui.close();
+                                                    }
+                                                    if ui.button("Umbenennen").clicked() {
+                                                        rename = Some(x.id.clone());
+                                                        ui.close();
+                                                    }
+                                                    if ui
+                                                        .button(if x.favorite {
+                                                            "Favorit entfernen"
+                                                        } else {
+                                                            "Als Favorit"
+                                                        })
+                                                        .clicked()
+                                                    {
+                                                        fav = Some(x.id.clone());
+                                                        ui.close();
+                                                    }
+                                                    if ui.button("Aus der Liste loeschen").clicked()
+                                                    {
+                                                        remove = Some(x.id.clone());
+                                                        ui.close();
+                                                    }
+                                                },
+                                            );
+                                            ui.add_space(6.0);
+                                            status_pill(
+                                                ui,
+                                                on,
+                                                if on { "Online" } else { "Offline" },
+                                            );
+                                            ui.add_space(14.0);
+                                            ui.label(
+                                                egui::RichText::new(partners::pretty_id(&x.id))
+                                                    .size(12.5)
+                                                    .color(p.muted),
+                                            );
+                                        },
+                                    );
+                                });
+                            });
+                    }
+                }
+
+                if shown == 0 {
+                    ui.add_space(10.0);
+                    ui.vertical_centered(|ui| {
+                        icons::show(ui, "devices", 26.0, p.muted);
+                        ui.label(
+                            egui::RichText::new(if all.is_empty() {
+                                "Noch keine Geraete - oben eine ID eingeben und verbinden."
+                            } else {
+                                "Kein Geraet passt zur Suche."
+                            })
+                            .size(12.5)
+                            .color(p.muted),
+                        );
+                    });
+                    ui.add_space(10.0);
+                }
+            });
+
+        // Umbenennen: kleine Zeile unter der Tabelle
+        if let Some((id, mut buf)) = self.renaming.clone() {
+            ui.add_space(8.0);
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    label_small(ui, "Neuer Name");
+                    let te = ui.add(
+                        egui::TextEdit::singleline(&mut buf)
+                            .desired_width(220.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
+                    );
+                    let save = ghost_button(ui, "speichern").clicked()
+                        || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if te.changed() {
+                        self.renaming = Some((id.clone(), buf.clone()));
+                    }
+                    if save {
+                        self.book.rename(&id, buf.trim());
+                        self.book.save();
+                        self.renaming = None;
+                    }
+                    if ghost_button(ui, "abbrechen").clicked() {
+                        self.renaming = None;
+                    }
+                });
+            });
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            dot(ui, true);
+            ui.label(
+                egui::RichText::new("Bereit zum Verbinden (verschluesselte Verbindung)")
+                    .size(11.5)
+                    .color(p.muted),
+            );
+        });
+
+        if let Some(id) = connect {
+            self.partner_id = id.clone();
+            self.partner_pw = self.book.password(&id).unwrap_or_default();
+            self.selected = Some(id);
+            if self.partner_pw.is_empty() {
+                self.start_ask_session();
+            } else {
+                self.start_session();
+            }
+        }
+        if let Some(id) = fav {
+            self.book.toggle_favorite(&id);
+            self.book.save();
+        }
+        if let Some(id) = remove {
+            self.book.remove(&id);
+            self.book.save();
+            if self.selected.as_deref() == Some(id.as_str()) {
+                self.selected = None;
+            }
+        }
+        if let Some(id) = rename {
+            let cur = self.book.get(&id).map(|x| x.label()).unwrap_or_default();
+            self.renaming = Some((id, cur));
+        }
+    }
+
+    /// Darstellung: Vorlage, Akzent, Groesse - wie die Seite im Cockpit.
+    fn appearance_view(&mut self, ui: &mut egui::Ui) {
+        let mut a = self.look.clone();
+
+        section(ui, "Vorlage");
+        card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (key, name, pal) in theme::PRESETS.iter() {
+                    let sel = a.preset == *key;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(148.0, 78.0), egui::Sense::click());
+                    let pt = ui.painter();
+                    pt.rect_filled(rect, 8.0, pal.bg);
+                    pt.rect_filled(
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(10.0, 10.0),
+                            egui::vec2(128.0, 20.0),
+                        ),
+                        5.0,
+                        pal.card,
+                    );
+                    pt.rect_filled(
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(10.0, 36.0),
+                            egui::vec2(58.0, 11.0),
+                        ),
+                        4.0,
+                        pal.accent,
+                    );
+                    pt.rect_filled(
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(74.0, 36.0),
+                            egui::vec2(40.0, 11.0),
+                        ),
+                        4.0,
+                        pal.card_hi,
+                    );
+                    pt.text(
+                        rect.min + egui::vec2(11.0, 54.0),
+                        egui::Align2::LEFT_TOP,
+                        name,
+                        egui::FontId::proportional(12.5),
+                        pal.text,
+                    );
+                    pt.rect_stroke(
+                        rect,
+                        8.0,
+                        egui::Stroke::new(
+                            if sel { 2.0 } else { 1.0 },
+                            if sel { theme::accent() } else { theme::line() },
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    if resp.clicked() {
+                        a.preset = key.to_string();
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        section(ui, "Akzentfarbe");
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(a.accent.is_none(), "wie die Vorlage")
+                    .clicked()
+                {
+                    a.accent = None;
+                }
+                ui.add_space(6.0);
+                for (name, col) in theme::ACCENTS.iter() {
+                    let want = [col.r(), col.g(), col.b()];
+                    let sel = a.accent == Some(want);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                    ui.painter().rect_filled(rect, 12.0, *col);
+                    if sel {
+                        ui.painter().rect_stroke(
+                            rect.expand(2.0),
+                            14.0,
+                            egui::Stroke::new(2.0, theme::text()),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    if resp.on_hover_text(*name).clicked() {
+                        a.accent = Some(want);
+                    }
+                    ui.add_space(4.0);
+                }
+                ui.add_space(8.0);
+                let cur = theme::accent();
+                let mut rgb = a.accent.unwrap_or([cur.r(), cur.g(), cur.b()]);
+                if ui
+                    .color_edit_button_srgb(&mut rgb)
+                    .on_hover_text("Eigene Farbe")
+                    .changed()
+                {
+                    a.accent = Some(rgb);
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        section(ui, "Groesse und Form");
+        card(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut a.scale, 0.85..=1.35)
+                    .text("Schriftgroesse")
+                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
+            );
+            let mut r = a.radius as f32;
+            if ui
+                .add(egui::Slider::new(&mut r, 0.0..=16.0).text("Rundung"))
+                .changed()
+            {
+                a.radius = r.round() as u8;
+            }
+            ui.add_space(4.0);
+            if ghost_button(ui, "zuruecksetzen").clicked() {
+                a = theme::Appearance::default();
+            }
+        });
+
+        ui.add_space(10.0);
+        section(ui, "Vorschau");
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                icons::show(ui, "shield", 18.0, theme::green());
+                ui.label(
+                    egui::RichText::new("Ende zu Ende verschluesselt")
+                        .size(12.5)
+                        .color(theme::text()),
+                );
+                ui.add_space(10.0);
+                status_pill(ui, true, "Online");
+                ui.add_space(10.0);
+                let _ = accent_button(ui, "Verbinden", true);
+                ui.add_space(6.0);
+                let _ = ghost_button(ui, "abbrechen");
+            });
+        });
+
+        if a != self.look {
+            self.look = a.clone();
+            theme::save(&a);
+            theme::apply(ui.ctx(), &a);
+        }
+    }
+

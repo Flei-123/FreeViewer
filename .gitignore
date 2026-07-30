@@ -60,3 +60,6 @@ sample.log
 lf.ps1
 tools/lf.ps1
 tools/append_selftest.ps1
+
+# Sicherungen der Umbau-Skripte
+*.bak_*

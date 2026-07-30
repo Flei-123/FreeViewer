@@ -138,6 +138,8 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
     let mut win_frames = 0u32;
     let mut win_bytes = 0usize;
     let mut ping_task: Option<tokio::task::JoinHandle<()>> = None;
+    // voice link of this session (dropped when the session ends)
+    let mut voice: Option<crate::audio::Voice> = None;
     // H.264 runs on its own thread: the decoder is a COM object (not Send)
     // and decoding must never stall the socket.
     let mut video: Option<VideoPipe> = None;
@@ -313,6 +315,16 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             }
                         }
 
+                        // voice link: microphone out, speaker in
+                        {
+                            let sh = shared.clone();
+                            let vsend: Arc<dyn Fn(Msg) + Send + Sync> =
+                                Arc::new(move |m: Msg| sh.send_input(m));
+                            voice = Some(crate::audio::Voice::start(
+                                shared.voice.clone(),
+                                vsend,
+                            ));
+                        }
                         // clipboard sync (own thread, clipboard handles are not Send)
                         let sh_clip = shared.clone();
                         std::thread::spawn(move || clipboard_worker(sh_clip));
@@ -357,7 +369,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 *shared.monitors.lock().unwrap() = list;
                                 shared.active_monitor.store(active, Ordering::Relaxed);
                             }
-                            Some(Msg::Cursor { x, y, visible }) => {
+                            Some(Msg::Audio { seq, data }) => {
+                                if let Some(v) = voice.as_ref() {
+                                    v.feed(seq, &data);
+                                }
+                            }                            Some(Msg::Cursor { x, y, visible }) => {
                                 *shared.remote_cursor.lock().unwrap() = (x, y, visible);
                             }
                             Some(Msg::Clipboard { text }) => {
