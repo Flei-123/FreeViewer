@@ -1,0 +1,89 @@
+
+// ------------------------------------------------------------ kleine Helfer
+
+/// Symbolknopf ohne Rahmen - Hover und Druck kommen aus der Palette.
+fn icon_ghost(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
+    let r = ui
+        .scope(|ui| {
+            let v = ui.visuals_mut();
+            v.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+            v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            v.widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.add(
+                egui::Button::image(icons::image(icon, 15.0, theme::muted()))
+                    .corner_radius(7)
+                    .min_size(egui::vec2(28.0, 24.0)),
+            )
+        })
+        .inner;
+    r.on_hover_text(tip)
+}
+
+/// Ein- und ausschaltbarer Symbolknopf (Mikrofon, Ton).
+fn icon_toggle(ui: &mut egui::Ui, icon: &str, on: bool, size: f32, tip: &str) -> egui::Response {
+    let col = if on { theme::accent() } else { theme::muted() };
+    let r = ui
+        .scope(|ui| {
+            let v = ui.visuals_mut();
+            v.widgets.inactive.weak_bg_fill = if on {
+                theme::accent().gamma_multiply(0.16)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            v.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            v.widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.add(
+                egui::Button::image(icons::image(icon, size, col))
+                    .corner_radius(8)
+                    .min_size(egui::vec2(size + 14.0, size + 11.0)),
+            )
+        })
+        .inner;
+    r.on_hover_text(tip)
+}
+
+/// Zwei kleine Pegelbalken: raus und rein.
+fn level_bar(ui: &mut egui::Ui, out: u32, inn: u32) {
+    let p = theme::palette();
+    for (val, col) in [(out, p.accent), (inn, p.green)] {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 6.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 3.0, p.card_hi);
+        let w = rect.width() * (val.min(100) as f32 / 100.0);
+        if w > 0.5 {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height())),
+                3.0,
+                col,
+            );
+        }
+        ui.add_space(4.0);
+    }
+}
+
+/// Monitor oder Laptop - je nachdem, wie das Geraet heisst.
+fn device_symbol(label: &str) -> &'static str {
+    let l = label.to_lowercase();
+    if l.contains("laptop") || l.contains("book") || l.contains("note") {
+        "laptop"
+    } else {
+        "monitor"
+    }
+}
+
+/// Offline steht grau da, online gruen bzw. in normaler Schrift.
+fn row_color(online: bool, is_text: bool) -> egui::Color32 {
+    let p = theme::palette();
+    if online {
+        if is_text {
+            p.text
+        } else {
+            p.green
+        }
+    } else if is_text {
+        p.muted.gamma_multiply(0.75)
+    } else {
+        p.muted.gamma_multiply(0.55)
+    }
+}

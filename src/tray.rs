@@ -543,6 +543,17 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{claim_single_instance, remove, start};
 
+/// Fenstergriff des Hauptfensters - fuer die Titelleistenfarbe.
+#[cfg(windows)]
+pub fn main_window() -> Option<windows::Win32::Foundation::HWND> {
+    unsafe { imp::main_hwnd() }
+}
+
+#[cfg(not(windows))]
+pub fn main_window() -> Option<()> {
+    None
+}
+
 #[cfg(windows)]
 pub fn show_window() {
     unsafe { imp::show_main() }

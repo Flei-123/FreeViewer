@@ -571,6 +571,20 @@ impl WavWriter {
 
 // ------------------------------------------------------------- test commands
 
+/// Klarnamen der beiden Geraete, fuer die Einstellungen.
+pub fn device_names() -> (String, String) {
+    let host = cpal::default_host();
+    let mic = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "-".to_string());
+    let spk = host
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "-".to_string());
+    (mic, spk)
+}
+
 /// `freeviewer --audiodev`
 pub fn list_devices() -> String {
     let host = cpal::default_host();

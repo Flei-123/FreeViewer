@@ -31,6 +31,8 @@ pub struct Palette {
     pub text: Color32,
     /// dark palettes paint the soft background orbs, light ones do not
     pub dark: bool,
+    /// Farbnebel im Hintergrund? Der FleiLauncher-Look will eine ruhige Flaeche.
+    pub orbs: bool,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -51,7 +53,8 @@ pub const HELL: Palette = Palette {
     green: rgb(0x14, 0x9d, 0x52),
     muted: rgb(0x67, 0x70, 0x85),
     text: rgb(0x18, 0x20, 0x30),
-    dark: false,
+    dark: false,
+    orbs: false,
 };
 
 /// TeamViewer, but at night.
@@ -68,7 +71,8 @@ pub const DUNKEL: Palette = Palette {
     green: rgb(0x22, 0xc5, 0x5e),
     muted: rgb(0x9a, 0xa3, 0xb5),
     text: rgb(0xe8, 0xeb, 0xf3),
-    dark: true,
+    dark: true,
+    orbs: false,
 };
 
 /// The FleiTec house style (what 0.13 looked like).
@@ -85,7 +89,8 @@ pub const NAVY: Palette = Palette {
     green: rgb(0x22, 0xc5, 0x5e),
     muted: rgb(0x8b, 0x95, 0xab),
     text: rgb(0xe7, 0xeb, 0xf3),
-    dark: true,
+    dark: true,
+    orbs: true,
 };
 
 /// Like the FleiLauncher: near black with a green accent.
@@ -102,7 +107,8 @@ pub const GRUEN: Palette = Palette {
     green: rgb(0x1b, 0xd9, 0x6a),
     muted: rgb(0x8b, 0x95, 0x9f),
     text: rgb(0xe7, 0xeb, 0xf0),
-    dark: true,
+    dark: true,
+    orbs: false,
 };
 
 pub const PRESETS: [(&str, &str, Palette); 4] = [
@@ -179,6 +185,8 @@ pub struct Appearance {
     pub scale: f32,
     /// 0 .. 16
     pub radius: u8,
+    /// Sprachkuerzel: "de" oder "en"
+    pub lang: String,
 }
 
 impl Default for Appearance {
@@ -188,6 +196,7 @@ impl Default for Appearance {
             accent: None,
             scale: 1.0,
             radius: 10,
+            lang: "de".to_string(),
         }
     }
 }
@@ -222,6 +231,11 @@ pub fn load() -> Appearance {
             if let Some(r) = v.get("radius").and_then(|x| x.as_u64()) {
                 a.radius = r.min(16) as u8;
             }
+            if let Some(l) = v.get("lang").and_then(|x| x.as_str()) {
+                if crate::i18n::LANGS.iter().any(|(c, _)| *c == l) {
+                    a.lang = l.to_string();
+                }
+            }
         }
     }
     a
@@ -238,6 +252,7 @@ pub fn save(a: &Appearance) {
     }
     v.insert("scale".into(), serde_json::Value::from(a.scale as f64));
     v.insert("radius".into(), serde_json::Value::from(a.radius as u64));
+    v.insert("lang".into(), serde_json::Value::from(a.lang.clone()));
     let _ = std::fs::create_dir_all(crate::ident::config_dir());
     let _ = std::fs::write(
         path(),
@@ -307,11 +322,16 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.line);
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.inactive.corner_radius = r.into();
-        v.widgets.hovered.weak_bg_fill = p.row_sel;
+        v.widgets.hovered.weak_bg_fill = if p.dark {
+            p.accent.gamma_multiply(0.20)
+        } else {
+            p.accent.gamma_multiply(0.12)
+        };
+        v.widgets.hovered.expansion = 1.0;
         v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.accent.gamma_multiply(0.7));
         v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.hovered.corner_radius = r.into();
-        v.widgets.active.weak_bg_fill = p.row_sel;
+        v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.30);
         v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.accent);
         v.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.active.corner_radius = r.into();
