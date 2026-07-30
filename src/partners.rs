@@ -41,6 +41,12 @@ pub struct Partner {
     /// Encrypted password (hex), only present if the user asked for it.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Ordner/Gruppe, in der das Geraet steht. Leer = "Alle".
+    #[serde(default)]
+    pub group: String,
+    /// Freie Notiz zum Geraet.
+    #[serde(default)]
+    pub note: String,
 }
 
 impl Partner {
@@ -199,6 +205,41 @@ impl Book {
     pub fn remove(&mut self, id: &str) {
         self.entries.retain(|p| p.id != id);
         self.save();
+    }
+
+    /// Ordner setzen (leer = kein Ordner).
+    pub fn set_group(&mut self, id: &str, group: &str) {
+        self.entry(id).group = group.trim().to_string();
+        self.save();
+    }
+
+    /// Notiz setzen.
+    pub fn set_note(&mut self, id: &str, note: &str) {
+        self.entry(id).note = note.trim().to_string();
+        self.save();
+    }
+
+    /// Passwort hinterlegen (None loescht es).
+    pub fn set_password(&mut self, id: &str, password: Option<&str>) {
+        let sealed = match password {
+            Some(pw) if !pw.is_empty() => protect(pw),
+            _ => None,
+        };
+        self.entry(id).secret = sealed;
+        self.save();
+    }
+
+    /// Alle vorhandenen Ordner, alphabetisch.
+    pub fn groups(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .entries
+            .iter()
+            .map(|p| p.group.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// Decrypted password, if one was stored.

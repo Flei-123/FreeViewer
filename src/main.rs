@@ -15,6 +15,7 @@ mod chrome;
 mod clip;
 mod crypto;
 mod encoder;
+mod feedback;
 mod h264;
 mod hostside;
 mod i18n;
@@ -43,7 +44,7 @@ use std::time::Duration;
 use proto::Msg;
 use shared::Shared;
 
-const DEFAULT_RELAY: &str = "wss://jarvis.fleitec.com/fv/ws";
+pub const DEFAULT_RELAY: &str = "wss://jarvis.fleitec.com/fv/ws";
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -667,6 +668,8 @@ fn main() -> eframe::Result<()> {
                         "access" => SettingsTab::Access,
                         "audio" => SettingsTab::Audio,
                         "look" => SettingsTab::Look,
+                        "update" => SettingsTab::Update,
+                        "feedback" => SettingsTab::Feedback,
                         "about" => SettingsTab::About,
                         _ => SettingsTab::General,
                     };
@@ -758,6 +761,13 @@ struct App {
     look: theme::Appearance,
     /// Gewaehlter Bereich in den Einstellungen.
     stab: SettingsTab,
+    /// Feedback: Art, Text, Kontakt.
+    fb_bug: bool,
+    fb_text: String,
+    fb_contact: String,
+    /// Geraeteliste: gewaehlter Ordner und offenes Bearbeiten-Feld.
+    folder: String,
+    edit_dev: Option<DevEdit>,
     /// Wann die Titelleiste zuletzt eingefaerbt wurde.
     caption_tick: std::time::Instant,
     shot_n: u32,
@@ -796,6 +806,11 @@ impl App {
             shot: None,
             look: theme::load(),
             stab: SettingsTab::General,
+            fb_bug: true,
+            fb_text: String::new(),
+            fb_contact: String::new(),
+            folder: String::new(),
+            edit_dev: None,
             caption_tick: std::time::Instant::now() - Duration::from_secs(9),
             shot_n: 0,
         }
@@ -1256,24 +1271,6 @@ impl App {
                 }
             });
 
-            // Sprache in der Sitzung - klein, direkt unter dem eigenen Kasten
-            ui.add_space(8.0);
-            section(ui, i18n::t("start.voice"));
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    self.voice_buttons(ui, 17.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let v = self.shared.voice.clone();
-                        let l = v.level_out.load(Ordering::Relaxed);
-                        let r = v.level_in.load(Ordering::Relaxed);
-                        level_bar(ui, l, r);
-                    });
-                });
-                let prob = self.shared.voice.problem.lock().unwrap().clone();
-                if !prob.is_empty() {
-                    ui.label(egui::RichText::new(prob).size(11.0).color(p.muted));
-                }
-            });
 
             // ------------------------------------------------ verbinden
             let ui = &mut cols[1];
@@ -1473,15 +1470,15 @@ impl App {
                                 p.muted
                             }
                         } else if sel {
-                            p.on_accent
+                            p.accent
                         } else {
-                            p.on_accent.gamma_multiply(0.72)
+                            egui::Color32::WHITE
                         };
                         let fill = if sel {
                             if p.dark {
                                 p.accent.gamma_multiply(0.16)
                             } else {
-                                egui::Color32::from_white_alpha(46)
+                                egui::Color32::WHITE
                             }
                         } else {
                             egui::Color32::TRANSPARENT
@@ -1564,279 +1561,513 @@ impl App {
             });
     }
 
-    /// Die Geräteliste: Gruppen, Spalten, Zustand. Offline steht grau da.
+    /// Geräte: links die Ordner, in der Mitte die Liste, rechts das gewählte
+    /// Gerät mit allem, was man daran einstellen kann.
     fn devices_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         let all = self.book.sorted();
         self.presence
             .watch(all.iter().map(|x| x.id.clone()).collect());
         let q = self.search.trim().to_lowercase();
+        let folder = self.folder.clone();
         let hit = |x: &partners::Partner| {
-            q.is_empty() || x.label().to_lowercase().contains(&q) || x.id.contains(&q)
+            let text = q.is_empty() || x.label().to_lowercase().contains(&q) || x.id.contains(&q);
+            let fold = folder.is_empty() || x.group == folder;
+            text && fold
         };
 
         let mut connect: Option<String> = None;
-        let mut rename: Option<String> = None;
+        let mut ask: Option<String> = None;
         let mut fav: Option<String> = None;
         let mut remove: Option<String> = None;
+        let mut edit: Option<String> = None;
 
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(i18n::tf("dev.count", &all.len().to_string()))
-                    .size(12.0)
-                    .color(p.muted),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_ghost(ui, "plus", i18n::t("dev.add_tip")).clicked() {
-                    let id: String = self.search.chars().filter(|c| c.is_ascii_digit()).collect();
-                    if id.len() == 9 {
-                        self.book.started(&id, "", false);
-                        self.book.save();
-                        self.search.clear();
-                    } else {
-                        self.hint = i18n::t("dev.id9").to_string();
-                    }
-                }
-                if icon_ghost(ui, "refresh", i18n::t("dev.refresh_tip")).clicked() {
-                    self.presence
-                        .watch(all.iter().map(|x| x.id.clone()).collect());
-                }
-            });
-        });
-        ui.add_space(4.0);
+        let detail_w = if self.selected.is_some() { 288.0 } else { 0.0 };
 
-        egui::Frame::NONE
-            .fill(p.card)
-            .stroke(egui::Stroke::new(1.0, p.line))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(0, 5))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(egui::RichText::new(i18n::t("dev.name")).size(10.0).color(p.muted));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(30.0);
-                        ui.label(
-                            egui::RichText::new(i18n::t("dev.status"))
-                                .size(10.0)
-                                .color(p.muted),
-                        );
-                        ui.add_space(34.0);
-                        ui.label(egui::RichText::new(i18n::t("dev.id")).size(10.0).color(p.muted));
-                    });
-                });
-                ui.add_space(3.0);
-                divider(ui);
-                ui.add_space(3.0);
-
-                // "Letzte Verbindungen" nur, wenn die Liste lang genug ist -
-                // sonst stünde dasselbe Gerät zweimal da
-                let mut groups: Vec<(&str, Vec<partners::Partner>)> = Vec::new();
-                if all.len() > 3 {
-                    groups.push((
-                        i18n::t("dev.group_recent"),
-                        all.iter().filter(|x| hit(x)).take(3).cloned().collect(),
-                    ));
+        ui.horizontal_top(|ui| {
+            // -------------------------------------------------- Ordner
+            ui.vertical(|ui| {
+                ui.set_width(148.0);
+                label_small(ui, i18n::t("dev.folder"));
+                let groups = self.book.groups();
+                let mut rows: Vec<(String, String, usize)> = vec![(
+                    String::new(),
+                    i18n::t("dev.folder_all").to_string(),
+                    all.len(),
+                )];
+                for g in groups.iter() {
+                    let n = all.iter().filter(|x| &x.group == g).count();
+                    rows.push((g.clone(), g.clone(), n));
                 }
-                let favs: Vec<partners::Partner> =
-                    all.iter().filter(|x| hit(x) && x.favorite).cloned().collect();
-                if !favs.is_empty() {
-                    groups.push((i18n::t("dev.group_fav"), favs));
-                }
-                groups.push((
-                    i18n::t("dev.group_online"),
-                    all.iter()
-                        .filter(|x| hit(x) && self.presence.online(&x.id))
-                        .cloned()
-                        .collect(),
-                ));
-                groups.push((
-                    i18n::t("dev.group_offline"),
-                    all.iter()
-                        .filter(|x| hit(x) && !self.presence.online(&x.id))
-                        .cloned()
-                        .collect(),
-                ));
-
-                let mut shown = 0usize;
-                for (title, list) in groups {
-                    if list.is_empty() {
-                        continue;
-                    }
-                    shown += list.len();
-                    let gid = ui.make_persistent_id(("fv_group", title));
-                    let open = ui.data_mut(|d| *d.get_temp_mut_or(gid, true));
-                    let head = ui.add(
+                for (key, label, n) in rows {
+                    let sel = self.folder == key;
+                    let r = ui.add(
                         egui::Button::image_and_text(
                             icons::image(
-                                if open { "chevron-down" } else { "chevron-right" },
-                                12.0,
-                                p.muted,
+                                if key.is_empty() { "devices" } else { "files" },
+                                14.0,
+                                if sel { p.accent } else { p.muted },
                             ),
-                            egui::RichText::new(format!("{}  {}", title, list.len()))
+                            egui::RichText::new(format!("{}  {}", label, n))
                                 .size(12.0)
-                                .strong()
-                                .color(p.text),
+                                .color(if sel { p.text } else { p.muted }),
                         )
-                        .fill(p.card_hi)
+                        .fill(if sel {
+                            p.accent.gamma_multiply(0.14)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
                         .stroke(egui::Stroke::NONE)
-                        .corner_radius(0)
-                        .min_size(egui::vec2(ui.available_width(), 24.0)),
+                        .min_size(egui::vec2(140.0, 28.0)),
                     );
-                    if head.clicked() {
-                        ui.data_mut(|d| d.insert_temp(gid, !open));
+                    if r.clicked() {
+                        self.folder = key.clone();
                     }
-                    if !open {
-                        continue;
-                    }
-                    for x in list.iter() {
-                        let on = self.presence.online(&x.id);
-                        let sel = self.selected.as_deref() == Some(x.id.as_str());
-                        egui::Frame::NONE
-                            .fill(if sel {
-                                p.row_sel
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .inner_margin(egui::Margin::symmetric(10, 3))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    icons::show(
-                                        ui,
-                                        device_symbol(&x.label()),
-                                        15.0,
-                                        row_color(on, false),
-                                    );
-                                    let name = ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(x.label())
-                                                .size(12.5)
-                                                .color(row_color(on, true)),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if name.clicked() {
-                                        self.selected = Some(x.id.clone());
-                                    }
-                                    if name.double_clicked() {
-                                        connect = Some(x.id.clone());
-                                    }
-                                    if x.favorite {
-                                        icons::show(ui, "star", 11.0, p.accent);
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.menu_image_button(
-                                                icons::image("dots", 13.0, p.muted),
-                                                |ui| {
-                                                    if ui.button(i18n::t("dev.connect")).clicked() {
-                                                        connect = Some(x.id.clone());
-                                                        ui.close();
-                                                    }
-                                                    if ui.button(i18n::t("dev.rename")).clicked() {
-                                                        rename = Some(x.id.clone());
-                                                        ui.close();
-                                                    }
-                                                    if ui
-                                                        .button(if x.favorite {
-                                                            i18n::t("dev.fav_del")
-                                                        } else {
-                                                            i18n::t("dev.fav_add")
-                                                        })
-                                                        .clicked()
-                                                    {
-                                                        fav = Some(x.id.clone());
-                                                        ui.close();
-                                                    }
-                                                    if ui.button(i18n::t("dev.remove")).clicked() {
-                                                        remove = Some(x.id.clone());
-                                                        ui.close();
-                                                    }
-                                                },
-                                            );
-                                            ui.add_space(4.0);
-                                            status_pill(
-                                                ui,
-                                                on,
-                                                if on {
-                                                    i18n::t("st.online")
-                                                } else {
-                                                    i18n::t("st.offline")
-                                                },
-                                            );
-                                            ui.add_space(12.0);
-                                            ui.label(
-                                                egui::RichText::new(partners::pretty_id(&x.id))
-                                                    .size(12.0)
-                                                    .color(if on { p.muted } else { p.muted.gamma_multiply(0.7) }),
-                                            );
-                                        },
-                                    );
-                                });
-                            });
-                    }
+                    ui.add_space(2.0);
                 }
+            });
 
-                if shown == 0 {
-                    ui.add_space(8.0);
-                    ui.vertical_centered(|ui| {
-                        icons::show(ui, "devices", 24.0, p.muted);
-                        ui.label(
-                            egui::RichText::new(if all.is_empty() {
-                                i18n::t("dev.empty")
-                            } else {
-                                i18n::t("dev.nohit")
-                            })
+            ui.add_space(10.0);
+
+            // -------------------------------------------------- Liste
+            ui.vertical(|ui| {
+                let w = (ui.available_width() - detail_w - 12.0).max(320.0);
+                ui.set_width(w);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(i18n::tf("dev.count", &all.len().to_string()))
                             .size(12.0)
                             .color(p.muted),
-                        );
-                    });
-                    ui.add_space(8.0);
-                }
-            });
-
-        if let Some((id, mut buf)) = self.renaming.clone() {
-            ui.add_space(6.0);
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    label_small(ui, i18n::t("dev.newname"));
-                    let te = ui.add(
-                        egui::TextEdit::singleline(&mut buf)
-                            .desired_width(200.0)
-                            .margin(egui::Margin::symmetric(8, 4)),
                     );
-                    if te.changed() {
-                        self.renaming = Some((id.clone(), buf.clone()));
-                    }
-                    let save = ghost_button(ui, i18n::t("dev.save")).clicked()
-                        || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                    if save {
-                        self.book.rename(&id, buf.trim());
-                        self.book.save();
-                        self.renaming = None;
-                    }
-                    if ghost_button(ui, i18n::t("dev.cancel")).clicked() {
-                        self.renaming = None;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_ghost(ui, "plus", i18n::t("dev.add_tip")).clicked() {
+                            let id: String =
+                                self.search.chars().filter(|c| c.is_ascii_digit()).collect();
+                            if id.len() == 9 {
+                                self.book.started(&id, "", false);
+                                self.book.save();
+                                self.search.clear();
+                                self.selected = Some(id);
+                            } else {
+                                self.hint = i18n::t("dev.id9").to_string();
+                            }
+                        }
+                        if icon_ghost(ui, "refresh", i18n::t("dev.refresh_tip")).clicked() {
+                            self.presence
+                                .watch(all.iter().map(|x| x.id.clone()).collect());
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .stroke(egui::Stroke::new(1.0, p.line))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(0, 5))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(i18n::t("dev.name")).size(10.0).color(p.muted),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_space(28.0);
+                                ui.label(
+                                    egui::RichText::new(i18n::t("dev.status"))
+                                        .size(10.0)
+                                        .color(p.muted),
+                                );
+                                ui.add_space(28.0);
+                                ui.label(
+                                    egui::RichText::new(i18n::t("dev.id")).size(10.0).color(p.muted),
+                                );
+                            });
+                        });
+                        ui.add_space(3.0);
+                        divider(ui);
+                        ui.add_space(3.0);
+
+                        let mut groups: Vec<(String, Vec<partners::Partner>)> = Vec::new();
+                        if all.len() > 3 && folder.is_empty() && q.is_empty() {
+                            groups.push((
+                                i18n::t("dev.group_recent").to_string(),
+                                all.iter().filter(|x| hit(x)).take(3).cloned().collect(),
+                            ));
+                        }
+                        let favs: Vec<partners::Partner> =
+                            all.iter().filter(|x| hit(x) && x.favorite).cloned().collect();
+                        if !favs.is_empty() {
+                            groups.push((i18n::t("dev.group_fav").to_string(), favs));
+                        }
+                        groups.push((
+                            i18n::t("dev.group_online").to_string(),
+                            all.iter()
+                                .filter(|x| hit(x) && self.presence.online(&x.id))
+                                .cloned()
+                                .collect(),
+                        ));
+                        groups.push((
+                            i18n::t("dev.group_offline").to_string(),
+                            all.iter()
+                                .filter(|x| hit(x) && !self.presence.online(&x.id))
+                                .cloned()
+                                .collect(),
+                        ));
+
+                        let mut shown = 0usize;
+                        for (title, list) in groups {
+                            if list.is_empty() {
+                                continue;
+                            }
+                            shown += list.len();
+                            let gid = ui.make_persistent_id(("fv_group", title.clone()));
+                            let open = ui.data_mut(|d| *d.get_temp_mut_or(gid, true));
+                            let head = ui.add(
+                                egui::Button::image_and_text(
+                                    icons::image(
+                                        if open { "chevron-down" } else { "chevron-right" },
+                                        12.0,
+                                        p.muted,
+                                    ),
+                                    egui::RichText::new(format!("{}  {}", title, list.len()))
+                                        .size(12.0)
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .fill(p.card_hi)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(0)
+                                .min_size(egui::vec2(ui.available_width(), 24.0)),
+                            );
+                            if head.clicked() {
+                                ui.data_mut(|d| d.insert_temp(gid, !open));
+                            }
+                            if !open {
+                                continue;
+                            }
+                            for x in list.iter() {
+                                let on = self.presence.online(&x.id);
+                                let sel = self.selected.as_deref() == Some(x.id.as_str());
+                                egui::Frame::NONE
+                                    .fill(if sel {
+                                        p.row_sel
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .inner_margin(egui::Margin::symmetric(10, 3))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            icons::show(
+                                                ui,
+                                                device_symbol(&x.label()),
+                                                15.0,
+                                                row_color(on, false),
+                                            );
+                                            let name = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(x.label())
+                                                        .size(12.5)
+                                                        .color(row_color(on, true)),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if name.clicked() {
+                                                self.selected = Some(x.id.clone());
+                                            }
+                                            if name.double_clicked() {
+                                                connect = Some(x.id.clone());
+                                            }
+                                            if x.favorite {
+                                                icons::show(ui, "star", 11.0, p.accent);
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.menu_image_button(
+                                                        icons::image("dots", 13.0, p.muted),
+                                                        |ui| {
+                                                            if ui
+                                                                .button(i18n::t("dev.connect"))
+                                                                .clicked()
+                                                            {
+                                                                connect = Some(x.id.clone());
+                                                                ui.close();
+                                                            }
+                                                            if ui
+                                                                .button(i18n::t("dev.ask_connect"))
+                                                                .clicked()
+                                                            {
+                                                                ask = Some(x.id.clone());
+                                                                ui.close();
+                                                            }
+                                                            if ui.button(i18n::t("dev.edit")).clicked()
+                                                            {
+                                                                edit = Some(x.id.clone());
+                                                                ui.close();
+                                                            }
+                                                            if ui
+                                                                .button(if x.favorite {
+                                                                    i18n::t("dev.fav_del")
+                                                                } else {
+                                                                    i18n::t("dev.fav_add")
+                                                                })
+                                                                .clicked()
+                                                            {
+                                                                fav = Some(x.id.clone());
+                                                                ui.close();
+                                                            }
+                                                            if ui
+                                                                .button(i18n::t("dev.remove"))
+                                                                .clicked()
+                                                            {
+                                                                remove = Some(x.id.clone());
+                                                                ui.close();
+                                                            }
+                                                        },
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    status_pill(
+                                                        ui,
+                                                        on,
+                                                        if on {
+                                                            i18n::t("st.online")
+                                                        } else {
+                                                            i18n::t("st.offline")
+                                                        },
+                                                    );
+                                                    ui.add_space(10.0);
+                                                    ui.label(
+                                                        egui::RichText::new(partners::pretty_id(
+                                                            &x.id,
+                                                        ))
+                                                        .size(12.0)
+                                                        .color(if on {
+                                                            p.muted
+                                                        } else {
+                                                            p.muted.gamma_multiply(0.7)
+                                                        }),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    });
+                            }
+                        }
+
+                        if shown == 0 {
+                            ui.add_space(8.0);
+                            ui.vertical_centered(|ui| {
+                                icons::show(ui, "devices", 24.0, p.muted);
+                                ui.label(
+                                    egui::RichText::new(if all.is_empty() {
+                                        i18n::t("dev.empty")
+                                    } else {
+                                        i18n::t("dev.nohit")
+                                    })
+                                    .size(12.0)
+                                    .color(p.muted),
+                                );
+                            });
+                            ui.add_space(8.0);
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    dot(ui, true);
+                    ui.label(
+                        egui::RichText::new(i18n::t("dev.secure"))
+                            .size(11.0)
+                            .color(p.muted),
+                    );
                 });
             });
-        }
 
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            dot(ui, true);
-            ui.label(
-                egui::RichText::new(i18n::t("dev.secure"))
-                    .size(11.0)
-                    .color(p.muted),
-            );
+            // -------------------------------------------------- Detail
+            if let Some(id) = self.selected.clone() {
+                ui.add_space(12.0);
+                ui.vertical(|ui| {
+                    ui.set_width(276.0);
+                    let entry = self.book.get(&id).cloned().unwrap_or_default();
+                    let on = self.presence.online(&id);
+                    card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            icons::show(ui, device_symbol(&entry.label()), 18.0, row_color(on, false));
+                            ui.label(
+                                egui::RichText::new(entry.label())
+                                    .size(15.0)
+                                    .strong()
+                                    .color(p.text),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if icon_ghost(ui, "dots", i18n::t("dev.edit")).clicked() {
+                                    edit = Some(id.clone());
+                                }
+                            });
+                        });
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            status_pill(
+                                ui,
+                                on,
+                                if on {
+                                    i18n::t("st.online")
+                                } else {
+                                    i18n::t("st.offline")
+                                },
+                            );
+                            ui.label(
+                                egui::RichText::new(partners::pretty_id(&entry.id))
+                                    .size(12.0)
+                                    .color(p.muted),
+                            );
+                        });
+                        ui.add_space(8.0);
+                        if accent_button(ui, i18n::t("dev.connect"), true).clicked() {
+                            connect = Some(id.clone());
+                        }
+                        ui.add_space(4.0);
+                        if ui
+                            .add(ghost(egui::vec2(220.0, 28.0), i18n::t("dev.ask_connect")))
+                            .on_hover_text(i18n::t("start.ask_tip"))
+                            .clicked()
+                        {
+                            ask = Some(id.clone());
+                        }
+                        ui.add_space(8.0);
+                        divider(ui);
+                        ui.add_space(5.0);
+                        info_row(
+                            ui,
+                            i18n::t("start.password"),
+                            if entry.secret.is_some() {
+                                i18n::t("dev.pw_stored")
+                            } else {
+                                i18n::t("dev.pw_none")
+                            },
+                        );
+                        info_row(ui, i18n::t("dev.folder"), if entry.group.is_empty() { "-" } else { &entry.group });
+                        info_row(ui, i18n::t("dev.stats"), &entry.count.to_string());
+                        info_row(ui, i18n::t("dev.last"), &entry.ago());
+                        if !entry.note.is_empty() {
+                            ui.add_space(3.0);
+                            ui.label(egui::RichText::new(&entry.note).size(11.5).color(p.muted));
+                        }
+                    });
+
+                    // ---- Bearbeiten
+                    if self.edit_dev.as_ref().map(|e| e.id.clone()) == Some(id.clone()) {
+                        let mut e = self.edit_dev.clone().unwrap_or_default();
+                        let mut save = false;
+                        let mut cancel = false;
+                        ui.add_space(8.0);
+                        label_small(ui, i18n::t("dev.edit"));
+                        card(ui, |ui| {
+                            label_small(ui, i18n::t("dev.newname"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut e.name)
+                                    .desired_width(230.0)
+                                    .margin(egui::Margin::symmetric(8, 4)),
+                            );
+                            ui.add_space(5.0);
+                            label_small(ui, i18n::t("dev.pw_set"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut e.password)
+                                    .password(true)
+                                    .desired_width(230.0)
+                                    .margin(egui::Margin::symmetric(8, 4))
+                                    .hint_text(i18n::t("start.pw_hint")),
+                            );
+                            ui.add_space(5.0);
+                            label_small(ui, i18n::t("dev.folder"));
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut e.folder)
+                                        .desired_width(140.0)
+                                        .margin(egui::Margin::symmetric(8, 4))
+                                        .hint_text(i18n::t("dev.folder_new")),
+                                );
+                                let known = self.book.groups();
+                                if !known.is_empty() {
+                                    egui::ComboBox::from_id_salt("fold_pick")
+                                        .selected_text("…")
+                                        .width(60.0)
+                                        .show_ui(ui, |ui| {
+                                            for g in known.iter() {
+                                                if ui.selectable_label(false, g).clicked() {
+                                                    e.folder = g.clone();
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                            ui.add_space(5.0);
+                            label_small(ui, i18n::t("dev.note"));
+                            ui.add(
+                                egui::TextEdit::multiline(&mut e.note)
+                                    .desired_rows(2)
+                                    .desired_width(230.0),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if accent_button(ui, i18n::t("dev.save"), true).clicked() {
+                                    save = true;
+                                }
+                                if ghost_button(ui, i18n::t("dev.cancel")).clicked() {
+                                    cancel = true;
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if icon_ghost(ui, "mic-off", i18n::t("dev.pw_clear"))
+                                            .clicked()
+                                        {
+                                            self.book.set_password(&id, None);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                        if save {
+                            self.book.rename(&id, &e.name);
+                            self.book.set_group(&id, &e.folder);
+                            self.book.set_note(&id, &e.note);
+                            if !e.password.is_empty() {
+                                self.book.set_password(&id, Some(&e.password));
+                            }
+                            self.edit_dev = None;
+                        } else if cancel {
+                            self.edit_dev = None;
+                        } else {
+                            self.edit_dev = Some(e);
+                        }
+                    }
+                });
+            }
         });
 
+        if let Some(id) = edit {
+            let e = self.book.get(&id).cloned().unwrap_or_default();
+            self.selected = Some(id.clone());
+            self.edit_dev = Some(DevEdit {
+                id,
+                name: e.name.clone(),
+                password: String::new(),
+                note: e.note.clone(),
+                folder: e.group.clone(),
+            });
+        }
         if let Some(id) = connect {
             self.connect_to(&id);
+        }
+        if let Some(id) = ask {
+            self.partner_id = id.clone();
+            self.partner_pw.clear();
+            self.selected = Some(id);
+            self.start_ask_session();
         }
         if let Some(id) = fav {
             self.book.toggle_favorite(&id);
@@ -1847,11 +2078,8 @@ impl App {
             self.book.save();
             if self.selected.as_deref() == Some(id.as_str()) {
                 self.selected = None;
+                self.edit_dev = None;
             }
-        }
-        if let Some(id) = rename {
-            let cur = self.book.get(&id).map(|x| x.label()).unwrap_or_default();
-            self.renaming = Some((id, cur));
         }
     }
 
@@ -1867,6 +2095,8 @@ impl App {
                     (SettingsTab::Access, "shield", i18n::t("set.access")),
                     (SettingsTab::Audio, "mic", i18n::t("set.audio")),
                     (SettingsTab::Look, "palette", i18n::t("set.look")),
+                    (SettingsTab::Update, "refresh", i18n::t("set.update")),
+                    (SettingsTab::Feedback, "chat", i18n::t("set.feedback")),
                     (SettingsTab::About, "eye", i18n::t("set.about")),
                 ] {
                     let sel = self.stab == tab;
@@ -1901,6 +2131,8 @@ impl App {
                     SettingsTab::Access => self.set_access(ui),
                     SettingsTab::Audio => self.set_audio(ui),
                     SettingsTab::Look => self.set_look(ui),
+                    SettingsTab::Update => self.set_update(ui),
+                    SettingsTab::Feedback => self.set_feedback(ui),
                     SettingsTab::About => self.set_about(ui),
                 }
             });
@@ -1983,6 +2215,16 @@ impl App {
                 }
             }
             ui.add_space(4.0);
+            let mut clip = self.shared.clip_on.load(Ordering::Relaxed);
+            if ui
+                .checkbox(&mut clip, i18n::t("set.clip"))
+                .on_hover_text(i18n::t("set.clip_tip"))
+                .changed()
+            {
+                self.shared.clip_on.store(clip, Ordering::Relaxed);
+                ident::set_clipboard(clip);
+            }
+            ui.add_space(4.0);
             let mut keep = self.pw_fixed;
             if ui
                 .checkbox(&mut keep, i18n::t("start.keep_pw"))
@@ -1999,7 +2241,22 @@ impl App {
 
     fn set_audio(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
+        let mut look = self.look.clone();
         card(ui, |ui| {
+            label_small(ui, i18n::t("set.audio_default"));
+            if ui
+                .checkbox(&mut look.mic_on, i18n::t("set.mic_default"))
+                .on_hover_text(i18n::t("set.mic_default_tip"))
+                .changed()
+            {}
+            if ui
+                .checkbox(&mut look.snd_on, i18n::t("set.snd_default"))
+                .changed()
+            {}
+            ui.add_space(6.0);
+            divider(ui);
+            ui.add_space(5.0);
+            label_small(ui, i18n::t("set.audio_now"));
             ui.horizontal(|ui| {
                 self.voice_buttons(ui, 18.0);
                 ui.add_space(8.0);
@@ -2023,6 +2280,9 @@ impl App {
             info_row(ui, i18n::t("set.mic_dev"), &mic);
             info_row(ui, i18n::t("set.spk_dev"), &spk);
         });
+        if look != self.look {
+            self.apply_look(ui.ctx(), look);
+        }
     }
 
     fn set_look(&mut self, ui: &mut egui::Ui) {
@@ -2158,6 +2418,105 @@ impl App {
         }
     }
 
+    /// Update-Karte: Version, Suchen, Automatik.
+    fn set_update(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                info_row(ui, i18n::t("set.version"), update::VERSION);
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if icons::text_button(ui, "refresh", i18n::t("upd.check"), false).clicked() {
+                    let sh = self.shared.clone();
+                    sh.set_update_status(i18n::t("upd.checking"));
+                    std::thread::spawn(move || match update::check() {
+                        Ok(rel) => {
+                            if update::newer(&rel.version, update::VERSION) {
+                                sh.set_update_status(format!("{} {}", i18n::t("upd.found"), rel.version));
+                                *sh.update.lock().unwrap() = Some(rel);
+                            } else {
+                                sh.set_update_status(format!("{} (v{})", i18n::t("upd.current"), update::VERSION));
+                            }
+                        }
+                        Err(e) => sh.set_update_status(format!("{}: {}", i18n::t("upd.failed"), e)),
+                    });
+                }
+                self.update_ui(ui);
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(i18n::t("upd.note"))
+                    .size(11.0)
+                    .color(p.muted),
+            );
+        });
+    }
+
+    /// Rueckmeldung: Fehler oder Idee, direkt aus dem Programm.
+    fn set_feedback(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t("fb.intro"))
+                    .size(11.5)
+                    .color(p.muted),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if icons::text_button(ui, "shield", i18n::t("fb.bug"), self.fb_bug).clicked() {
+                    self.fb_bug = true;
+                }
+                if icons::text_button(ui, "star", i18n::t("fb.idea"), !self.fb_bug).clicked() {
+                    self.fb_bug = false;
+                }
+            });
+            ui.add_space(6.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut self.fb_text)
+                    .desired_rows(4)
+                    .desired_width(ui.available_width().min(430.0))
+                    .hint_text(i18n::t("fb.hint")),
+            );
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.fb_contact)
+                    .desired_width(260.0)
+                    .margin(egui::Margin::symmetric(8, 4))
+                    .hint_text(i18n::t("fb.contact")),
+            );
+            ui.add_space(6.0);
+            let busy = feedback::STATE.load(Ordering::Relaxed) == 1;
+            ui.horizontal(|ui| {
+                if accent_button(ui, i18n::t("fb.send"), !busy && !self.fb_text.trim().is_empty())
+                    .clicked()
+                {
+                    let id = self.shared.my_id.lock().unwrap().clone();
+                    let dev = self.shared.device_name.lock().unwrap().clone();
+                    feedback::send(
+                        if self.fb_bug { "fehler" } else { "idee" },
+                        &self.fb_text,
+                        &self.fb_contact,
+                        &id,
+                        &dev,
+                    );
+                }
+                let st = feedback::STATE.load(Ordering::Relaxed);
+                if st == 2 {
+                    self.fb_text.clear();
+                }
+                let msg = feedback::MESSAGE.lock().unwrap().clone();
+                if !msg.is_empty() {
+                    ui.label(
+                        egui::RichText::new(msg)
+                            .size(11.5)
+                            .color(if st == 3 { p.muted } else { p.green }),
+                    );
+                }
+            });
+        });
+    }
+
     fn set_about(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -2173,6 +2532,12 @@ impl App {
             ui.add_space(5.0);
             info_row(ui, i18n::t("set.version"), update::VERSION);
             info_row(ui, i18n::t("set.relay"), &self.shared.relay_url);
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(i18n::t("set.e2e_note"))
+                    .size(11.0)
+                    .color(theme::muted()),
+            );
             info_row(
                 ui,
                 i18n::t("set.config"),
@@ -2514,9 +2879,10 @@ impl App {
 
     /// Keeps the pointer lock in sync with focus and clicks.
     fn update_grab(&mut self, ctx: &egui::Context, rect: egui::Rect, game: bool, clicked: bool) {
-        if !game {
-            return;
-        }
+        // Die Tastatur wird in BEIDEN Betriebsarten komplett uebernommen -
+        // Windows-Taste, Alt+Tab, Alt+F4 gehen dann an den anderen Rechner
+        // und nicht mehr an das eigene Windows. Rechte Strg holt sie zurueck.
+        vinput::set_relative(game);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if !focused {
             vinput::set_active(false);
@@ -2536,7 +2902,7 @@ impl App {
         if clicked && !vinput::is_active() {
             vinput::set_active(true);
         }
-        if vinput::is_active() {
+        if vinput::is_active() && game {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
     }
@@ -2815,6 +3181,16 @@ enum View {
     Settings,
 }
 
+/// Was im Bearbeiten-Feld eines Geraetes steht, solange es offen ist.
+#[derive(Clone, Default)]
+struct DevEdit {
+    id: String,
+    name: String,
+    password: String,
+    note: String,
+    folder: String,
+}
+
 /// Bereiche innerhalb der Einstellungen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -2822,6 +3198,8 @@ enum SettingsTab {
     Access,
     Audio,
     Look,
+    Update,
+    Feedback,
     About,
 }
 

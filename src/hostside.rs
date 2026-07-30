@@ -1357,7 +1357,7 @@ fn input_loop(
                         shared.set_host_status(format!("Sondertaste: {}", what));
                     }
                     Msg::Clipboard { text } => {
-                        clip.set(&text);
+                        if shared.clip_on.load(Ordering::Relaxed) { clip.set(&text); }
                     }
                     other if crate::xfer::is_file_msg(&other) => {
                         if let Some(x) = shared.xfer.lock().unwrap().as_mut() {
@@ -1371,7 +1371,7 @@ fn input_loop(
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        if let Some(text) = clip.poll() {
+        if let Some(text) = clip.poll().filter(|_| shared.clip_on.load(Ordering::Relaxed)) {
             if out.send(encode(&Msg::Clipboard { text })).is_err() {
                 break;
             }

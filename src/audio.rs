@@ -24,6 +24,16 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::proto::Msg;
 
+/// Wie eine neue Sitzung startet: beides aus, bis der Nutzer es anders will.
+pub static DEFAULT_MIC: AtomicBool = AtomicBool::new(false);
+pub static DEFAULT_SND: AtomicBool = AtomicBool::new(false);
+
+/// Aus den Einstellungen gesetzt.
+pub fn set_defaults(mic: bool, snd: bool) {
+    DEFAULT_MIC.store(mic, Ordering::Relaxed);
+    DEFAULT_SND.store(snd, Ordering::Relaxed);
+}
+
 /// Sample rate on the wire.
 pub const RATE: u32 = 24_000;
 /// Samples per packet (20 ms).
@@ -166,8 +176,8 @@ pub struct VoiceState {
 impl Default for VoiceState {
     fn default() -> Self {
         Self {
-            mic: AtomicBool::new(std::env::var("FV_AUDIO_MIC").as_deref() == Ok("1")),
-            speaker: AtomicBool::new(true),
+            mic: AtomicBool::new(false),
+            speaker: AtomicBool::new(false),
             sent: AtomicU64::new(0),
             got: AtomicU64::new(0),
             level_out: AtomicU32::new(0),
@@ -208,6 +218,16 @@ impl Voice {
     /// Starts microphone and speaker for this session. `send` puts a message
     /// into the session's outgoing pipeline (host or viewer, same signature).
     pub fn start(state: Arc<VoiceState>, send: Arc<dyn Fn(Msg) + Send + Sync>) -> Voice {
+        // Jede Sitzung beginnt mit dem, was in den Einstellungen steht -
+        // standardmaessig ist beides stumm.
+        state.mic.store(
+            DEFAULT_MIC.load(Ordering::Relaxed)
+                || std::env::var("FV_AUDIO_MIC").as_deref() == Ok("1"),
+            Ordering::Relaxed,
+        );
+        state
+            .speaker
+            .store(DEFAULT_SND.load(Ordering::Relaxed), Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let play: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let dump = Arc::new(Mutex::new(

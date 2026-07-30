@@ -65,9 +65,9 @@ fn clipboard_worker(shared: Arc<Shared>) {
     while shared.connected.load(Ordering::Relaxed) {
         let incoming = shared.clip_in.lock().unwrap().take();
         if let Some(text) = incoming {
-            clip.set(&text);
+            if shared.clip_on.load(Ordering::Relaxed) { clip.set(&text); }
         }
-        if let Some(text) = clip.poll() {
+        if let Some(text) = clip.poll().filter(|_| shared.clip_on.load(Ordering::Relaxed)) {
             shared.send_input(Msg::Clipboard { text });
         }
         std::thread::sleep(Duration::from_millis(150));

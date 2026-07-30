@@ -187,6 +187,10 @@ pub struct Appearance {
     pub radius: u8,
     /// Sprachkuerzel: "de" oder "en"
     pub lang: String,
+    /// Mikrofon beim Verbinden gleich an?
+    pub mic_on: bool,
+    /// Ton der anderen Seite beim Verbinden gleich an?
+    pub snd_on: bool,
 }
 
 impl Default for Appearance {
@@ -197,6 +201,8 @@ impl Default for Appearance {
             scale: 1.0,
             radius: 10,
             lang: "de".to_string(),
+            mic_on: false,
+            snd_on: false,
         }
     }
 }
@@ -231,6 +237,12 @@ pub fn load() -> Appearance {
             if let Some(r) = v.get("radius").and_then(|x| x.as_u64()) {
                 a.radius = r.min(16) as u8;
             }
+            if let Some(b) = v.get("mic_on").and_then(|x| x.as_bool()) {
+                a.mic_on = b;
+            }
+            if let Some(b) = v.get("snd_on").and_then(|x| x.as_bool()) {
+                a.snd_on = b;
+            }
             if let Some(l) = v.get("lang").and_then(|x| x.as_str()) {
                 if crate::i18n::LANGS.iter().any(|(c, _)| *c == l) {
                     a.lang = l.to_string();
@@ -253,6 +265,8 @@ pub fn save(a: &Appearance) {
     v.insert("scale".into(), serde_json::Value::from(a.scale as f64));
     v.insert("radius".into(), serde_json::Value::from(a.radius as u64));
     v.insert("lang".into(), serde_json::Value::from(a.lang.clone()));
+    v.insert("mic_on".into(), serde_json::Value::from(a.mic_on));
+    v.insert("snd_on".into(), serde_json::Value::from(a.snd_on));
     let _ = std::fs::create_dir_all(crate::ident::config_dir());
     let _ = std::fs::write(
         path(),
@@ -282,6 +296,7 @@ pub fn resolve(a: &Appearance) -> Palette {
 
 /// Puts the palette in place and rebuilds the egui style around it.
 pub fn apply(ctx: &egui::Context, a: &Appearance) {
+    crate::audio::set_defaults(a.mic_on, a.snd_on);
     let p = resolve(a);
     *ACTIVE.write().unwrap() = p;
 
@@ -302,6 +317,9 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         .into();
     }
     let r: u8 = a.radius;
+    // Kleine Bedienelemente (Kaestchen, Schieber, Knoepfe) bleiben eckig -
+    // mit der grossen Rundung wuerde aus einem Kaestchen ein Punkt.
+    let rw: u8 = a.radius.min(4);
     {
         let v = &mut style.visuals;
         v.dark_mode = p.dark;
@@ -321,7 +339,7 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.inactive.weak_bg_fill = p.card_hi;
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.line);
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text);
-        v.widgets.inactive.corner_radius = r.into();
+        v.widgets.inactive.corner_radius = rw.into();
         v.widgets.hovered.weak_bg_fill = if p.dark {
             p.accent.gamma_multiply(0.20)
         } else {
@@ -330,12 +348,25 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.hovered.expansion = 1.0;
         v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.accent.gamma_multiply(0.7));
         v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, p.text);
-        v.widgets.hovered.corner_radius = r.into();
+        v.widgets.hovered.corner_radius = rw.into();
         v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.30);
         v.widgets.active.bg_stroke = egui::Stroke::new(1.0, p.accent);
         v.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text);
-        v.widgets.active.corner_radius = r.into();
+        v.widgets.active.corner_radius = rw.into();
         v.widgets.open.weak_bg_fill = p.row_sel;
+        // Kaestchen und Schieber: Flaeche sichtbar, Haken/Griff im Akzent
+        v.widgets.noninteractive.corner_radius = rw.into();
+        v.widgets.inactive.bg_fill = if p.dark {
+            p.card_hi
+        } else {
+            egui::Color32::from_rgb(0xdf, 0xe4, 0xee)
+        };
+        v.widgets.hovered.bg_fill = p.accent.gamma_multiply(0.45);
+        v.widgets.active.bg_fill = p.accent;
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.6, p.text);
+        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.8, p.text);
+        v.widgets.active.fg_stroke = egui::Stroke::new(1.8, p.accent);
+        v.slider_trailing_fill = true;
     }
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(11.0, 5.0);

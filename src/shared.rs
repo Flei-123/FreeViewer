@@ -94,7 +94,9 @@ pub struct Shared {
     pub update_status: Mutex<String>,
     pub auto_update: AtomicBool,
     /// Microphone/speaker of the running session (voice link).
-    pub voice: std::sync::Arc<crate::audio::VoiceState>,    pub stats: Mutex<Stats>,
+    pub voice: std::sync::Arc<crate::audio::VoiceState>,    /// Zwischenablage in beide Richtungen abgleichen?
+    pub clip_on: AtomicBool,
+    pub stats: Mutex<Stats>,
 }
 
 impl Shared {
@@ -134,7 +136,8 @@ impl Shared {
             update: Mutex::new(None),
             update_status: Mutex::new(String::new()),
             auto_update: AtomicBool::new(crate::ident::auto_update_enabled()),
-            voice: std::sync::Arc::new(crate::audio::VoiceState::default()),            stats: Mutex::new(Stats::default()),
+            voice: std::sync::Arc::new(crate::audio::VoiceState::default()),            clip_on: AtomicBool::new(crate::ident::clipboard_enabled()),
+            stats: Mutex::new(Stats::default()),
         }
     }
 

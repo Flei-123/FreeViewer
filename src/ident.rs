@@ -138,3 +138,18 @@ mod tests {
         assert_ne!(p, random_password());
     }
 }
+
+/// Zwischenablage teilen? Aus, wenn die Datei "noclip" im Ordner liegt.
+pub fn clipboard_enabled() -> bool {
+    !config_dir().join("noclip").exists()
+}
+
+pub fn set_clipboard(on: bool) {
+    let f = config_dir().join("noclip");
+    if on {
+        let _ = std::fs::remove_file(f);
+    } else {
+        let _ = std::fs::create_dir_all(config_dir());
+        let _ = std::fs::write(f, b"1");
+    }
+}
