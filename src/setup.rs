@@ -222,6 +222,8 @@ mod imp {
         // Der Desktop-Eintrag ist Kuer, kein Grund zum Abbrechen.
         let _ = shortcut(&desktop_link(), &dst, "FreeViewer");
         write_uninstall_entry(&dst, size_kb)?;
+        // freeviewer://-Adressen sollen fuer alle Nutzer dieses Rechners gehen
+        let _ = crate::link::register_for(&dst, true);
 
         if with_service {
             let _ = std::process::Command::new(&dst)

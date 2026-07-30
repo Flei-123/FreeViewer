@@ -21,6 +21,7 @@ mod hostside;
 mod i18n;
 mod icons;
 mod ident;
+mod link;
 mod meet;
 mod input;
 mod net;
@@ -740,11 +741,25 @@ fn main() -> eframe::Result<()> {
     // Started by the autostart entry (or by the service): no window in the
     // user's face, only the tray icon. The host runs either way.
     let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--background");
+    // Kam eine freeviewer://-Adresse mit? Dann in den Briefkasten legen -
+    // egal ob diese Fassung sie selbst abholt oder die schon laufende.
+    if let Some(url) = std::env::args().find(|a| a.starts_with("freeviewer:")) {
+        if link::parse(&url).is_some() {
+            link::drop_in(&url);
+        }
+    }
+
     // A second window of the same user is pointless - bring the first one to
     // the front instead.
     if !tray::claim_single_instance() {
         println!("FreeViewer laeuft bereits - Fenster nach vorne geholt.");
         return Ok(());
+    }
+    // Das Schema fuer diesen Nutzer eintragen (portabel, ohne Adminrechte).
+    // Bei der richtigen Installation kommt zusaetzlich der maschinenweite
+    // Eintrag dazu.
+    if !link::points_here() {
+        let _ = link::register(false);
     }
     autostart::refresh();
     tray::start(shared.clone());
@@ -838,6 +853,8 @@ struct App {
     pw_show: Option<usize>,
     /// Soll beim Installieren gleich der Dienst mit eingerichtet werden?
     install_service: bool,
+    /// Wann zuletzt im Briefkasten nachgesehen wurde.
+    link_check: std::time::Instant,
     /// Meet: Eingaben und was der Server zuletzt gesagt hat.
     meet_title: String,
     meet_id: String,
@@ -847,6 +864,8 @@ struct App {
     meet_busy: Arc<std::sync::atomic::AtomicBool>,
     meet_err: Arc<std::sync::Mutex<String>>,
     meet_loaded: bool,
+    /// Beim Beitritt anbieten, dass andere diesen PC steuern duerfen.
+    meet_offer_control: bool,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -898,6 +917,7 @@ impl App {
             pw_new_label: String::new(),
             pw_show: None,
             install_service: true,
+            link_check: std::time::Instant::now() - Duration::from_secs(2),
             meet_title: String::new(),
             meet_id: String::new(),
             meet_pw: String::new(),
@@ -906,6 +926,7 @@ impl App {
             meet_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             meet_err: Arc::new(std::sync::Mutex::new(String::new())),
             meet_loaded: false,
+            meet_offer_control: true,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1056,6 +1077,37 @@ impl App {
         } else {
             vinput::set_active(false);
             self.hint = "Fernwartung: scharfes Bild, absolute Maus.".to_string();
+        }
+    }
+
+    /// Wartet eine freeviewer://-Adresse? Hoechstens einmal pro Sekunde
+    /// nachsehen - die Oberflaeche zeichnet viel oefter.
+    fn handle_link(&mut self, ctx: &egui::Context) {
+        if self.link_check.elapsed() < Duration::from_millis(900) {
+            return;
+        }
+        self.link_check = std::time::Instant::now();
+        let action = match link::take() {
+            Some(a) => a,
+            None => return,
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        match action {
+            link::Action::Control(id) => {
+                self.view = View::Start;
+                self.hint = i18n::tf("link.control", &partners::pretty_id(&id));
+                self.connect_to(&id);
+            }
+            link::Action::Meet { room, pass } => {
+                self.view = View::Meet;
+                self.meet_id = room.clone();
+                self.meet_pw = pass.clone();
+                let url = meet::join_url(&room, &pass);
+                if let Err(e) = meet::open_window(&url) {
+                    self.hint = format!("{}", e);
+                }
+            }
         }
     }
 
@@ -1712,7 +1764,12 @@ impl App {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ghost_button(ui, i18n::t("meet.join")).clicked() {
-                            let url = meet::join_url(&m.id, &m.passwort);
+                            let me = self.shared.my_id.lock().unwrap().clone();
+                            let url = if self.meet_offer_control {
+                                meet::join_url_with_id(&m.id, &m.passwort, &me)
+                            } else {
+                                meet::join_url(&m.id, &m.passwort)
+                            };
                             if let Err(e) = meet::open_window(&url) {
                                 self.hint = format!("{}", e);
                             }
@@ -1747,12 +1804,20 @@ impl App {
                         .margin(egui::Margin::symmetric(8, 5)),
                 );
                 ui.add_space(10.0);
+                check(ui, &mut self.meet_offer_control, i18n::t("meet.offer"))
+                    .on_hover_text(i18n::t("meet.offer_tip"));
+                ui.add_space(8.0);
                 if ghost_button(ui, i18n::t("meet.join")).clicked() {
                     let id = self.meet_id.trim().to_string();
                     if id.is_empty() {
                         self.hint = i18n::t("meet.need_id").to_string();
                     } else {
-                        let url = meet::join_url(&id, &self.meet_pw);
+                        let me = self.shared.my_id.lock().unwrap().clone();
+                        let url = if self.meet_offer_control {
+                            meet::join_url_with_id(&id, &self.meet_pw, &me)
+                        } else {
+                            meet::join_url(&id, &self.meet_pw)
+                        };
                         match meet::open_window(&url) {
                             Ok(()) => self.hint = i18n::t("meet.opening").to_string(),
                             Err(e) => self.hint = format!("{}", e),
@@ -3638,6 +3703,7 @@ impl eframe::App for App {
         self.knock_ui(ctx);
         self.pull_frame(ctx);
         self.handle_drops(ctx);
+        self.handle_link(ctx);
         self.transfer_ui(ctx);
 
         // right Ctrl: 1x hands the input back, 3x leaves the session

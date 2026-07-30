@@ -362,7 +362,16 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.line);
         v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.inactive.weak_bg_fill = p.card_hi;
-        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, p.line);
+        // Im hellen Modus verschwindet eine Haarlinie in der weissen Karte -
+        // Eingabefelder brauchen einen Rand, den man wirklich sieht.
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(
+            1.0,
+            if p.dark {
+                p.line
+            } else {
+                egui::Color32::from_rgb(0xbf, 0xc8, 0xd8)
+            },
+        );
         v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.inactive.corner_radius = rw.into();
         v.widgets.hovered.weak_bg_fill = if p.dark {

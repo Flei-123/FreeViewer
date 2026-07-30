@@ -110,6 +110,15 @@ pub fn join_url(id: &str, pass: &str) -> String {
     )
 }
 
+/// Wie join_url, aber mit der eigenen FreeViewer-ID.
+pub fn join_url_with_id(id: &str, pass: &str, fvid: &str) -> String {
+    let ziffern: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
+    if ziffern.is_empty() {
+        return join_url(id, pass);
+    }
+    format!("{}&fv={}", join_url(id, pass), ziffern)
+}
+
 /// Text zum Weitergeben - Telefon, Chat, E-Mail.
 pub fn invite(m: &Meeting) -> String {
     let titel = if m.titel.trim().is_empty() {

@@ -219,6 +219,17 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Im Fenster laufen Bild, Ton und Bildschirmteilen wie im Browser. Wer die Maus des anderen übernehmen will, geht über Geräte - dafür braucht die Gegenseite FreeViewer.",
         "The window carries video, sound and screen sharing just like the browser. To take over someone's mouse use Devices - that side needs FreeViewer.",
     ),
+    ("meet.offer", "Fernsteuerung anbieten", "Offer remote control"),
+    (
+        "meet.offer_tip",
+        "Im Meeting erscheint dann ein Knopf, mit dem du die Steuerung dieses PCs freigibst. Jede Verbindung musst du hier trotzdem einzeln zulassen.",
+        "A button appears in the meeting that hands over control of this PC. You still have to allow every single connection here.",
+    ),
+    (
+        "link.control",
+        "Verbindung zu {} - bitte am anderen Rechner zulassen",
+        "Connecting to {} - please allow it on the other machine",
+    ),
     // Installation
     ("set.install", "Installation", "Installation"),
     (
