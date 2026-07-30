@@ -96,6 +96,30 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_else(ident::random_password);
     let shared = Arc::new(Shared::new(relay, password));
 
+    // Tausch mit Administrator-Rechten (vom Updater gestartet):
+    //   freeviewer --apply-update <frisch> <ziel> <pid>
+    if let Some(i) = std::env::args().position(|a| a == "--apply-update") {
+        let args: Vec<String> = std::env::args().collect();
+        let src = args.get(i + 1).cloned().unwrap_or_default();
+        let dst = args.get(i + 2).cloned().unwrap_or_default();
+        let pid: u32 = args
+            .get(i + 3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+        match update::apply_update(
+            std::path::Path::new(&src),
+            std::path::Path::new(&dst),
+            pid,
+        ) {
+            Ok(()) => println!("Update eingespielt: {}", dst),
+            Err(e) => {
+                eprintln!("Update fehlgeschlagen: {}", e);
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        }
+        return Ok(());
+    }
+
     // print the version:  freeviewer --version
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("FreeViewer {}", update::VERSION);
