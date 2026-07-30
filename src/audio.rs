@@ -22,6 +22,99 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+// --------------------------------------------------------- Geraetewahl
+//
+// Windows fuehrt ein Standardmikrofon und einen Standardlautsprecher. Wer
+// mehrere Karten hat (Headset, Webcam, Monitor) will aber selbst waehlen.
+// `None` heisst: dem Systemstandard folgen, auch wenn der sich aendert.
+
+static PICK_IN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static PICK_OUT: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Uebernimmt die Wahl aus den Einstellungen.
+pub fn set_devices(mic: Option<String>, spk: Option<String>) {
+    *PICK_IN.write().unwrap() = mic.filter(|s| !s.is_empty());
+    *PICK_OUT.write().unwrap() = spk.filter(|s| !s.is_empty());
+}
+
+/// Was gerade gewaehlt ist (fuer die Einstellungen).
+pub fn picked() -> (Option<String>, Option<String>) {
+    (
+        PICK_IN.read().unwrap().clone(),
+        PICK_OUT.read().unwrap().clone(),
+    )
+}
+
+/// Alle Aufnahmegeraete mit Klarnamen.
+pub fn input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut v: Vec<String> = match host.input_devices() {
+        Ok(list) => list.filter_map(|d| d.name().ok()).collect(),
+        Err(_) => Vec::new(),
+    };
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Alle Wiedergabegeraete mit Klarnamen.
+pub fn output_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut v: Vec<String> = match host.output_devices() {
+        Ok(list) => list.filter_map(|d| d.name().ok()).collect(),
+        Err(_) => Vec::new(),
+    };
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Die Namen der beiden Systemstandards - fuer "Standardgeraet (â€¦)".
+pub fn default_names() -> (String, String) {
+    let host = cpal::default_host();
+    let mic = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "-".to_string());
+    let spk = host
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "-".to_string());
+    (mic, spk)
+}
+
+/// Das gewaehlte Aufnahmegeraet, sonst der Systemstandard.
+fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
+    let want = PICK_IN.read().unwrap().clone();
+    if let Some(w) = want {
+        if let Ok(list) = host.input_devices() {
+            for d in list {
+                if d.name().map(|n| n == w).unwrap_or(false) {
+                    return Some(d);
+                }
+            }
+        }
+        crate::capture::log_line(&format!("Mikrofon '{}' nicht da - nehme den Standard", w));
+    }
+    host.default_input_device()
+}
+
+/// Das gewaehlte Wiedergabegeraet, sonst der Systemstandard.
+fn pick_output(host: &cpal::Host) -> Option<cpal::Device> {
+    let want = PICK_OUT.read().unwrap().clone();
+    if let Some(w) = want {
+        if let Ok(list) = host.output_devices() {
+            for d in list {
+                if d.name().map(|n| n == w).unwrap_or(false) {
+                    return Some(d);
+                }
+            }
+        }
+        crate::capture::log_line(&format!("Lautsprecher '{}' nicht da - nehme den Standard", w));
+    }
+    host.default_output_device()
+}
+
 use crate::proto::Msg;
 
 /// Wie eine neue Sitzung startet: beides aus, bis der Nutzer es anders will.
@@ -302,9 +395,7 @@ fn mic_loop(
     send: Arc<dyn Fn(Msg) + Send + Sync>,
 ) -> anyhow::Result<()> {
     let host = cpal::default_host();
-    let dev = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("kein Aufnahmegeraet"))?;
+    let dev = pick_input(&host).ok_or_else(|| anyhow::anyhow!("kein Aufnahmegeraet"))?;
     let cfg = dev.default_input_config()?;
     let rate = cfg.sample_rate().0;
     let channels = cfg.channels() as usize;
@@ -428,9 +519,7 @@ fn speaker_loop(
     play: Arc<Mutex<VecDeque<i16>>>,
 ) -> anyhow::Result<()> {
     let host = cpal::default_host();
-    let dev = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("kein Wiedergabegeraet"))?;
+    let dev = pick_output(&host).ok_or_else(|| anyhow::anyhow!("kein Wiedergabegeraet"))?;
     let cfg = dev.default_output_config()?;
     let rate = cfg.sample_rate().0;
     let channels = cfg.channels() as usize;
@@ -594,12 +683,10 @@ impl WavWriter {
 /// Klarnamen der beiden Geraete, fuer die Einstellungen.
 pub fn device_names() -> (String, String) {
     let host = cpal::default_host();
-    let mic = host
-        .default_input_device()
+    let mic = pick_input(&host)
         .and_then(|d| d.name().ok())
         .unwrap_or_else(|| "-".to_string());
-    let spk = host
-        .default_output_device()
+    let spk = pick_output(&host)
         .and_then(|d| d.name().ok())
         .unwrap_or_else(|| "-".to_string());
     (mic, spk)

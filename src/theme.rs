@@ -191,6 +191,10 @@ pub struct Appearance {
     pub mic_on: bool,
     /// Ton der anderen Seite beim Verbinden gleich an?
     pub snd_on: bool,
+    /// Gewaehltes Mikrofon (None = Systemstandard)
+    pub mic_dev: Option<String>,
+    /// Gewaehlte Wiedergabe (None = Systemstandard)
+    pub spk_dev: Option<String>,
 }
 
 impl Default for Appearance {
@@ -203,6 +207,8 @@ impl Default for Appearance {
             lang: "de".to_string(),
             mic_on: false,
             snd_on: false,
+            mic_dev: None,
+            spk_dev: None,
         }
     }
 }
@@ -243,6 +249,16 @@ pub fn load() -> Appearance {
             if let Some(b) = v.get("snd_on").and_then(|x| x.as_bool()) {
                 a.snd_on = b;
             }
+            if let Some(s) = v.get("mic_dev").and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    a.mic_dev = Some(s.to_string());
+                }
+            }
+            if let Some(s) = v.get("spk_dev").and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    a.spk_dev = Some(s.to_string());
+                }
+            }
             if let Some(l) = v.get("lang").and_then(|x| x.as_str()) {
                 if crate::i18n::LANGS.iter().any(|(c, _)| *c == l) {
                     a.lang = l.to_string();
@@ -267,6 +283,14 @@ pub fn save(a: &Appearance) {
     v.insert("lang".into(), serde_json::Value::from(a.lang.clone()));
     v.insert("mic_on".into(), serde_json::Value::from(a.mic_on));
     v.insert("snd_on".into(), serde_json::Value::from(a.snd_on));
+    v.insert(
+        "mic_dev".into(),
+        serde_json::Value::from(a.mic_dev.clone().unwrap_or_default()),
+    );
+    v.insert(
+        "spk_dev".into(),
+        serde_json::Value::from(a.spk_dev.clone().unwrap_or_default()),
+    );
     let _ = std::fs::create_dir_all(crate::ident::config_dir());
     let _ = std::fs::write(
         path(),
@@ -297,6 +321,7 @@ pub fn resolve(a: &Appearance) -> Palette {
 /// Puts the palette in place and rebuilds the egui style around it.
 pub fn apply(ctx: &egui::Context, a: &Appearance) {
     crate::audio::set_defaults(a.mic_on, a.snd_on);
+    crate::audio::set_devices(a.mic_dev.clone(), a.spk_dev.clone());
     let p = resolve(a);
     *ACTIVE.write().unwrap() = p;
 
@@ -359,7 +384,8 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.inactive.bg_fill = if p.dark {
             p.card_hi
         } else {
-            egui::Color32::from_rgb(0xdf, 0xe4, 0xee)
+            // Griff des Schiebers und Fuellungen: deutlich vom Weiss abgesetzt
+            egui::Color32::from_rgb(0xc4, 0xcd, 0xdd)
         };
         v.widgets.hovered.bg_fill = p.accent.gamma_multiply(0.45);
         v.widgets.active.bg_fill = p.accent;

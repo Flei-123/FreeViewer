@@ -26,6 +26,7 @@ mod net;
 mod p2p;
 mod partners;
 mod presence;
+mod pwlist;
 mod proto;
 mod selftest;
 mod service;
@@ -771,6 +772,17 @@ struct App {
     /// Wann die Titelleiste zuletzt eingefaerbt wurde.
     caption_tick: std::time::Instant,
     shot_n: u32,
+    /// Feste Passwoerter dieses Rechners (Einstellungen -> Zugriff).
+    pw_list: Vec<pwlist::Entry>,
+    /// Eingabefelder fuer einen neuen Eintrag.
+    pw_new: String,
+    pw_new_label: String,
+    /// Welcher Eintrag gerade im Klartext zu sehen ist.
+    pw_show: Option<usize>,
+    /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
+    snd_in: Vec<String>,
+    snd_out: Vec<String>,
+    snd_default: (String, String),
 }
 
 impl App {
@@ -813,6 +825,13 @@ impl App {
             edit_dev: None,
             caption_tick: std::time::Instant::now() - Duration::from_secs(9),
             shot_n: 0,
+            pw_list: pwlist::load(),
+            pw_new: String::new(),
+            pw_new_label: String::new(),
+            pw_show: None,
+            snd_in: Vec::new(),
+            snd_out: Vec::new(),
+            snd_default: (String::new(), String::new()),
         }
     }
 
@@ -965,6 +984,35 @@ impl App {
 
     /// Files dropped onto the window go to the other side of the session.
     fn handle_drops(&mut self, ctx: &egui::Context) {
+        // Solange etwas ueber dem Fenster haengt: zeigen, dass hier abgelegt
+        // werden darf. Ohne das raet man, ob Ziehen und Ablegen geht.
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let p = theme::palette();
+            let screen = ctx.content_rect();
+            let pt = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("fv_drop_hint"),
+            ));
+            pt.rect_filled(screen, 0.0, p.accent.gamma_multiply(0.16));
+            pt.rect_stroke(
+                screen.shrink(10.0),
+                10.0,
+                egui::Stroke::new(2.0, p.accent),
+                egui::StrokeKind::Inside,
+            );
+            let live = self.shared.xfer.lock().unwrap().is_some();
+            pt.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                if live {
+                    i18n::t("sess.drop")
+                } else {
+                    i18n::t("sess.drop_none")
+                },
+                egui::FontId::proportional(19.0),
+                p.text,
+            );
+        }
         let files: Vec<std::path::PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -982,10 +1030,10 @@ impl App {
                 for p in files {
                     x.send_path(p);
                 }
-                self.hint = format!("{} Datei(en) werden uebertragen", n);
+                self.hint = i18n::tf("sess.drop_sent", &n.to_string());
             }
             None => {
-                self.hint = "Keine aktive Sitzung - Datei nicht gesendet".to_string();
+                self.hint = i18n::t("sess.drop_none").to_string();
             }
         }
     }
@@ -1080,7 +1128,7 @@ impl App {
         let status = self.shared.update_status.lock().unwrap().clone();
         ui.horizontal(|ui| {
             let mut auto = self.shared.auto_update.load(Ordering::Relaxed);
-            if ui.checkbox(&mut auto, "Automatisch aktualisieren").changed() {
+            if check(ui, &mut auto, "Automatisch aktualisieren").changed() {
                 self.shared.auto_update.store(auto, Ordering::Relaxed);
                 ident::set_auto_update(auto);
             }
@@ -1220,44 +1268,37 @@ impl App {
 
                 ui.add_space(8.0);
                 label_small(ui, i18n::t("start.password"));
-                let mut changed = false;
+                // Das Sitzungspasswort wird gewuerfelt, nicht getippt. Feste
+                // Passwoerter stehen in den Einstellungen unter "Zugriff".
+                let pw_now = self.shared.password.lock().unwrap().clone();
                 ui.horizontal(|ui| {
-                    {
-                        let mut pw = self.shared.password.lock().unwrap();
-                        changed = ui
-                            .add(
-                                egui::TextEdit::singleline(&mut *pw)
-                                    .font(egui::FontId::new(17.0, egui::FontFamily::Monospace))
-                                    .desired_width(150.0)
-                                    .margin(egui::Margin::symmetric(8, 4)),
-                            )
-                            .changed();
-                    }
-                    if icon_ghost(ui, "copy", i18n::t("start.copy")).clicked() {
-                        let pw = self.shared.password.lock().unwrap().clone();
-                        ui.ctx().copy_text(pw);
-                    }
-                    if icon_ghost(ui, "refresh", i18n::t("start.new_pw")).clicked() {
-                        *self.shared.password.lock().unwrap() = ident::random_password();
-                        changed = true;
-                    }
-                    let mut keep = self.pw_fixed;
-                    if ui
-                        .checkbox(&mut keep, i18n::t("start.keep_pw"))
-                        .on_hover_text(i18n::t("start.keep_pw_tip"))
-                        .changed()
-                    {
-                        self.pw_fixed = keep;
-                        changed = true;
-                    }
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(pw_now.clone())
+                                .size(20.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(p.text),
+                        )
+                        .selectable(true),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_ghost(ui, "refresh", i18n::t("start.new_pw")).clicked() {
+                            *self.shared.password.lock().unwrap() = ident::random_password();
+                            if self.pw_fixed {
+                                let fresh = self.shared.password.lock().unwrap().clone();
+                                let _ = ident::set_fixed_password(Some(fresh.as_str()));
+                            }
+                        }
+                        if icon_ghost(ui, "copy", i18n::t("start.copy")).clicked() {
+                            ui.ctx().copy_text(pw_now.clone());
+                        }
+                    });
                 });
-                if changed {
-                    let pw = self.shared.password.lock().unwrap().clone();
-                    let store = if self.pw_fixed { Some(pw.as_str()) } else { None };
-                    if let Err(e) = ident::set_fixed_password(store) {
-                        self.hint = format!("{}", e);
-                    }
-                }
+                ui.label(
+                    egui::RichText::new(i18n::t("start.pw_random"))
+                        .size(11.0)
+                        .color(p.muted),
+                );
 
                 ui.add_space(8.0);
                 divider(ui);
@@ -1328,12 +1369,11 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let mut remember = self.remember_pw;
-                    if ui.checkbox(&mut remember, i18n::t("start.remember")).changed() {
+                    if check(ui, &mut remember, i18n::t("start.remember")).changed() {
                         self.remember_pw = remember;
                     }
                     let mut game = self.shared.game_mode();
-                    if ui
-                        .checkbox(&mut game, i18n::t("start.game"))
+                    if check(ui, &mut game, i18n::t("start.game"))
                         .on_hover_text(i18n::t("start.game_tip"))
                         .changed()
                     {
@@ -1444,7 +1484,10 @@ impl App {
     /// Schmale Symbolspalte links - die drei Bereiche des Programms.
     fn rail(&mut self, ctx: &egui::Context) {
         let p = theme::palette();
-        let rail_bg = if p.dark { p.card } else { p.accent };
+        // Frueher war die Leiste im hellen Modus komplett im Akzent gefaerbt -
+        // die weissen Symbole sind darin verschwunden. Jetzt ist sie immer
+        // eine ruhige Flaeche, gefaerbt wird nur, was gerade gewaehlt ist.
+        let rail_bg = p.card;
         egui::SidePanel::left("fv_rail")
             .exact_width(56.0)
             .resizable(false)
@@ -1463,35 +1506,42 @@ impl App {
                         (View::Settings, "settings", i18n::t("nav.settings")),
                     ] {
                         let sel = self.view == v;
-                        let fg = if p.dark {
-                            if sel {
-                                p.accent
-                            } else {
-                                p.muted
-                            }
-                        } else if sel {
-                            p.accent
-                        } else {
-                            egui::Color32::WHITE
-                        };
+                        // Erst die Flaeche belegen, dann selbst zeichnen: nur so
+                        // reagiert JEDER Knopf auf die Maus und nicht bloss der,
+                        // auf dem man gerade steht.
+                        let (rect, r) =
+                            ui.allocate_exact_size(egui::vec2(38.0, 34.0), egui::Sense::click());
+                        let hov = r.hovered();
                         let fill = if sel {
-                            if p.dark {
-                                p.accent.gamma_multiply(0.16)
-                            } else {
-                                egui::Color32::WHITE
-                            }
+                            p.accent.gamma_multiply(if p.dark { 0.20 } else { 0.14 })
+                        } else if hov {
+                            p.card_hi
                         } else {
                             egui::Color32::TRANSPARENT
                         };
-                        let r = ui
-                            .add(
-                                egui::Button::image(icons::image(name, 19.0, fg))
-                                    .fill(fill)
-                                    .stroke(egui::Stroke::NONE)
-                                    .corner_radius(9)
-                                    .min_size(egui::vec2(38.0, 34.0)),
-                            )
-                            .on_hover_text(tip);
+                        if fill != egui::Color32::TRANSPARENT {
+                            ui.painter().rect_filled(rect, 9.0, fill);
+                        }
+                        if sel {
+                            // schmaler Balken links: zeigt die Seite auch ohne Farbe
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    egui::pos2(rect.min.x - 7.0, rect.center().y - 9.0),
+                                    egui::vec2(3.0, 18.0),
+                                ),
+                                2.0,
+                                p.accent,
+                            );
+                        }
+                        let fg = if sel {
+                            p.accent
+                        } else if hov {
+                            p.text
+                        } else {
+                            p.muted
+                        };
+                        ui.put(rect, icons::image(name, 19.0, fg));
+                        let r = r.on_hover_text(tip);
                         if r.clicked() {
                             self.view = v;
                         }
@@ -2187,8 +2237,7 @@ impl App {
     fn set_access(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             let mut boot = self.autostart;
-            if ui
-                .checkbox(&mut boot, i18n::t("set.autostart"))
+            if check(ui, &mut boot, i18n::t("set.autostart"))
                 .on_hover_text(i18n::t("set.autostart_tip"))
                 .changed()
             {
@@ -2199,8 +2248,7 @@ impl App {
             }
             ui.add_space(4.0);
             let mut svc = self.service_on;
-            if ui
-                .checkbox(&mut svc, i18n::t("set.service"))
+            if check(ui, &mut svc, i18n::t("set.service"))
                 .on_hover_text(i18n::t("set.service_tip"))
                 .changed()
             {
@@ -2216,8 +2264,7 @@ impl App {
             }
             ui.add_space(4.0);
             let mut clip = self.shared.clip_on.load(Ordering::Relaxed);
-            if ui
-                .checkbox(&mut clip, i18n::t("set.clip"))
+            if check(ui, &mut clip, i18n::t("set.clip"))
                 .on_hover_text(i18n::t("set.clip_tip"))
                 .changed()
             {
@@ -2226,8 +2273,7 @@ impl App {
             }
             ui.add_space(4.0);
             let mut keep = self.pw_fixed;
-            if ui
-                .checkbox(&mut keep, i18n::t("start.keep_pw"))
+            if check(ui, &mut keep, i18n::t("start.keep_pw"))
                 .on_hover_text(i18n::t("start.keep_pw_tip"))
                 .changed()
             {
@@ -2237,20 +2283,168 @@ impl App {
                 let _ = ident::set_fixed_password(store);
             }
         });
+        ui.add_space(10.0);
+        self.pw_card(ui);
+    }
+
+    /// Feste Passwoerter: beliebig viele, immer als Punkte, mit Bezeichnung -
+    /// wie ein Array im Unity-Inspector.
+    fn pw_card(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        label_small(ui, i18n::t("set.pw_perm"));
+        card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t("set.pw_perm_tip"))
+                    .size(11.5)
+                    .color(p.muted),
+            );
+            ui.add_space(8.0);
+            let mut remove: Option<usize> = None;
+            let mut dirty = false;
+            for i in 0..self.pw_list.len() {
+                let shown = self.pw_show == Some(i);
+                ui.horizontal(|ui| {
+                    let mut label = self.pw_list[i].label.clone();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut label)
+                                .desired_width(118.0)
+                                .hint_text(i18n::t("set.pw_label_hint"))
+                                .margin(egui::Margin::symmetric(7, 4)),
+                        )
+                        .changed()
+                    {
+                        self.pw_list[i].label = label;
+                        dirty = true;
+                    }
+                    ui.add_space(8.0);
+                    if shown {
+                        let mut pw = self.pw_list[i].pw.clone();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut pw)
+                                    .font(egui::FontId::new(14.0, egui::FontFamily::Monospace))
+                                    .desired_width(160.0)
+                                    .margin(egui::Margin::symmetric(7, 4)),
+                            )
+                            .changed()
+                        {
+                            self.pw_list[i].pw = pw;
+                            dirty = true;
+                        }
+                    } else {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(pwlist::masked(&self.pw_list[i].pw))
+                                .size(16.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(p.text),
+                        ));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_ghost(ui, "trash", i18n::t("set.pw_del")).clicked() {
+                            remove = Some(i);
+                        }
+                        if icon_ghost(
+                            ui,
+                            "eye",
+                            if shown {
+                                i18n::t("set.pw_hide")
+                            } else {
+                                i18n::t("set.pw_show")
+                            },
+                        )
+                        .clicked()
+                        {
+                            self.pw_show = if shown { None } else { Some(i) };
+                        }
+                        if icon_ghost(ui, "copy", i18n::t("start.copy")).clicked() {
+                            let pw = self.pw_list[i].pw.clone();
+                            ui.ctx().copy_text(pw);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            }
+            if self.pw_list.is_empty() {
+                ui.label(
+                    egui::RichText::new(i18n::t("set.pw_empty"))
+                        .size(12.0)
+                        .color(p.muted),
+                );
+            }
+            if let Some(i) = remove {
+                self.pw_list.remove(i);
+                self.pw_show = None;
+                dirty = true;
+            }
+            ui.add_space(8.0);
+            divider(ui);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.pw_new_label)
+                        .desired_width(118.0)
+                        .hint_text(i18n::t("set.pw_label_hint"))
+                        .margin(egui::Margin::symmetric(7, 4)),
+                );
+                ui.add_space(8.0);
+                let enter = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.pw_new)
+                            .desired_width(160.0)
+                            .password(true)
+                            .hint_text(i18n::t("set.pw_value"))
+                            .margin(egui::Margin::symmetric(7, 4)),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(8.0);
+                if icon_ghost(ui, "plus", i18n::t("set.pw_add")).clicked() || enter {
+                    let pw = self.pw_new.trim().to_string();
+                    match pwlist::why_not(&self.pw_list, &pw) {
+                        Some(err) => self.hint = i18n::t(err).to_string(),
+                        None => {
+                            let label = if self.pw_new_label.trim().is_empty() {
+                                format!("#{}", self.pw_list.len() + 1)
+                            } else {
+                                self.pw_new_label.trim().to_string()
+                            };
+                            self.pw_list.push(pwlist::Entry { label, pw });
+                            self.pw_new.clear();
+                            self.pw_new_label.clear();
+                            dirty = true;
+                        }
+                    }
+                }
+            });
+            if dirty {
+                if let Err(e) = pwlist::save(&self.pw_list) {
+                    self.hint = format!("{}", e);
+                }
+            }
+        });
     }
 
     fn set_audio(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         let mut look = self.look.clone();
+        // Die Geraeteliste einmal holen - cpal fragt dafuer Windows, das
+        // kostet je nach Treiber ein paar Millisekunden.
+        if self.snd_in.is_empty() && self.snd_out.is_empty() {
+            self.snd_in = audio::input_devices();
+            self.snd_out = audio::output_devices();
+            self.snd_default = audio::default_names();
+        }
+        let ins = self.snd_in.clone();
+        let outs = self.snd_out.clone();
+        let defs = self.snd_default.clone();
         card(ui, |ui| {
             label_small(ui, i18n::t("set.audio_default"));
-            if ui
-                .checkbox(&mut look.mic_on, i18n::t("set.mic_default"))
+            if check(ui, &mut look.mic_on, i18n::t("set.mic_default"))
                 .on_hover_text(i18n::t("set.mic_default_tip"))
                 .changed()
             {}
-            if ui
-                .checkbox(&mut look.snd_on, i18n::t("set.snd_default"))
+            if check(ui, &mut look.snd_on, i18n::t("set.snd_default"))
                 .changed()
             {}
             ui.add_space(6.0);
@@ -2276,9 +2470,33 @@ impl App {
             ui.add_space(6.0);
             divider(ui);
             ui.add_space(5.0);
-            let (mic, spk) = audio::device_names();
-            info_row(ui, i18n::t("set.mic_dev"), &mic);
-            info_row(ui, i18n::t("set.spk_dev"), &spk);
+            label_small(ui, i18n::t("set.dev_pick"));
+            if let Some(sel) = device_row(
+                ui,
+                "fv_mic_dev",
+                i18n::t("set.mic_dev"),
+                &look.mic_dev,
+                &defs.0,
+                &ins,
+            ) {
+                look.mic_dev = sel;
+            }
+            ui.add_space(4.0);
+            if let Some(sel) = device_row(
+                ui,
+                "fv_spk_dev",
+                i18n::t("set.spk_dev"),
+                &look.spk_dev,
+                &defs.1,
+                &outs,
+            ) {
+                look.spk_dev = sel;
+            }
+            ui.add_space(6.0);
+            if ghost_button(ui, i18n::t("set.dev_refresh")).clicked() {
+                self.snd_in.clear();
+                self.snd_out.clear();
+            }
         });
         if look != self.look {
             self.apply_look(ui.ctx(), look);
@@ -2385,25 +2603,16 @@ impl App {
         });
 
         ui.add_space(8.0);
-        label_small(ui, i18n::t("set.size"));
         card(ui, |ui| {
             let pct = format!("{:.0} %", a.scale * 100.0);
-            ui.add(
-                egui::Slider::new(&mut a.scale, 0.85..=1.35)
-                    .show_value(false)
-                    .text(pct),
-            );
+            slider_row(ui, i18n::t("set.size"), &mut a.scale, 0.85..=1.35, &pct);
+            ui.add_space(6.0);
             let mut r = a.radius as f32;
-            if ui
-                .add(
-                    egui::Slider::new(&mut r, 0.0..=16.0)
-                        .show_value(false)
-                        .text(i18n::t("set.radius")),
-                )
-                .changed()
-            {
+            let rtxt = format!("{:.0} px", r);
+            if slider_row(ui, i18n::t("set.radius"), &mut r, 0.0..=16.0, &rtxt) {
                 a.radius = r.round() as u8;
             }
+            ui.add_space(6.0);
             if ghost_button(ui, i18n::t("set.reset")).clicked() {
                 let lang = a.lang.clone();
                 a = theme::Appearance {
@@ -3616,4 +3825,164 @@ fn row_color(online: bool, is_text: bool) -> egui::Color32 {
     } else {
         p.muted.gamma_multiply(0.55)
     }
+}
+
+
+// ============================================================ Bedienelemente
+//
+// egui bringt eigene Kaestchen und Schieber mit, die sich aber mit der
+// eingestellten Rundung zu Punkten verformen und im hellen Modus kaum zu
+// sehen sind. Darum zeichnen wir beides selbst - eckig, mit sichtbarem Rand
+// und einer Reaktion auf die Maus.
+
+/// Eckiges Kaestchen mit Haken.
+fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
+    let p = theme::palette();
+    let side = 17.0;
+    let gap = 9.0;
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, p.text);
+    let size = egui::vec2(side + gap + galley.size().x, side.max(galley.size().y));
+    let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let hov = resp.hovered();
+    let br = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x, rect.center().y - side / 2.0),
+        egui::vec2(side, side),
+    );
+    let pt = ui.painter();
+    let idle_fill = if p.dark { p.field } else { p.card_hi };
+    let idle_edge = if p.dark {
+        p.line
+    } else {
+        // im Hellen reicht die Haarlinie nicht - der Rand muss tragen
+        p.muted.gamma_multiply(0.85)
+    };
+    let fill = if *on {
+        p.accent
+    } else if hov {
+        p.accent.gamma_multiply(0.12)
+    } else {
+        idle_fill
+    };
+    let edge = if *on || hov { p.accent } else { idle_edge };
+    pt.rect_filled(br, 3.0, fill);
+    pt.rect_stroke(
+        br,
+        3.0,
+        egui::Stroke::new(if hov { 2.0 } else { 1.4 }, edge),
+        egui::StrokeKind::Inside,
+    );
+    if *on {
+        let c = br.center();
+        let s = side * 0.30;
+        pt.add(egui::Shape::line(
+            vec![
+                egui::pos2(c.x - s, c.y),
+                egui::pos2(c.x - s * 0.15, c.y + s * 0.8),
+                egui::pos2(c.x + s, c.y - s * 0.75),
+            ],
+            egui::Stroke::new(2.2, p.on_accent),
+        ));
+    }
+    let ty = rect.center().y - galley.size().y / 2.0;
+    pt.galley(egui::pos2(br.max.x + gap, ty), galley, p.text);
+    resp
+}
+
+/// Schieber mit Beschriftung links und Wert rechts - nichts rutscht mehr
+/// ineinander wie bei "Schriftgroesse 100 %" und "Rundung".
+fn slider_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    shown: &str,
+) -> bool {
+    let p = theme::palette();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(108.0, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(label).size(12.5).color(p.muted));
+            },
+        );
+        let w = (ui.available_width() - 66.0).clamp(90.0, 460.0);
+        changed = ui
+            .add_sized(
+                egui::vec2(w, 22.0),
+                egui::Slider::new(value, range).show_value(false),
+            )
+            .changed();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(shown).size(12.5).color(p.text));
+        });
+    });
+    changed
+}
+
+/// Auswahlliste mit Beschriftung links. Gibt den neuen Wert zurueck, wenn
+/// sich etwas geaendert hat. `None` in der Liste = Systemstandard.
+fn device_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    current: &Option<String>,
+    default_name: &str,
+    list: &[String],
+) -> Option<Option<String>> {
+    let p = theme::palette();
+    let mut picked: Option<Option<String>> = None;
+    let shown = match current {
+        Some(n) => n.clone(),
+        None => format!("{} ({})", i18n::t("set.dev_default"), default_name),
+    };
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(108.0, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(label).size(12.5).color(p.muted));
+            },
+        );
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(egui::RichText::new(shown).size(12.5))
+            .width((ui.available_width() - 8.0).clamp(160.0, 420.0))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        current.is_none(),
+                        format!("{} ({})", i18n::t("set.dev_default"), default_name),
+                    )
+                    .on_hover_text(i18n::t("set.dev_default_tip"))
+                    .clicked()
+                {
+                    picked = Some(None);
+                }
+                for name in list.iter() {
+                    if ui
+                        .selectable_label(current.as_deref() == Some(name.as_str()), name)
+                        .clicked()
+                    {
+                        picked = Some(Some(name.clone()));
+                    }
+                }
+            });
+    });
+    // Ein gewaehltes Geraet, das nicht mehr da ist, muss man sehen.
+    if let Some(n) = current {
+        if !list.iter().any(|x| x == n) && !list.is_empty() {
+            ui.label(
+                egui::RichText::new(format!("{} - {}", n, i18n::t("set.dev_gone")))
+                    .size(11.0)
+                    .color(theme::palette().violet),
+            );
+        }
+    }
+    picked
 }

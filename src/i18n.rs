@@ -2,6 +2,10 @@
 //! Englisch. Weitere Sprachen sind eine weitere Spalte, sonst nichts.
 //!
 //! Aufruf: `t("start.connect")`, mit Platzhalter `tf("dev.count", "7")`.
+//!
+//! WICHTIG: Diese Datei ist UTF-8 ohne BOM. Wer sie mit einem Werkzeug
+//! anfasst, das die Bytes noch einmal als UTF-8 kodiert, macht aus "ä" ein
+//! "Ã¤". Der Test `no_mojibake` unten faengt genau das ab.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -42,6 +46,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "start.keep_pw_tip",
         "An: gleiches Passwort nach jedem Neustart – nötig für unbeaufsichtigten Zugriff.",
         "On: same password after every restart – needed for unattended access.",
+    ),
+    (
+        "start.pw_random",
+        "Wird bei jedem Start neu gewürfelt. Feste Passwörter stehen in den Einstellungen unter Zugriff.",
+        "Rolled fresh at every start. Permanent passwords live in Settings under Access.",
     ),
     ("start.copy", "Kopieren", "Copy"),
     ("start.new_pw", "Neues Passwort erzeugen", "Create a new password"),
@@ -150,6 +159,16 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("set.relay", "Relay", "Relay"),
     ("set.version", "Version", "Version"),
     ("set.e2e", "Ende zu Ende verschlüsselt", "End to end encrypted"),
+    // Ton
+    ("set.audio_default", "Beim Verbinden", "When connecting"),
+    ("set.mic_default", "Mikrofon gleich an", "Microphone on right away"),
+    (
+        "set.mic_default_tip",
+        "Aus: jede Sitzung startet stumm, das Mikrofon lässt sich in der Sitzung anschalten.",
+        "Off: every session starts muted, the microphone can be switched on during the session.",
+    ),
+    ("set.snd_default", "Ton der Gegenseite gleich an", "Sound of the other side on right away"),
+    ("set.audio_now", "In dieser Sitzung", "In this session"),
     (
         "set.audio_note",
         "Sprache läuft im selben verschlüsselten Kanal wie das Bild: 24 kHz, 20-ms-Pakete, rund 97 kbit/s.",
@@ -157,6 +176,15 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     ("set.mic_dev", "Mikrofon", "Microphone"),
     ("set.spk_dev", "Wiedergabe", "Playback"),
+    ("set.dev_pick", "Gerät wählen", "Pick a device"),
+    ("set.dev_default", "Standardgerät", "System default"),
+    (
+        "set.dev_default_tip",
+        "Folgt dem, was Windows gerade als Standard führt.",
+        "Follows whatever Windows currently uses as default.",
+    ),
+    ("set.dev_gone", "nicht mehr vorhanden", "no longer present"),
+    ("set.dev_refresh", "Geräte neu einlesen", "Read devices again"),
     ("set.clip", "Zwischenablage teilen", "Share clipboard"),
     (
         "set.clip_tip",
@@ -165,14 +193,32 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "set.e2e_note",
-        "Bild, Ton, Tastatur und Dateien laufen verschlÃ¼sselt (AES-256-GCM) direkt zwischen den beiden Rechnern. Der Relay leitet nur weiter und kann nichts mitlesen; nichts wird dort gespeichert.",
+        "Bild, Ton, Tastatur und Dateien laufen verschlüsselt (AES-256-GCM) direkt zwischen den beiden Rechnern. Der Relay leitet nur weiter und kann nichts mitlesen; nichts wird dort gespeichert.",
         "Picture, sound, keyboard and files run encrypted (AES-256-GCM) straight between the two machines. The relay only forwards and cannot read anything; nothing is stored there.",
     ),
+    // Dauerpasswoerter
+    ("set.pw_perm", "Feste Passwörter", "Permanent passwords"),
+    (
+        "set.pw_perm_tip",
+        "Mit jedem dieser Passwörter kommt man auf diesen PC – zusätzlich zum zufälligen Sitzungspasswort. Sie überleben jeden Neustart.",
+        "Every one of these gets you into this PC – on top of the random session password. They survive a restart.",
+    ),
+    ("set.pw_add", "Passwort hinzufügen", "Add password"),
+    ("set.pw_label", "Bezeichnung", "Label"),
+    ("set.pw_label_hint", "z. B. Handy", "e.g. phone"),
+    ("set.pw_value", "Passwort", "Password"),
+    ("set.pw_show", "Anzeigen", "Show"),
+    ("set.pw_hide", "Verbergen", "Hide"),
+    ("set.pw_del", "Löschen", "Delete"),
+    ("set.pw_empty", "Noch keine festen Passwörter.", "No permanent passwords yet."),
+    ("set.pw_min", "Mindestens 6 Zeichen.", "At least 6 characters."),
+    ("set.pw_dup", "Das Passwort steht schon in der Liste.", "That password is already in the list."),
+    ("set.pw_max", "Mehr als 10 feste Passwörter sind nicht sinnvoll.", "More than 10 permanent passwords make no sense."),
     // Update und Rueckmeldung
     ("set.update", "Update", "Update"),
-    ("set.feedback", "RÃ¼ckmeldung", "Feedback"),
+    ("set.feedback", "Rückmeldung", "Feedback"),
     ("upd.check", "Nach Updates suchen", "Check for updates"),
-    ("upd.checking", "Suche â€¦", "Checking â€¦"),
+    ("upd.checking", "Suche …", "Checking …"),
     ("upd.found", "Neue Version:", "New version:"),
     ("upd.current", "Aktuell", "Up to date"),
     ("upd.failed", "Suche fehlgeschlagen", "Check failed"),
@@ -188,29 +234,32 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Etwas kaputt oder eine Idee? Geht direkt an den Entwickler.",
         "Something broken or an idea? Goes straight to the developer.",
     ),
-    ("fb.hint", "Beschreibe den Fehler oder die Idee â€¦", "Describe the bug or your idea â€¦"),
+    ("fb.hint", "Beschreibe den Fehler oder die Idee …", "Describe the bug or your idea …"),
     ("fb.contact", "Kontakt (freiwillig, z. B. E-Mail)", "Contact (optional, e.g. email)"),
     ("fb.send", "Senden", "Send"),
     // Geraete bearbeiten
     ("dev.edit", "Bearbeiten", "Edit"),
-    ("dev.details", "GerÃ¤t", "Device"),
+    ("dev.details", "Gerät", "Device"),
     ("dev.folder", "Ordner", "Folder"),
-    ("dev.folder_all", "Alle GerÃ¤te", "All devices"),
+    ("dev.folder_all", "Alle Geräte", "All devices"),
     ("dev.folder_new", "Neuer Ordner", "New folder"),
     ("dev.note", "Notiz", "Note"),
     ("dev.pw_stored", "Passwort hinterlegt", "Password saved"),
     ("dev.pw_none", "kein Passwort", "no password"),
     ("dev.pw_set", "Passwort hinterlegen", "Save a password"),
-    ("dev.pw_clear", "Passwort lÃ¶schen", "Delete password"),
-    ("dev.ask_connect", "BestÃ¤tigung anfordern", "Ask for confirmation"),
+    ("dev.pw_clear", "Passwort löschen", "Delete password"),
+    ("dev.ask_connect", "Bestätigung anfordern", "Ask for confirmation"),
     ("dev.stats", "Verbindungen", "Connections"),
     ("dev.last", "Zuletzt", "Last"),
-    ("dev.nosel", "Links ein GerÃ¤t anklicken.", "Pick a device on the left."),
+    ("dev.nosel", "Links ein Gerät anklicken.", "Pick a device on the left."),
     // Sitzung
     ("sess.mic_on", "Mikrofon an", "Microphone on"),
     ("sess.mic_off", "Mikrofon aus", "Microphone off"),
     ("sess.snd_on", "Ton an", "Sound on"),
     ("sess.snd_off", "Ton aus", "Sound off"),
+    ("sess.drop", "Dateien hier ablegen und senden", "Drop files here to send them"),
+    ("sess.drop_none", "Keine aktive Sitzung – Datei nicht gesendet", "No active session – file not sent"),
+    ("sess.drop_sent", "{} Datei(en) werden übertragen", "Sending {} file(s)"),
 ];
 
 pub fn t(key: &str) -> &'static str {
@@ -271,6 +320,18 @@ mod tests {
         for (k, de, _) in TABLE.iter() {
             for bad in ascii_sins.iter() {
                 assert!(!de.contains(bad), "{} enthält {}", k, bad);
+            }
+        }
+    }
+
+    /// Doppelt kodiertes UTF-8 ("Ã¤" statt "ä") darf nie wieder durchrutschen.
+    #[test]
+    fn no_mojibake() {
+        let sins = ["Ã", "Â", "â€", "ï»¿"];
+        for (k, de, en) in TABLE.iter() {
+            for bad in sins.iter() {
+                assert!(!de.contains(bad), "{} deutsch ist kaputt kodiert: {}", k, de);
+                assert!(!en.contains(bad), "{} englisch ist kaputt kodiert: {}", k, en);
             }
         }
     }

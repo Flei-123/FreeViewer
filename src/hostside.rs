@@ -288,10 +288,27 @@ impl Session {
                 },
                 crypto::TAG_PROOF,
             ) => {
-                let password = shared.password.lock().unwrap().clone();
-                let pw_key = crypto::password_key(&password, salt);
-                let expected = crypto::auth_proof(&pw_key, client_pub, host_pub, salt);
-                if !crypto::proof_matches(&expected, &data[1..]) {
+                // Es gilt das Sitzungspasswort UND jedes feste Passwort aus
+                // den Einstellungen. Der Beweis verraet nicht, welches gemeint
+                // war, also bleibt nur der Reihe nach ausprobieren. Argon2
+                // kostet Zeit, darum ist die Liste bei 10 Eintraegen gedeckelt.
+                let session_pw = shared.password.lock().unwrap().clone();
+                let mut ok = false;
+                for cand in std::iter::once(session_pw)
+                    .chain(crate::pwlist::candidates())
+                    .take(crate::pwlist::MAX + 1)
+                {
+                    if cand.is_empty() {
+                        continue;
+                    }
+                    let pw_key = crypto::password_key(&cand, salt);
+                    let expected = crypto::auth_proof(&pw_key, client_pub, host_pub, salt);
+                    if crypto::proof_matches(&expected, &data[1..]) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if !ok {
                     tx.send(WsMsg::Binary(vec![crypto::TAG_FAIL].into()))?;
                     return Err(anyhow!("falsches Passwort"));
                 }
