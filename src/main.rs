@@ -19,6 +19,7 @@ mod feedback;
 mod h264;
 mod hostside;
 mod i18n;
+mod account;
 mod icons;
 mod ident;
 mod link;
@@ -195,12 +196,15 @@ fn main() -> eframe::Result<()> {
             at: std::time::Instant::now(),
         });
         let mut ok = true;
-        for (name, view) in [
-            ("Start", View::Start),
-            ("Geraete", View::Devices),
-            ("Einstellungen", View::Settings),
+        for (name, view, stab) in [
+            ("Start", View::Start, SettingsTab::General),
+            ("Geraete", View::Devices, SettingsTab::General),
+            ("Einstellungen", View::Settings, SettingsTab::General),
+            ("Konto", View::Settings, SettingsTab::Account),
+            ("Meet", View::Meet, SettingsTab::General),
         ] {
             app.view = view;
+            app.stab = stab;
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::pos2(0.0, 0.0),
@@ -218,8 +222,73 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
+        // Die Sitzungsansicht braucht ein Bild und einmal beide Leisten:
+        // im Fenster und schwebend im Vollbild.
+        shared.connected.store(true, Ordering::Relaxed);
+        *shared.remote_size.lock().unwrap() = (1920, 1080);
+        for (name, full) in [("Sitzung", false), ("Sitzung Vollbild", true)] {
+            app.full = full;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1100.0, 720.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input.clone(), |ctx| app.session_ui(ctx));
+            let out = ctx.run(input, |ctx| app.session_ui(ctx));
+            let shapes = out.shapes.len();
+            println!("{}: {} Formen gezeichnet", name, shapes);
+            if shapes < 10 {
+                ok = false;
+            }
+        }
+        shared.connected.store(false, Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&tmp);
         println!("{}", if ok { "UITEST OK" } else { "UITEST FAIL" });
+        return Ok(());
+    }
+
+    // Abgleich mit dem Konto einmal von Hand:  freeviewer --synctest [token]
+    // Ohne Token wird der genommen, der in account.json steht. Zeigt genau,
+    // was hoch- und was zurueckkam - fuer Fehlersuche ohne Fenster.
+    if std::env::args().any(|a| a == "--synctest") {
+        let arg = std::env::args()
+            .skip_while(|a| a != "--synctest")
+            .nth(1)
+            .unwrap_or_default();
+        let token = if arg.is_empty() || arg.starts_with("--") {
+            account::load().map(|s| s.token).unwrap_or_default()
+        } else {
+            arg
+        };
+        if token.is_empty() {
+            println!("SYNCTEST: kein Token - erst anmelden");
+            return Ok(());
+        }
+        let book = partners::Book::load();
+        let mine = book.to_sync();
+        println!("SYNCTEST: {} Geraete gehen hoch", mine.len());
+        match account::sync(&shared.relay_url, &token, mine) {
+            Ok(r) => {
+                println!(
+                    "SYNCTEST OK: Konto {}, Stand {}, {} Geraete zurueck",
+                    r.username,
+                    r.rev,
+                    r.devices.len()
+                );
+                for d in r.devices.iter().take(20) {
+                    println!(
+                        "  {} {} {}{}",
+                        d.id,
+                        if d.name.is_empty() { "-" } else { &d.name },
+                        d.at,
+                        if d.deleted { " (entfernt)" } else { "" }
+                    );
+                }
+            }
+            Err(e) => println!("SYNCTEST FEHLER: {}", e),
+        }
         return Ok(());
     }
 
@@ -725,6 +794,7 @@ fn main() -> eframe::Result<()> {
                 if let Some(tab) = std::env::args().skip_while(|a| a != "--tab").nth(1) {
                     app.stab = match tab.as_str() {
                         "access" => SettingsTab::Access,
+                        "account" => SettingsTab::Account,
                         "audio" => SettingsTab::Audio,
                         "look" => SettingsTab::Look,
                         "update" => SettingsTab::Update,
@@ -866,6 +936,27 @@ struct App {
     meet_loaded: bool,
     /// Beim Beitritt anbieten, dass andere diesen PC steuern duerfen.
     meet_offer_control: bool,
+    /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
+    /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
+    full: bool,
+    /// Wo die schwebende Leiste steht (0 = ganz links, 1 = ganz rechts).
+    bar_x: f32,
+    /// Wie breit sie zuletzt war (fuer die Positionsrechnung).
+    bar_w: f32,
+    /// Angeheftet = bleibt immer sichtbar, sonst zieht sie sich zurueck.
+    bar_pinned: bool,
+    /// Wann die Leiste zuletzt beachtet wurde (fuer das Zurueckziehen).
+    bar_seen: std::time::Instant,
+    /// Wann das letzte Bild ankam - fuer den Hinweis "kein Bild".
+    frame_at: std::time::Instant,
+    /// Konto: angemeldete Sitzung, Eingabefelder, Zustand des Abgleichs.
+    acc: Option<account::Session>,
+    acc_user: String,
+    acc_pass: String,
+    acc_msg: String,
+    acc_busy: Arc<std::sync::atomic::AtomicBool>,
+    acc_out: Arc<std::sync::Mutex<Option<account::SyncOut>>>,
+    acc_next: std::time::Instant,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -927,6 +1018,19 @@ impl App {
             meet_err: Arc::new(std::sync::Mutex::new(String::new())),
             meet_loaded: false,
             meet_offer_control: true,
+            full: false,
+            bar_x: 0.5,
+            bar_w: 700.0,
+            bar_pinned: true,
+            bar_seen: std::time::Instant::now(),
+            frame_at: std::time::Instant::now(),
+            acc: account::load(),
+            acc_user: String::new(),
+            acc_pass: String::new(),
+            acc_msg: String::new(),
+            acc_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            acc_out: Arc::new(std::sync::Mutex::new(None)),
+            acc_next: std::time::Instant::now(),
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1044,6 +1148,7 @@ impl App {
 
     /// Books the time of a finished session into the address book.
     fn close_session(&mut self) {
+        self.full = false;
         if let Some((id, started)) = self.session.take() {
             self.book.ended(&id, started.elapsed().as_secs());
         }
@@ -1302,6 +1407,7 @@ impl App {
             }
         };
         if let Some(ci) = img {
+            self.frame_at = std::time::Instant::now();
             match self.tex.as_mut() {
                 Some(t) => t.set(ci, egui::TextureOptions::LINEAR),
                 None => {
@@ -2491,6 +2597,7 @@ impl App {
                 for (tab, icon, label) in [
                     (SettingsTab::General, "settings", i18n::t("set.general")),
                     (SettingsTab::Access, "shield", i18n::t("set.access")),
+                    (SettingsTab::Account, "user", i18n::t("set.account")),
                     (SettingsTab::Audio, "mic", i18n::t("set.audio")),
                     (SettingsTab::Look, "palette", i18n::t("set.look")),
                     (SettingsTab::Update, "refresh", i18n::t("set.update")),
@@ -2546,6 +2653,7 @@ impl App {
                 match self.stab {
                     SettingsTab::General => self.set_general(ui),
                     SettingsTab::Access => self.set_access(ui),
+                    SettingsTab::Account => self.set_account(ui),
                     SettingsTab::Audio => self.set_audio(ui),
                     SettingsTab::Look => self.set_look(ui),
                     SettingsTab::Update => self.set_update(ui),
@@ -2563,7 +2671,16 @@ impl App {
     fn set_general(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             label_small(ui, i18n::t("set.name"));
-            let mut name = self.shared.device_name.lock().unwrap().clone();
+            // Leer heisst: es steht noch nichts eigenes drin - dann zeigen wir
+            // den Rechnernamen, so wie ihn auch die Gegenseite sieht.
+            let mut name = {
+                let mut n = self.shared.device_name.lock().unwrap().clone();
+                if n.trim().is_empty() {
+                    n = presence::machine_name();
+                    *self.shared.device_name.lock().unwrap() = n.clone();
+                }
+                n
+            };
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut name)
@@ -2847,6 +2964,177 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Einstellungen -> Konto. Ohne Anmeldung laeuft alles wie bisher; mit
+    /// Anmeldung liegt die Geraeteliste zusaetzlich beim FleiTec-Konto.
+    fn set_account(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        self.take_sync_result();
+        label_small(ui, i18n::t("acc.title"));
+        card(ui, |ui| {
+            match self.acc.clone() {
+                None => {
+                    ui.label(
+                        egui::RichText::new(i18n::t("acc.why"))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                    ui.add_space(8.0);
+                    label_small(ui, i18n::t("acc.user"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.acc_user)
+                            .desired_width(240.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
+                    );
+                    ui.add_space(6.0);
+                    label_small(ui, i18n::t("acc.pass"));
+                    let enter = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.acc_pass)
+                                .desired_width(240.0)
+                                .password(true)
+                                .margin(egui::Margin::symmetric(8, 4)),
+                        )
+                        .lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(8.0);
+                    let go = accent_button(ui, i18n::t("acc.login"), true).clicked() || enter;
+                    if go {
+                        self.do_login();
+                    }
+                }
+                Some(sess) => {
+                    ui.horizontal(|ui| {
+                        icons::show(ui, "user", 16.0, p.accent);
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(&sess.user).size(15.0).strong());
+                    });
+                    ui.add_space(2.0);
+                    let when = if sess.synced == 0 {
+                        i18n::t("acc.never").to_string()
+                    } else {
+                        presence::ago_ms(sess.synced * 1000)
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{}: {}", i18n::t("acc.last_sync"), when))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let busy = self.acc_busy.load(Ordering::Relaxed);
+                        if accent_button(ui, i18n::t("acc.sync_now"), !busy).clicked() {
+                            self.start_sync(true);
+                        }
+                        if ghost_button(ui, i18n::t("acc.logout")).clicked() {
+                            account::forget();
+                            self.acc = None;
+                            self.acc_msg = i18n::t("acc.logged_out").to_string();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let n = self.book.sorted().len();
+                    ui.label(
+                        egui::RichText::new(i18n::tf("acc.count", &n.to_string()))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                }
+            }
+        });
+        if !self.acc_msg.is_empty() {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(&self.acc_msg).size(12.0).color(p.accent));
+        }
+        ui.add_space(10.0);
+        label_small(ui, i18n::t("acc.privacy_head"));
+        card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t("acc.privacy"))
+                    .size(12.0)
+                    .color(p.muted),
+            );
+        });
+    }
+
+    /// Anmelden im Hintergrund - die Oberflaeche darf dabei nicht stehen.
+    fn do_login(&mut self) {
+        let relay = self.shared.relay_url.clone();
+        let user = self.acc_user.trim().to_string();
+        let pass = std::mem::take(&mut self.acc_pass);
+        if user.is_empty() || pass.is_empty() {
+            self.acc_msg = i18n::t("acc.need_both").to_string();
+            return;
+        }
+        self.acc_msg = i18n::t("acc.logging_in").to_string();
+        let busy = self.acc_busy.clone();
+        let out = self.acc_out.clone();
+        if busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(move || {
+            let res = match account::login(&relay, &user, &pass) {
+                Ok(sess) => {
+                    let _ = account::save(&sess);
+                    account::SyncOut::LoggedIn(sess.user.clone())
+                }
+                Err(e) => account::SyncOut::Failed(e.to_string()),
+            };
+            *out.lock().unwrap() = Some(res);
+            busy.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Adressbuch hoch, zusammengefuehrte Liste zurueck.
+    fn start_sync(&mut self, sichtbar: bool) {
+        let Some(sess) = self.acc.clone() else { return };
+        if sichtbar {
+            self.acc_msg = i18n::t("acc.syncing").to_string();
+        }
+        self.acc_next = std::time::Instant::now() + Duration::from_secs(120);
+        account::sync_async(
+            self.shared.relay_url.clone(),
+            sess.token.clone(),
+            self.book.to_sync(),
+            self.acc_out.clone(),
+            self.acc_busy.clone(),
+        );
+    }
+
+    /// Ergebnis eines Hintergrundlaufs abholen (Anmeldung oder Abgleich).
+    fn take_sync_result(&mut self) {
+        let res = self.acc_out.lock().unwrap().take();
+        let Some(res) = res else { return };
+        match res {
+            account::SyncOut::Ok { devices, at } => {
+                let changed = self.book.merge_remote(&devices);
+                if let Some(sess) = self.acc.as_mut() {
+                    sess.synced = at;
+                    let _ = account::save(sess);
+                }
+                self.acc_msg = if changed {
+                    i18n::t("acc.updated").to_string()
+                } else {
+                    i18n::t("acc.uptodate").to_string()
+                };
+            }
+            account::SyncOut::LoggedOut => {
+                account::forget();
+                self.acc = None;
+                self.acc_msg = i18n::t("acc.expired").to_string();
+            }
+            account::SyncOut::LoggedIn(user) => {
+                // Anmeldung geklappt - die Sitzung liegt schon auf der Platte
+                self.acc = account::load();
+                self.acc_msg = i18n::tf("acc.hello", &user);
+                self.acc_user.clear();
+                self.start_sync(false);
+            }
+            account::SyncOut::Failed(msg) => {
+                self.acc_msg = msg;
+            }
+        }
     }
 
     fn set_audio(&mut self, ui: &mut egui::Ui) {
@@ -3252,170 +3540,302 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(250));
     }
 
-    fn session_ui(&mut self, ctx: &egui::Context) {
+    /// Was in der Bedienleiste angeklickt wurde. Die Leiste gibt es zweimal
+    /// (oben im Fenster und schwebend im Vollbild), den Inhalt aber nur
+    /// einmal - deshalb sammelt sie ihre Wuensche hier ein.
+    fn session_bar(&mut self, ui: &mut egui::Ui, a: &mut BarActs, kompakt: bool) {
         let stats = *self.shared.stats.lock().unwrap();
         let game = self.shared.game_mode();
-        let mut disconnect = false;
-        let mut want_mode: Option<u8> = None;
-        let mut want_mon: Option<u8> = None;
-        let mut special: Option<u8> = None;
-        let mut pick = false;
-        let mut open_dir = false;
+        let p = theme::palette();
 
-        egui::TopBottomPanel::top("session_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Trennen").clicked() {
-                    disconnect = true;
-                }
-                ui.separator();
+        if kompakt {
+            // Griff zum Verschieben
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(16.0, 22.0), egui::Sense::drag());
+            ui.put(rect, icons::image("grip", 14.0, p.muted));
+            if r.dragged() {
+                a.drag += r.drag_delta().x;
+            }
+            let r = r.on_hover_text(i18n::t("sess.move_bar"));
+            if r.hovered() || r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            ui.add_space(2.0);
+        }
 
-                ui.label("Modus:");
-                if ui
-                    .selectable_label(!game, "Fernwartung")
-                    .on_hover_text("Scharfes Bild, absolute Maus, Tastatur nur im Fenster")
-                    .clicked()
-                    && game
-                {
-                    want_mode = Some(proto::MODE_ADMIN);
-                }
-                if ui
-                    .selectable_label(game, "Spiel")
-                    .on_hover_text(
-                        "Relative Maus fuer Ingame-Kameras, komplette Tastatur (Win, Alt+Tab), mehr fps",
-                    )
-                    .clicked()
-                    && !game
-                {
-                    want_mode = Some(proto::MODE_GAME);
-                }
+        if zeigefinger(ui.button(i18n::t("sess.disconnect"))).clicked() {
+            a.disconnect = true;
+        }
+        ui.separator();
 
-                let mons = self.shared.monitors.lock().unwrap().clone();
-                if mons.len() > 1 {
-                    ui.separator();
-                    let act = self.shared.active_monitor.load(Ordering::Relaxed) as usize;
-                    let label = |i: usize, m: &proto::MonitorInfo| {
-                        format!("{}. {} ({}x{})", i + 1, m.name, m.w, m.h)
-                    };
-                    let cur = mons
-                        .get(act)
-                        .map(|m| label(act, m))
-                        .unwrap_or_else(|| "Bildschirm".to_string());
-                    egui::ComboBox::from_id_salt("monitor_pick")
-                        .selected_text(cur)
-                        .show_ui(ui, |ui| {
-                            for (i, m) in mons.iter().enumerate() {
-                                if ui.selectable_label(i == act, label(i, m)).clicked() {
-                                    want_mon = Some(i as u8);
-                                }
+        if !kompakt {
+            ui.label(i18n::t("sess.mode"));
+        }
+        if zeigefinger(
+            ui.selectable_label(!game, i18n::t("sess.mode_admin"))
+                .on_hover_text(i18n::t("sess.mode_admin_tip")),
+        )
+        .clicked()
+            && game
+        {
+            a.mode = Some(proto::MODE_ADMIN);
+        }
+        if zeigefinger(
+            ui.selectable_label(game, i18n::t("sess.mode_game"))
+                .on_hover_text(i18n::t("sess.mode_game_tip")),
+        )
+        .clicked()
+            && !game
+        {
+            a.mode = Some(proto::MODE_GAME);
+        }
+
+        let mons = self.shared.monitors.lock().unwrap().clone();
+        if mons.len() > 1 {
+            ui.separator();
+            let act = self.shared.active_monitor.load(Ordering::Relaxed) as usize;
+            let label = |i: usize, m: &proto::MonitorInfo| {
+                if kompakt {
+                    format!("{}. {}", i + 1, m.name)
+                } else {
+                    format!("{}. {} ({}x{})", i + 1, m.name, m.w, m.h)
+                }
+            };
+            let cur = mons
+                .get(act)
+                .map(|m| label(act, m))
+                .unwrap_or_else(|| i18n::t("sess.screen").to_string());
+            egui::ComboBox::from_id_salt("monitor_pick")
+                .selected_text(cur)
+                .show_ui(ui, |ui| {
+                    for (i, m) in mons.iter().enumerate() {
+                        if ui.selectable_label(i == act, label(i, m)).clicked() {
+                            a.monitor = Some(i as u8);
+                        }
+                    }
+                });
+        }
+
+        ui.separator();
+        self.voice_buttons(ui, 16.0);
+        ui.separator();
+
+        let mut want_pick = false;
+        let mut want_open = false;
+        ui.menu_button(i18n::t("sess.files"), |ui| {
+            if ui.button(i18n::t("sess.send_file")).clicked() {
+                want_pick = true;
+                ui.close();
+            }
+            if ui.button(i18n::t("sess.open_dir")).clicked() {
+                want_open = true;
+                ui.close();
+            }
+            ui.label(
+                egui::RichText::new(i18n::t("sess.drop_tip"))
+                    .weak()
+                    .size(11.0),
+            );
+        });
+        if want_pick {
+            a.pick = true;
+        }
+        if want_open {
+            a.open_dir = true;
+        }
+
+        ui.separator();
+        ui.menu_button(i18n::t("sess.keys"), |ui| {
+            for (text, code) in [
+                ("Strg+Alt+Entf", proto::SPECIAL_CAD),
+                ("Task-Manager (Strg+Shift+Esc)", proto::SPECIAL_TASKMGR),
+                ("Windows-Taste", proto::SPECIAL_WIN),
+                ("Alt+Tab", proto::SPECIAL_ALTTAB),
+                ("Sperren (Win+L)", proto::SPECIAL_LOCK),
+            ] {
+                if ui.button(text).clicked() {
+                    a.special = Some(code);
+                    ui.close();
+                }
+            }
+        });
+
+        ui.separator();
+        // Vollbild an/aus - im Vollbild zusaetzlich das Anheften
+        let (icon, tip) = if self.full {
+            ("shrink", i18n::t("sess.full_off"))
+        } else {
+            ("expand", i18n::t("sess.full_on"))
+        };
+        if icon_ghost(ui, icon, tip).clicked() {
+            a.toggle_full = true;
+        }
+        if self.full {
+            let pinned = self.bar_pinned;
+            if icon_toggle(ui, "pin", pinned, 15.0, i18n::t("sess.pin")).clicked() {
+                a.toggle_pin = true;
+            }
+        }
+
+        ui.separator();
+        let (rw, rh) = *self.shared.remote_size.lock().unwrap();
+        let direct = self.shared.direct.load(Ordering::Relaxed);
+        let text = if kompakt {
+            format!("{:.0} fps  {:.0} ms", stats.fps, stats.latency_ms)
+        } else {
+            format!(
+                "{}x{}   {:.0} fps   {:.0} kbit/s   {:.0} ms   {}",
+                rw,
+                rh,
+                stats.fps,
+                stats.kbps,
+                stats.latency_ms,
+                if direct {
+                    i18n::t("sess.direct")
+                } else {
+                    i18n::t("sess.via_relay")
+                }
+            )
+        };
+        ui.label(text).on_hover_text(format!(
+            "{}x{}, {:.0} kbit/s, {}",
+            rw,
+            rh,
+            stats.kbps,
+            if direct {
+                i18n::t("sess.direct")
+            } else {
+                i18n::t("sess.via_relay")
+            }
+        ));
+
+        if !kompakt {
+            ui.separator();
+            ui.label(egui::RichText::new(i18n::t("sess.escape")).weak().size(11.0))
+                .on_hover_text(i18n::t("sess.escape_tip"));
+        }
+        if game {
+            ui.separator();
+            if vinput::is_active() {
+                ui.colored_label(theme::green(), i18n::t("sess.grabbed"));
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 190, 90),
+                    i18n::t("sess.not_grabbed"),
+                );
+            }
+        }
+    }
+
+    /// Vollbild ein- und ausschalten. Im Vollbild verschwindet der Rahmen von
+    /// Windows komplett - genau wie bei der Windows-Fernverbindung.
+    fn set_full(&mut self, ctx: &egui::Context, on: bool) {
+        if self.full == on {
+            return;
+        }
+        self.full = on;
+        self.bar_seen = std::time::Instant::now();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
+    fn session_ui(&mut self, ctx: &egui::Context) {
+        let mut a = BarActs::default();
+
+        // F11 schaltet das Vollbild - die Taste wird hier verbraucht, damit
+        // sie nicht auch noch auf dem anderen Rechner landet.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
+            a.toggle_full = true;
+        }
+
+        if self.full {
+            // ---- schwebende Leiste (Windows-Fernverbindung laesst gruessen)
+            let screen = ctx.screen_rect();
+            let pointer_top = ctx
+                .input(|i| i.pointer.hover_pos())
+                .map(|p| p.y < 8.0)
+                .unwrap_or(false);
+            if pointer_top {
+                self.bar_seen = std::time::Instant::now();
+            }
+            let offen = self.bar_pinned
+                || self.bar_seen.elapsed() < Duration::from_millis(2500);
+            let breite = if offen { self.bar_w.max(120.0) } else { 96.0 };
+            let links = (screen.width() - breite).max(0.0) * self.bar_x.clamp(0.0, 1.0);
+            let pos = egui::pos2(screen.left() + links, screen.top() + 2.0);
+            let p = theme::palette();
+
+            let area = egui::Area::new(egui::Id::new("fv_fullbar"))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .fixed_pos(pos)
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(p.card.gamma_multiply(0.97))
+                        .stroke(egui::Stroke::new(1.0, p.line))
+                        .corner_radius(9.0)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 3],
+                            blur: 12,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(90),
+                        })
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            if offen {
+                                ui.horizontal(|ui| {
+                                    self.session_bar(ui, &mut a, true);
+                                });
+                            } else {
+                                // zurueckgezogen: nur ein Griff, der die
+                                // Leiste beim Beruehren wieder hervorholt
+                                ui.horizontal(|ui| {
+                                    ui.add_space(6.0);
+                                    icons::show(ui, "grip", 13.0, p.muted);
+                                    ui.label(
+                                        egui::RichText::new("FreeViewer")
+                                            .size(11.0)
+                                            .color(p.muted),
+                                    );
+                                });
                             }
                         });
-                }
-
-                ui.separator();
-                self.voice_buttons(ui, 16.0);
-                ui.separator();
-                let mut want_pick = false;
-                let mut want_open = false;
-                ui.menu_button("Dateien", |ui| {
-                    if ui.button("Datei senden...").clicked() {
-                        want_pick = true;
-                        ui.close();
-                    }
-                    if ui.button("Empfangsordner oeffnen").clicked() {
-                        want_open = true;
-                        ui.close();
-                    }
-                    ui.label(
-                        egui::RichText::new("Tipp: Dateien einfach ins Fenster ziehen")
-                            .weak()
-                            .size(11.0),
-                    );
                 });
-                if want_pick {
-                    pick = true;
-                }
-                if want_open {
-                    open_dir = true;
-                }
-
-                ui.separator();
-                ui.menu_button("Tasten senden", |ui| {
-                    if ui.button("Strg+Alt+Entf").clicked() {
-                        special = Some(proto::SPECIAL_CAD);
-                        ui.close();
-                    }
-                    if ui.button("Task-Manager (Strg+Shift+Esc)").clicked() {
-                        special = Some(proto::SPECIAL_TASKMGR);
-                        ui.close();
-                    }
-                    if ui.button("Windows-Taste").clicked() {
-                        special = Some(proto::SPECIAL_WIN);
-                        ui.close();
-                    }
-                    if ui.button("Alt+Tab").clicked() {
-                        special = Some(proto::SPECIAL_ALTTAB);
-                        ui.close();
-                    }
-                    if ui.button("Sperren (Win+L)").clicked() {
-                        special = Some(proto::SPECIAL_LOCK);
-                        ui.close();
-                    }
+            let bar_rect = area.response.rect;
+            if offen && bar_rect.width() > 20.0 {
+                self.bar_w = bar_rect.width();
+            }
+            if area.response.hovered() || area.response.contains_pointer() {
+                self.bar_seen = std::time::Instant::now();
+            }
+            if a.drag != 0.0 {
+                let span = (screen.width() - self.bar_w).max(1.0);
+                self.bar_x = (self.bar_x + a.drag / span).clamp(0.0, 1.0);
+                self.bar_seen = std::time::Instant::now();
+            }
+        } else {
+            egui::TopBottomPanel::top("session_bar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    self.session_bar(ui, &mut a, false);
                 });
-
-                ui.separator();
-                let (rw, rh) = *self.shared.remote_size.lock().unwrap();
-                let direct = self.shared.direct.load(Ordering::Relaxed);
-                ui.label(format!(
-                    "{}x{}   {:.0} fps   {:.0} kbit/s   {:.0} ms   {}",
-                    rw,
-                    rh,
-                    stats.fps,
-                    stats.kbps,
-                    stats.latency_ms,
-                    if direct { "direkt" } else { "ueber Relay" }
-                ));
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("rechte Strg = raus")
-                        .weak()
-                        .size(11.0),
-                )
-                .on_hover_text(
-                    "Einmal druecken gibt Maus und Tastatur wieder an diesen PC zurueck.\nDreimal schnell hintereinander beendet die Sitzung.",
-                );
-                if game {
-                    ui.separator();
-                    if vinput::is_active() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(120, 220, 120),
-                            "Eingabe gegriffen - rechte Strg loest",
-                        );
-                    } else {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 190, 90),
-                            "frei - ins Bild klicken zum Greifen",
-                        );
-                    }
-                }
             });
-        });
+        }
 
         if let Some(until) = self.hint_until {
             if std::time::Instant::now() < until {
                 let text = if self.hint.is_empty() {
-                    "Rechte Strg = Eingabe freigeben  |  3x rechte Strg = Sitzung beenden"
-                        .to_string()
+                    i18n::t("sess.escape_long").to_string()
                 } else {
                     self.hint.clone()
                 };
-                egui::TopBottomPanel::top("escape_hint").show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(text)
-                                .color(egui::Color32::from_rgb(240, 220, 120)),
-                        );
+                if !self.full {
+                    egui::TopBottomPanel::top("escape_hint").show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .color(egui::Color32::from_rgb(240, 220, 120)),
+                            );
+                        });
                     });
-                });
+                }
             } else {
                 self.hint_until = None;
                 self.hint.clear();
@@ -3443,36 +3863,76 @@ impl App {
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Warte auf Bild...");
+                        ui.label(i18n::t("sess.waiting"));
                     });
                 }
             });
 
-        if let Some(rect) = image_rect {
-            self.draw_remote_cursor(ctx, rect, game);
-            self.update_grab(ctx, rect, game, clicked_image);
-            self.forward_input(ctx, rect, game);
+        // Kein neues Bild seit ein paar Sekunden? Dann sagen wir, woran es
+        // fast immer liegt, statt nur "0 fps" anzuzeigen.
+        if self.frame_at.elapsed() > Duration::from_secs(4) {
+            let p = theme::palette();
+            egui::Area::new(egui::Id::new("fv_stall"))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 40.0))
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(p.card.gamma_multiply(0.95))
+                        .stroke(egui::Stroke::new(1.0, p.line))
+                        .corner_radius(10.0)
+                        .inner_margin(egui::Margin::symmetric(16, 12))
+                        .show(ui, |ui| {
+                            ui.set_max_width(460.0);
+                            ui.label(
+                                egui::RichText::new(i18n::t("sess.stall_head"))
+                                    .size(14.0)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(i18n::t("sess.stall_body"))
+                                    .size(12.0)
+                                    .color(p.muted),
+                            );
+                        });
+                });
         }
 
-        if let Some(m) = want_mode {
+        if let Some(rect) = image_rect {
+            self.draw_remote_cursor(ctx, rect, game_mode(&self.shared));
+            self.update_grab(ctx, rect, game_mode(&self.shared), clicked_image);
+            self.forward_input(ctx, rect, game_mode(&self.shared));
+        }
+
+        if a.toggle_full {
+            let on = !self.full;
+            self.set_full(ctx, on);
+        }
+        if a.toggle_pin {
+            self.bar_pinned = !self.bar_pinned;
+            self.bar_seen = std::time::Instant::now();
+        }
+        if let Some(m) = a.mode {
             self.set_mode(m);
         }
-        if let Some(i) = want_mon {
+        if let Some(i) = a.monitor {
             self.shared.active_monitor.store(i, Ordering::Relaxed);
             self.shared.send_input(Msg::SetMonitor { index: i });
             self.tex = None;
             self.last_seq = 0;
         }
-        if let Some(code) = special {
+        if let Some(code) = a.special {
             self.shared.send_input(Msg::Special { code });
         }
-        if pick {
+        if a.pick {
             self.pick_and_send();
         }
-        if open_dir {
+        if a.open_dir {
             self.open_drop_dir();
         }
-        if disconnect {
+        if a.disconnect {
+            self.set_full(ctx, false);
             self.stop_session();
         }
     }
@@ -3733,6 +4193,14 @@ impl eframe::App for App {
         }
         self.handle_drops(ctx);
         self.handle_link(ctx);
+        // Konto: Ergebnisse abholen und alle zwei Minuten leise abgleichen
+        self.take_sync_result();
+        if self.acc.is_some()
+            && !self.acc_busy.load(Ordering::Relaxed)
+            && std::time::Instant::now() >= self.acc_next
+        {
+            self.start_sync(false);
+        }
         self.transfer_ui(ctx);
 
         // right Ctrl: 1x hands the input back, 3x leaves the session
@@ -3758,6 +4226,9 @@ impl eframe::App for App {
             }
             if vinput::is_active() {
                 vinput::set_active(false);
+            }
+            if self.full {
+                self.set_full(ctx, false);
             }
             paint_background(ctx);
             self.rail(ctx);
@@ -3825,6 +4296,25 @@ enum View {
     Settings,
 }
 
+/// Was in einer Sitzungsleiste angeklickt wurde.
+#[derive(Default)]
+struct BarActs {
+    disconnect: bool,
+    mode: Option<u8>,
+    monitor: Option<u8>,
+    special: Option<u8>,
+    pick: bool,
+    open_dir: bool,
+    toggle_full: bool,
+    toggle_pin: bool,
+    /// Wie weit der Griff der schwebenden Leiste gezogen wurde.
+    drag: f32,
+}
+
+fn game_mode(shared: &Arc<Shared>) -> bool {
+    shared.game_mode()
+}
+
 /// Was im Bearbeiten-Feld eines Geraetes steht, solange es offen ist.
 #[derive(Clone, Default)]
 struct DevEdit {
@@ -3840,6 +4330,7 @@ struct DevEdit {
 enum SettingsTab {
     General,
     Access,
+    Account,
     Audio,
     Look,
     Update,
@@ -4122,34 +4613,24 @@ fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
 
 /// Fenstersymbol: dasselbe Auge wie im Infobereich, 32x32 RGBA.
 fn app_icon() -> egui::IconData {
-    const N: i32 = 32;
-    let mut rgba = vec![0u8; (N * N * 4) as usize];
-    let c = (N as f32 - 1.0) / 2.0;
-    for y in 0..N {
-        for x in 0..N {
-            let (dx, dy) = (x as f32 - c, y as f32 - c);
-            let d = (dx * dx + dy * dy).sqrt();
-            if d > 15.0 {
-                continue;
+    // Dieselbe Zeichnung, die auch in der EXE steckt (siehe build.rs), damit
+    // Fenster, Taskleiste, Startmenue und Explorer dasselbe zeigen.
+    const RAW: &[u8] = include_bytes!("../assets/icon.png");
+    match image::load_from_memory(RAW) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            egui::IconData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
             }
-            let (r, g, b) = if d <= 5.0 {
-                (0xff, 0xff, 0xff)
-            } else if d <= 8.5 {
-                (0x07, 0x09, 0x0f)
-            } else {
-                (0x38, 0xbd, 0xf8)
-            };
-            let i = ((y * N + x) * 4) as usize;
-            rgba[i] = r;
-            rgba[i + 1] = g;
-            rgba[i + 2] = b;
-            rgba[i + 3] = 0xff;
         }
-    }
-    egui::IconData {
-        rgba,
-        width: N as u32,
-        height: N as u32,
+        Err(_) => egui::IconData {
+            rgba: vec![0x38, 0xbd, 0xf8, 0xff],
+            width: 1,
+            height: 1,
+        },
     }
 }
 

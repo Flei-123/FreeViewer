@@ -58,25 +58,85 @@ pub fn device_name() -> String {
             return s;
         }
     }
+    machine_name()
+}
+
+/// Wie der Rechner selbst heisst - ohne die eigene Umbenennung.
+///
+/// Windows wird direkt gefragt (GetComputerNameExW), denn Umgebungsvariablen
+/// erbt ein Dienst nicht immer, und in manchen Umgebungen steht in HOSTNAME
+/// eine IP-Adresse. Eine IP ist als Geraetename nutzlos - "192.168.1.24"
+/// sagt niemandem, welcher PC das ist -, deshalb wird sie verworfen.
+pub fn machine_name() -> String {
+    #[cfg(windows)]
+    {
+        let n = clean(&win_computer_name());
+        if !n.is_empty() && !looks_like_ip(&n) {
+            return n;
+        }
+    }
     for key in ["FV_NAME", "COMPUTERNAME", "HOSTNAME"] {
         if let Ok(v) = std::env::var(key) {
             let v = clean(&v);
-            if !v.is_empty() {
+            if !v.is_empty() && !looks_like_ip(&v) {
                 return v;
             }
         }
     }
-    #[cfg(windows)]
-    {
-        // services do not inherit COMPUTERNAME in every case
-        if let Ok(out) = std::process::Command::new("hostname").output() {
-            let v = clean(String::from_utf8_lossy(&out.stdout).trim());
-            if !v.is_empty() {
-                return v;
-            }
+    if let Ok(out) = std::process::Command::new("hostname").output() {
+        let v = clean(String::from_utf8_lossy(&out.stdout).trim());
+        if !v.is_empty() && !looks_like_ip(&v) {
+            return v;
         }
     }
     String::new()
+}
+
+/// "192.168.1.24" oder "fe80::1" - alles, was nach Adresse statt nach Name
+/// aussieht.
+pub fn looks_like_ip(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    // 192.168.1.24:7180 oder mit Rest dahinter
+    let head = t.split([':', '/', ' ']).next().unwrap_or("");
+    head.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// Der Name, den Windows selbst fuehrt (DNS-Kurzname des Rechners).
+#[cfg(windows)]
+fn win_computer_name() -> String {
+    use windows::Win32::System::SystemInformation::{
+        GetComputerNameExW, ComputerNamePhysicalDnsHostname,
+    };
+    use windows::core::PWSTR;
+    unsafe {
+        // erster Aufruf holt nur die Laenge (er schlaegt absichtlich fehl)
+        let mut len: u32 = 0;
+        let _ = GetComputerNameExW(ComputerNamePhysicalDnsHostname, PWSTR::null(), &mut len);
+        if len == 0 || len > 512 {
+            len = 256;
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let mut have = buf.len() as u32;
+        if GetComputerNameExW(
+            ComputerNamePhysicalDnsHostname,
+            PWSTR(buf.as_mut_ptr()),
+            &mut have,
+        )
+        .is_err()
+        {
+            return String::new();
+        }
+        let n = (have as usize).min(buf.len());
+        String::from_utf16_lossy(&buf[..n])
+            .trim_end_matches('\0')
+            .to_string()
+    }
 }
 
 /// Keeps the name harmless for JSON and for the relay's own filter.
@@ -208,6 +268,16 @@ mod tests {
             online_url("ws://192.168.1.60:7180/fv/ws"),
             "http://192.168.1.60:7180/fv/online"
         );
+    }
+
+    #[test]
+    fn eine_ip_ist_kein_geraetename() {
+        assert!(looks_like_ip("192.168.1.24"));
+        assert!(looks_like_ip("192.168.1.24:7180"));
+        assert!(looks_like_ip("::1"));
+        assert!(!looks_like_ip("FLEI-ONE"));
+        assert!(!looks_like_ip("Buero-PC 2"));
+        assert!(!looks_like_ip(""));
     }
 
     #[test]
