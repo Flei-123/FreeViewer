@@ -211,7 +211,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     (
         "set.install_note",
-        "Installieren legt FreeViewer nach Programme, macht einen Startmenü-Eintrag (dann findet ihn die Windows-Suche) und traegt ihn in Apps & Features ein. Fragt einmal nach Administrator-Rechten.",
+        "Installieren legt FreeViewer nach Programme, macht einen Startmenü-Eintrag (dann findet ihn die Windows-Suche) und trägt ihn in Apps & Features ein. Fragt einmal nach Administrator-Rechten.",
         "Installing puts FreeViewer into Program Files, adds a start menu entry (so Windows search finds it) and registers it in Apps & Features. Asks once for administrator rights.",
     ),
     ("set.install_do", "FreeViewer installieren", "Install FreeViewer"),
@@ -343,7 +343,12 @@ mod tests {
     #[test]
     fn german_texts_really_use_umlauts() {
         // genau der Fehler, den Justin gemeldet hat: "Geraete" statt "Geräte"
-        let ascii_sins = ["Geraete", "hoeren", "Groesse", "waehrend", "zuruecksetzen"];
+        let ascii_sins = [
+            "Geraet", "hoeren", "Groesse", "waehrend", "zuruecksetzen", "traegt", "faellt",
+            "haelt", "laeuft", "waehlen", "koennen", "muessen", "moechte", "loeschen",
+            "Passwoert", "Rueck", "Buero", "zusaetzlich", "ueberleben", "Menue", "Kaestchen",
+            "Verknuepf", "Pruef", "naechste", "schliess",
+        ];
         for (k, de, _) in TABLE.iter() {
             for bad in ascii_sins.iter() {
                 assert!(!de.contains(bad), "{} enthält {}", k, bad);
