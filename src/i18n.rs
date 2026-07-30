@@ -196,6 +196,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Bild, Ton, Tastatur und Dateien laufen verschlüsselt (AES-256-GCM) direkt zwischen den beiden Rechnern. Der Relay leitet nur weiter und kann nichts mitlesen; nichts wird dort gespeichert.",
         "Picture, sound, keyboard and files run encrypted (AES-256-GCM) straight between the two machines. The relay only forwards and cannot read anything; nothing is stored there.",
     ),
+    (
+        "start.self",
+        "Das ist dieser PC - eine Verbindung zu sich selbst bringt nichts.",
+        "That is this PC - connecting to yourself gets you nowhere.",
+    ),
     // Meet
     ("nav.meet", "Meet", "Meet"),
     ("meet.new", "Neues Meeting", "New meeting"),

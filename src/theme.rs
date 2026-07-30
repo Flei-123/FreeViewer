@@ -318,6 +318,21 @@ pub fn resolve(a: &Appearance) -> Palette {
     p
 }
 
+/// Sitzt unser Aussehen noch?
+///
+/// eframe schreibt beim Start und bei jedem Wechsel des Windows-Farbmodus
+/// eigene Visuals ueber unsere. Dann sind zum Beispiel die Raender der
+/// Eingabefelder wieder weg - genau der Fehler, den Justin nach jedem
+/// Neustart gesehen hat. Die Oberflaeche prueft das jeden Frame; ist etwas
+/// anders, wird das Aussehen neu gesetzt.
+pub fn style_is_ours(ctx: &egui::Context) -> bool {
+    let p = palette();
+    let s = ctx.style();
+    s.visuals.panel_fill == p.bg
+        && s.visuals.extreme_bg_color == p.field
+        && s.visuals.override_text_color == Some(p.text)
+}
+
 /// Puts the palette in place and rebuilds the egui style around it.
 pub fn apply(ctx: &egui::Context, a: &Appearance) {
     crate::audio::set_defaults(a.mic_on, a.snd_on);

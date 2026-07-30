@@ -986,6 +986,10 @@ impl App {
     }
 
     fn start_session(&mut self) {
+        if self.is_me(&self.partner_id.clone()) {
+            self.hint = i18n::t("start.self").to_string();
+            return;
+        }
         let id: String = self
             .partner_id
             .chars()
@@ -1012,6 +1016,10 @@ impl App {
     /// Connect without a password: the other side gets a question and has to
     /// allow the session by hand.
     fn start_ask_session(&mut self) {
+        if self.is_me(&self.partner_id.clone()) {
+            self.hint = i18n::t("start.self").to_string();
+            return;
+        }
         let id: String = self
             .partner_id
             .chars()
@@ -1600,7 +1608,19 @@ impl App {
     }
 
     /// Verbindet mit einem Eintrag aus der Liste.
+    /// Ist das die eigene ID? Dann bringt eine Verbindung nichts - der
+    /// Bildschirm wuerde sich selbst zeigen, bis nichts mehr geht.
+    fn is_me(&self, id: &str) -> bool {
+        let ziffern: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+        let me = self.shared.my_id.lock().unwrap().clone();
+        !ziffern.is_empty() && ziffern == me
+    }
+
     fn connect_to(&mut self, id: &str) {
+        if self.is_me(id) {
+            self.hint = i18n::t("start.self").to_string();
+            return;
+        }
         self.partner_id = id.to_string();
         self.partner_pw = self.book.password(id).unwrap_or_default();
         self.selected = Some(id.to_string());
@@ -1672,7 +1692,7 @@ impl App {
                             p.muted
                         };
                         ui.put(rect, icons::image(name, 19.0, fg));
-                        let r = r.on_hover_text(tip);
+                        let r = zeigefinger(r).on_hover_text(tip);
                         if r.clicked() {
                             self.view = v;
                         }
@@ -2512,6 +2532,7 @@ impl App {
                         egui::FontId::proportional(13.0),
                         if sel { p.text } else { fg },
                     );
+                    let r = zeigefinger(r);
                     if r.clicked() {
                         self.stab = tab;
                     }
@@ -3702,6 +3723,14 @@ impl eframe::App for App {
         self.tray_ui(ctx);
         self.knock_ui(ctx);
         self.pull_frame(ctx);
+        // eframe setzt beim Start (und wenn Windows zwischen hell und dunkel
+        // wechselt) sein eigenes Aussehen durch - dann fehlen zum Beispiel die
+        // Raender der Eingabefelder. Also nachsehen und gegebenenfalls unser
+        // Aussehen wieder aufsetzen.
+        if !theme::style_is_ours(ctx) {
+            let look = self.look.clone();
+            theme::apply(ctx, &look);
+        }
         self.handle_drops(ctx);
         self.handle_link(ctx);
         self.transfer_ui(ctx);
@@ -4035,12 +4064,12 @@ fn ghost(size: egui::Vec2, text: &str) -> egui::Button<'static> {
 
 /// Kleiner zweitrangiger Knopf.
 fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(
+    zeigefinger(ui.add(
         egui::Button::new(egui::RichText::new(text).size(12.5).color(theme::muted()))
             .fill(theme::card_hi())
             .stroke(egui::Stroke::new(1.0, theme::line()))
             .corner_radius(8),
-    )
+    ))
 }
 
 /// Grüner oder grauer Punkt vor einem Gerät.
@@ -4147,6 +4176,10 @@ fn save_shot(img: &egui::ColorImage, path: &std::path::Path) {
 // ------------------------------------------------------------ kleine Helfer
 
 /// Symbolknopf ohne Rahmen - Hover und Druck kommen aus der Palette.
+fn zeigefinger(r: egui::Response) -> egui::Response {
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn icon_ghost(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
     let r = ui
         .scope(|ui| {
@@ -4162,7 +4195,7 @@ fn icon_ghost(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
             )
         })
         .inner;
-    r.on_hover_text(tip)
+    zeigefinger(r).on_hover_text(tip)
 }
 
 /// Ein- und ausschaltbarer Symbolknopf (Mikrofon, Ton).
@@ -4186,7 +4219,7 @@ fn icon_toggle(ui: &mut egui::Ui, icon: &str, on: bool, size: f32, tip: &str) ->
             )
         })
         .inner;
-    r.on_hover_text(tip)
+    zeigefinger(r).on_hover_text(tip)
 }
 
 /// Zwei kleine Pegelbalken: raus und rein.
@@ -4296,7 +4329,7 @@ fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
     }
     let ty = rect.center().y - galley.size().y / 2.0;
     pt.galley(egui::pos2(br.max.x + gap, ty), galley, p.text);
-    resp
+    zeigefinger(resp)
 }
 
 /// Schieber mit Beschriftung links und Wert rechts - nichts rutscht mehr
