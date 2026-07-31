@@ -483,9 +483,12 @@ impl Session {
                             };
                         }));
                         // the host only receives punches on this socket
-                        tokio::spawn(p_recv.recv_loop(move |_msg| {
-                            let _ = &sh_state;
-                        }));
+                        tokio::spawn(p_recv.recv_loop(
+                            move |_msg| {
+                                let _ = &sh_state;
+                            },
+                            || {},
+                        ));
                     });
                 }
                 self.p2p = p2p;
@@ -1103,8 +1106,17 @@ fn capture_loop(
                 Next::Unchanged => {
                     let quiet = last_push.elapsed();
                     let have_pixels = !cap.frame().0.is_empty();
-                    let due = Duration::from_millis(if sent_any { 1000 } else { 300 });
-                    if have_pixels && quiet > due {
+                    // A viewer that asked for a keyframe is staring at a
+                    // broken picture right now - resend immediately instead of
+                    // waiting for the next change on a screen that may well be
+                    // standing perfectly still (lock screen, reading a page).
+                    let asked = key_grab.load(Ordering::Relaxed);
+                    let due = if asked {
+                        Duration::from_millis(0)
+                    } else {
+                        Duration::from_millis(if sent_any { 1000 } else { 300 })
+                    };
+                    if have_pixels && quiet >= due {
                         // repeat the last picture as a keyframe
                         last_push = Instant::now();
                         sent_any = true;

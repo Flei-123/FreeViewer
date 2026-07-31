@@ -30,6 +30,55 @@ pub fn machine_config_dir() -> Option<PathBuf> {
 /// identity exists (the service installer creates it) that one wins, so every
 /// account sees the same FreeViewer ID.
 pub fn config_dir() -> PathBuf {
+    // Tests fassen NIEMALS die echte Konfiguration an. Ein Unit-Test, der
+    // ueber Book::save() in %ProgramData%\\FreeViewer landet, loescht das
+    // Adressbuch des Benutzers - genau das ist am 31.07.2026 passiert.
+    // Deshalb zeigt der Ordner im Testlauf hart auf ein eigenes Temp-Verzeichnis.
+    #[cfg(test)]
+    {
+        return test_config_dir();
+    }
+    #[cfg(not(test))]
+    {
+        real_config_dir()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Ein einzelner Test kann sich einen eigenen Ordner geben. Pro Thread,
+    /// damit parallel laufende Tests sich nicht in die Quere kommen.
+    static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Legt den Konfigurationsordner NUR fuer diesen Testthread fest.
+#[cfg(test)]
+pub fn set_test_config_dir(p: PathBuf) {
+    let _ = fs::create_dir_all(&p);
+    TEST_DIR.with(|d| *d.borrow_mut() = Some(p));
+}
+
+/// Eigener Wegwerf-Ordner pro Test. Cargo gibt jedem Test einen eigenen
+/// Thread, also reicht die Thread-Kennung, um Tests sauber zu trennen -
+/// sonst wuerden parallel laufende Tests sich gegenseitig die identity.txt
+/// unter den Fuessen wegschreiben.
+#[cfg(test)]
+pub fn test_config_dir() -> PathBuf {
+    if let Some(p) = TEST_DIR.with(|d| d.borrow().clone()) {
+        return p;
+    }
+    let tid = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    let d = std::env::temp_dir().join(format!("freeviewer-test-{}-{}", std::process::id(), tid));
+    let _ = fs::create_dir_all(&d);
+    TEST_DIR.with(|t| *t.borrow_mut() = Some(d.clone()));
+    d
+}
+
+/// Der echte Ordner im Betrieb.
+pub fn real_config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("FV_CONFIG") {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
@@ -151,5 +200,23 @@ pub fn set_clipboard(on: bool) {
     } else {
         let _ = std::fs::create_dir_all(config_dir());
         let _ = std::fs::write(f, b"1");
+    }
+}
+
+#[cfg(test)]
+mod config_dir_tests {
+    use super::*;
+
+    /// Schutz gegen den Datenverlust vom 31.07.2026: im Testlauf darf der
+    /// Konfigurationsordner niemals der echte sein.
+    #[test]
+    fn tests_schreiben_nie_in_die_echte_konfiguration() {
+        let d = config_dir();
+        assert_eq!(d, test_config_dir());
+        assert!(d.starts_with(std::env::temp_dir()));
+        if let Some(m) = machine_config_dir() {
+            assert_ne!(d, m);
+        }
+        assert_ne!(d, user_config_dir());
     }
 }

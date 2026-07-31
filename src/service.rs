@@ -837,6 +837,13 @@ mod stub {
     }
     pub fn kill_agent() {}
     pub fn log(_s: &str) {}
+    /// Auf welchem Eingabe-Desktop laeuft der Agent? Nur Windows kennt das
+    /// Problem (Anmeldebildschirm, UAC), anderswo gibt es genau einen.
+    pub fn desktop_report() -> String {
+        "kein Windows - nur ein Desktop".to_string()
+    }
+    /// Dem Eingabe-Desktop folgen - anderswo nicht noetig.
+    pub fn watch_desktop() {}
     pub fn prepare_machine_config() -> Result<PathBuf> {
         Err(anyhow!("nur unter Windows"))
     }

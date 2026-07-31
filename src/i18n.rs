@@ -127,6 +127,22 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("dev.save", "Speichern", "Save"),
     ("dev.cancel", "Abbrechen", "Cancel"),
     ("dev.id9", "Erst eine 9-stellige ID eingeben", "Enter a 9 digit ID first"),
+    ("dev.add_title", "Gerät hinzufügen", "Add device"),
+    ("dev.add_id", "FreeViewer-ID", "FreeViewer ID"),
+    ("dev.add_id_hint", "9-stellige ID, z. B. 497 628 420", "9 digit ID, e.g. 497 628 420"),
+    ("dev.add_name", "Name", "Name"),
+    ("dev.add_pw", "Passwort", "Password"),
+    ("dev.add_name_hint", "Wie das Gerät in der Liste heißen soll", "How the device is listed"),
+    (
+        "dev.add_pw_hint",
+        "Passwort merken - dann verbindet ein Doppelklick sofort",
+        "Remember the password - a double click connects right away",
+    ),
+    ("dev.add_ok", "Hinzufügen", "Add"),
+    ("dev.add_bad_id", "Die ID besteht aus 9 Ziffern", "The ID is 9 digits long"),
+    ("dev.add_known", "Dieses Gerät steht schon in der Liste", "That device is already listed"),
+    ("dev.add_self", "Das ist diese Maschine", "That is this machine"),
+    ("sess.window", "FreeViewer - Sitzung", "FreeViewer - session"),
     // Einstellungen
     ("set.general", "Allgemein", "General"),
     ("set.access", "Zugriff", "Access"),
@@ -406,6 +422,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "acc.privacy",
         "Nur die Geräteliste: ID, Name, Ordner, Notiz und die Nutzungszahlen. Gespeicherte Passwörter bleiben auf diesem PC – sie sind mit der Kennung dieses Rechners verschlüsselt und wären woanders ohnehin wertlos. Bildschirm, Eingaben und Dateien laufen weiterhin Ende zu Ende verschlüsselt und niemals über das Konto.",
         "Only the device list: ID, name, folder, note and the usage counters. Saved passwords stay on this PC – they are encrypted with this machine's identity and would be worthless anywhere else. Screen, input and files stay end to end encrypted and never touch the account.",
+    ),
+    (
+        "host.mac_permissions",
+        "Damit dieser Mac freigegeben werden kann: Systemeinstellungen - Datenschutz & Sicherheit - Bildschirmaufnahme UND Bedienungshilfen fuer FreeViewer einschalten.",
+        "To share this Mac: System Settings - Privacy & Security - turn on Screen Recording AND Accessibility for FreeViewer.",
     ),
 ];
 

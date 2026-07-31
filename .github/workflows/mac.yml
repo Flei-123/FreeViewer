@@ -1,0 +1,92 @@
+name: macOS Build
+
+# Baut FreeViewer auf einem echten Mac (Apple Silicon). Kreuzkompilieren geht
+# nicht - das Apple-SDK gibt es nur auf macOS. Signieren und Notarisieren
+# passieren nur, wenn die Geheimnisse hinterlegt sind; ohne sie entsteht
+# trotzdem ein lauffaehiges, unsigniertes Programm zum Ausprobieren.
+
+on:
+  push:
+    branches: [ mac-build, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build + test on macOS
+    runs-on: macos-14
+    env:
+      # Die Geheimnisse einmal nach env holen - im `if` einer Stufe laesst sich
+      # damit sauber pruefen, ob sie ueberhaupt hinterlegt sind.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      AC_APPLE_ID: ${{ secrets.AC_APPLE_ID }}
+      AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+      AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bauen
+        run: cargo build --release
+
+      - name: Testen
+        run: cargo test --release
+
+      - name: App-Bundle schnueren
+        run: |
+          APP="target/FreeViewer.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/freeviewer "$APP/Contents/MacOS/FreeViewer"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>FreeViewer</string>
+            <key>CFBundleDisplayName</key><string>FreeViewer</string>
+            <key>CFBundleIdentifier</key><string>com.fleitec.freeviewer</string>
+            <key>CFBundleExecutable</key><string>FreeViewer</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.22.1</string>
+            <key>CFBundleVersion</key><string>0.22.1</string>
+            <key>LSMinimumSystemVersion</key><string>12.3</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSCameraUsageDescription</key><string>FreeViewer nutzt die Kamera nur, wenn du sie in einem Meeting einschaltest.</string>
+            <key>NSMicrophoneUsageDescription</key><string>FreeViewer nutzt das Mikrofon nur, wenn du es in einem Meeting oder einer Sitzung einschaltest.</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Signieren (nur mit hinterlegtem Zertifikat)
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          CERT_PW="$MACOS_CERT_PASSWORD"
+          IDENTITY="$MACOS_SIGN_IDENTITY"
+          echo "$MACOS_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p bau bau.keychain
+          security default-keychain -s bau.keychain
+          security unlock-keychain -p bau bau.keychain
+          security import /tmp/cert.p12 -k bau.keychain -P "$CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k bau bau.keychain
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$IDENTITY" target/FreeViewer.app
+          codesign --verify --strict --verbose=2 target/FreeViewer.app
+
+      - name: Notarisieren (nur mit hinterlegten Zugangsdaten)
+        if: env.AC_APPLE_ID != ''
+        run: |
+          ditto -c -k --keepParent target/FreeViewer.app /tmp/FreeViewer.zip
+          xcrun notarytool submit /tmp/FreeViewer.zip \
+            --apple-id "$AC_APPLE_ID" --password "$AC_PASSWORD" --team-id "$AC_TEAM_ID" --wait
+          xcrun stapler staple target/FreeViewer.app
+
+      - name: Ergebnis einsammeln
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freeviewer-macos-arm64
+          path: target/FreeViewer.app
+          if-no-files-found: warn

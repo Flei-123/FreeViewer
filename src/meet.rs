@@ -189,10 +189,62 @@ pub fn open_window(url: &str) -> Result<()> {
         }
         return Err(anyhow!("Kein Browser gefunden"));
     }
-    #[cfg(not(windows))]
+    // macOS: dieselbe Idee, nur andere Pfade. Findet sich kein Chrome/Edge,
+    // uebernimmt `open` den Standardbrowser - Hauptsache, das Meeting geht auf.
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ];
+        for exe in candidates.iter() {
+            if std::path::Path::new(exe).exists()
+                && std::process::Command::new(exe)
+                    .arg(format!("--app={}", url))
+                    .arg("--window-size=1280,800")
+                    .spawn()
+                    .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        if std::process::Command::new("open").arg(url).spawn().is_ok() {
+            return Ok(());
+        }
+        return Err(anyhow!("Kein Browser gefunden"));
+    }
+
+    // Linux und der Rest: Chrome-artige im Pfad suchen, sonst xdg-open.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for exe in [
+            "google-chrome",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "brave-browser",
+        ] {
+            if std::process::Command::new(exe)
+                .arg(format!("--app={}", url))
+                .arg("--window-size=1280,800")
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        if std::process::Command::new("xdg-open").arg(url).spawn().is_ok() {
+            return Ok(());
+        }
+        return Err(anyhow!("Kein Browser gefunden"));
+    }
+
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = url;
-        Err(anyhow!("nur unter Windows"))
+        Err(anyhow!("Auf diesem System nicht unterstuetzt"))
     }
 }
 

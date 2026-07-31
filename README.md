@@ -47,42 +47,6 @@ No account, no subscription, no telemetry.
 - **Clipboard sync in both directions** (text, max 256 KB) - copy on one side,
   paste on the other; echo suppressed so the two machines cannot ping-pong.
 - **Live stats** - resolution, fps, kbit/s and round trip time in the session bar.
-- **A window that looks like a remote control tool (v0.12)** - three pages in
-  the TeamViewer layout: *Start* (own ID and password on the left, the field
-  to connect on the right), *Geraete* (device list with groups, search and a
-  detail column) and *Einstellungen*. Dark FreeViewer palette, cards instead
-  of grey boxes.
-- **Partner list with online state (v0.12)** - the relay keeps a tiny
-  directory (`GET /fv/online?ids=...`): the name a host reports about itself
-  and when it was last seen. Green dot = reachable right now. Still no
-  account, still nothing decryptable on the server.
-- **"Bestaetigung anfordern" (v0.12)** - connect without knowing the password:
-  the host shows *"X moechte sich verbinden"* plus a four digit session code
-  derived from the key exchange, and only a click starts the session. Both
-  sides show the same code, so a relay in the middle would be noticed.
-- **The remote pointer is drawn in game mode only (v0.12)** - there the local
-  cursor is locked away; in remote maintenance it already sits exactly where
-  the remote one is and a second arrow only confused people.
-- **Always reachable (v0.11)** - tray icon, "start with Windows" and an
-  optional Windows service, so the machine can be reached without anybody
-  clicking anything:
-  - Closing the window folds FreeViewer into the **tray** instead of killing
-    the host; the icon shows the state (grey = offline, blue = ready, green =
-    session) and its menu opens the window, copies the ID, toggles autostart
-    and quits.
-  - **Start with Windows** writes one value into the user's `Run` key, and the
-    program comes up hidden in the tray (`--tray`).
-  - The **service** (`--install-service`, or the checkbox in the settings
-    line) starts an agent inside the console session and follows the input
-    desktop: normal desktop, lock screen and the secure desktop of the
-    password/UAC prompt. That is what makes a machine reachable *before*
-    anybody logs in - and the identity moves to `%ProgramData%\FreeViewer`, so
-    the 9 digit ID stays the same no matter which account runs the host.
-  - A perfectly still screen (the lock screen never moves) is re-sent once a
-    second as a keyframe, so a viewer that just joined never stares at a black
-    window.
-  - `freeviewer --status` prints version, config folder, autostart, service
-    state and what the running agent published.
 
 ## Quick start
 
@@ -211,15 +175,11 @@ idea what the sessions contain.
 - [x] DXGI desktop duplication capture (v0.4)
 - [x] game mode: raw relative mouse, full keyboard grab, key combos (v0.4)
 - [x] clipboard sync (v0.4)
-- [x] file transfer (drag & drop, both directions) (v0.5)
-- [x] multi monitor selection during the session (v0.5)
-- [x] self update over the relay (v0.6)
-- [x] GPU scaling + hardware H.264 (Media Foundation/NVENC) (v0.7-v0.8)
-- [x] direct P2P (UDP hole punching) with relay fallback (v0.9)
-- [x] address book with history, favourites and stored passwords (v0.10)
-- [x] tray icon, autostart and unattended access as a Windows service (v0.11)
-- [x] new window layout, partner list with online state, connect by asking (v0.12)
-- [ ] installer (MSI), Linux/macOS builds
+- [ ] file transfer (drag & drop)
+- [ ] multi monitor selection
+- [ ] hardware video encode (H.264/AV1), GPU scaling
+- [ ] direct P2P (UDP hole punching) with relay fallback
+- [ ] unattended access as a service, Linux/macOS builds
 - [ ] session recording, chat
 
 ## License

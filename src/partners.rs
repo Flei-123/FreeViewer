@@ -122,20 +122,61 @@ pub struct Book {
 const MAX_ENTRIES: usize = 200;
 
 impl Book {
-    fn path() -> std::path::PathBuf {
+    pub(crate) fn path() -> std::path::PathBuf {
         crate::ident::config_dir().join("partners.json")
     }
 
+    /// Die Sicherheitskopie der letzten Fassung.
+    fn backup_path() -> std::path::PathBuf {
+        crate::ident::config_dir().join("partners.bak.json")
+    }
+
+    /// Wie viele echte (nicht geloeschte) Eintraege stehen gerade in der Datei?
+    /// Wird gebraucht, um zu erkennen, dass ein Schreibvorgang eine gefuellte
+    /// Liste durch eine leere ersetzen wuerde.
+    fn on_disk() -> Option<Self> {
+        let s = std::fs::read_to_string(Self::path()).ok()?;
+        serde_json::from_str(&s).ok()
+    }
+
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+        // Kaputte Datei? Dann lieber die Sicherungskopie als eine leere Liste -
+        // ein Adressbuch verschwindet nicht, weil ein Byte falsch steht.
+        if let Some(b) = Self::on_disk() {
+            if !b.entries.is_empty() {
+                return b;
+            }
         }
+        if let Ok(s) = std::fs::read_to_string(Self::backup_path()) {
+            if let Ok(b) = serde_json::from_str::<Self>(&s) {
+                if !b.entries.is_empty() {
+                    return b;
+                }
+            }
+        }
+        Self::on_disk().unwrap_or_default()
     }
 
     pub fn save(&self) {
         let dir = crate::ident::config_dir();
         let _ = std::fs::create_dir_all(&dir);
+
+        // NIE eine gefuellte Liste durch eine leere ersetzen. Loeschen laeuft
+        // ueber Grabsteine (deleted = true), die Eintraege bleiben also immer
+        // stehen - eine leere Liste kann daher nur ein Fehler sein.
+        if self.entries.is_empty() {
+            if let Some(old) = Self::on_disk() {
+                if !old.entries.is_empty() {
+                    return;
+                }
+            }
+        }
+
+        // Vorherige Fassung als Sicherungskopie behalten.
+        if std::fs::metadata(Self::path()).is_ok() {
+            let _ = std::fs::copy(Self::path(), Self::backup_path());
+        }
+
         if let Ok(s) = serde_json::to_string_pretty(self) {
             let tmp = dir.join("partners.json.tmp");
             if std::fs::write(&tmp, s).is_ok() {
@@ -431,6 +472,66 @@ fn unprotect(stored: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eigener Ordner nur fuer diesen Test.
+    fn eigener_ordner(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("fv-book-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        crate::ident::set_test_config_dir(d.clone());
+        d
+    }
+
+    /// Der Ausloeser des Datenverlusts vom 31.07.2026: ein Testlauf hat ueber
+    /// merge_remote() -> save() das echte Adressbuch ueberschrieben.
+    #[test]
+    fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
+        eigener_ordner("isoliert");
+        let mut b = Book::default();
+        b.merge_remote(&[dev("111111111", "Neu", 200)]);
+        assert!(Book::path().starts_with(std::env::temp_dir()));
+        if let Some(m) = crate::ident::machine_config_dir() {
+            assert!(!Book::path().starts_with(m));
+        }
+        assert!(!Book::path().starts_with(crate::ident::user_config_dir()));
+    }
+
+    /// Eine gefuellte Liste darf nie durch eine leere ersetzt werden.
+    #[test]
+    fn eine_leere_liste_ueberschreibt_keine_gefuellte() {
+        eigener_ordner("nichtleeren");
+        let mut voll = Book::default();
+        voll.entries = vec![Partner {
+            id: "123456789".into(),
+            name: "Buero-PC".into(),
+            at: 100,
+            ..Default::default()
+        }];
+        voll.save();
+        Book::default().save();
+        let wieder = Book::load();
+        assert_eq!(wieder.sorted().len(), 1);
+        assert_eq!(wieder.sorted()[0].name, "Buero-PC");
+    }
+
+    /// Kaputte Datei -> die Sicherungskopie rettet die Liste.
+    #[test]
+    fn eine_kaputte_datei_faellt_auf_die_sicherung_zurueck() {
+        eigener_ordner("sicherung");
+        let mut b = Book::default();
+        b.entries = vec![Partner {
+            id: "222222222".into(),
+            name: "Laptop".into(),
+            at: 1,
+            ..Default::default()
+        }];
+        b.save();
+        // zweiter Schreibvorgang legt die Sicherungskopie an
+        b.rename("222222222", "Laptop 2");
+        std::fs::write(Book::path(), b"{ kaputt").unwrap();
+        let wieder = Book::load();
+        assert_eq!(wieder.sorted().len(), 1);
+        assert_eq!(wieder.sorted()[0].id, "222222222");
+    }
 
     fn dev(id: &str, name: &str, at: u64) -> SyncDevice {
         SyncDevice {

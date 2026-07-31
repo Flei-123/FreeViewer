@@ -501,12 +501,19 @@ fn main() -> eframe::Result<()> {
     // Two processes with the same identity would kick each other off the
     // relay, so the GUI keeps its hands off while the service does the job.
     let service_owns_host = !is_agent && service::running();
+    // Der Mac darf Host sein, sobald die Anwendung mit einer Developer-ID
+    // signiert ist - ohne die vergibt macOS 15 die noetigen Rechte nicht
+    // dauerhaft (bei jedem Selbst-Update waeren sie wieder weg). Wir starten
+    // den Host trotzdem und sagen dem Nutzer, welche zwei Haken er braucht.
     if !viewer_only && !service_owns_host {
         let host_shared = shared.clone();
         let host_secret = secret.clone();
         rt().spawn(async move {
             hostside::run_host(host_shared, host_secret).await;
         });
+    }
+    if cfg!(target_os = "macos") && !viewer_only && !service_owns_host {
+        shared.set_host_status(i18n::t("host.mac_permissions"));
     }
     if is_agent {
         // let the user's GUI show ID and password of this host
@@ -910,6 +917,8 @@ struct App {
     fb_contact: String,
     /// Geraeteliste: gewaehlter Ordner und offenes Bearbeiten-Feld.
     folder: String,
+    /// Offenes "Geraet hinzufuegen"-Fenster.
+    add_dev: Option<AddDev>,
     edit_dev: Option<DevEdit>,
     /// Wann die Titelleiste zuletzt eingefaerbt wurde.
     caption_tick: std::time::Instant,
@@ -1000,6 +1009,7 @@ impl App {
             fb_text: String::new(),
             fb_contact: String::new(),
             folder: String::new(),
+            add_dev: None,
             edit_dev: None,
             caption_tick: std::time::Instant::now() - Duration::from_secs(9),
             shot_n: 0,
@@ -1716,6 +1726,22 @@ impl App {
     /// Verbindet mit einem Eintrag aus der Liste.
     /// Ist das die eigene ID? Dann bringt eine Verbindung nichts - der
     /// Bildschirm wuerde sich selbst zeigen, bis nichts mehr geht.
+    /// Wie ein Geraet in der Liste heisst. Eigener Name schlaegt alles;
+    /// sonst nimmt die Liste den Namen, den der Rechner selbst beim Relay
+    /// hinterlegt hat ("Flei-ONE") - eine nackte Nummer sagt niemandem etwas.
+    fn dev_label(&self, e: &partners::Partner) -> String {
+        if !e.name.trim().is_empty() {
+            return e.name.clone();
+        }
+        if let Some(p) = self.presence.get(&e.id) {
+            let n = p.name.trim();
+            if !n.is_empty() {
+                return n.to_string();
+            }
+        }
+        partners::pretty_id(&e.id)
+    }
+
     fn is_me(&self, id: &str) -> bool {
         let ziffern: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
         let me = self.shared.my_id.lock().unwrap().clone();
@@ -2145,16 +2171,15 @@ impl App {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_ghost(ui, "plus", i18n::t("dev.add_tip")).clicked() {
+                            // Was im Suchfeld steht ist meistens genau die ID,
+                            // die hinzugefuegt werden soll - also uebernehmen
+                            // und den Rest im Fenster ausfuellen lassen.
                             let id: String =
                                 self.search.chars().filter(|c| c.is_ascii_digit()).collect();
-                            if id.len() == 9 {
-                                self.book.started(&id, "", false);
-                                self.book.save();
-                                self.search.clear();
-                                self.selected = Some(id);
-                            } else {
-                                self.hint = i18n::t("dev.id9").to_string();
-                            }
+                            self.add_dev = Some(AddDev {
+                                id,
+                                ..Default::default()
+                            });
                         }
                         if icon_ghost(ui, "refresh", i18n::t("dev.refresh_tip")).clicked() {
                             self.presence
@@ -2264,15 +2289,16 @@ impl App {
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.horizontal(|ui| {
+                                            let shown = self.dev_label(x);
                                             icons::show(
                                                 ui,
-                                                device_symbol(&x.label()),
+                                                device_symbol(&shown),
                                                 15.0,
                                                 row_color(on, false),
                                             );
                                             let name = ui.add(
                                                 egui::Label::new(
-                                                    egui::RichText::new(x.label())
+                                                    egui::RichText::new(&shown)
                                                         .size(12.5)
                                                         .color(row_color(on, true)),
                                                 )
@@ -2397,11 +2423,12 @@ impl App {
                     ui.set_width(276.0);
                     let entry = self.book.get(&id).cloned().unwrap_or_default();
                     let on = self.presence.online(&id);
+                    let shown = self.dev_label(&entry);
                     card(ui, |ui| {
                         ui.horizontal(|ui| {
-                            icons::show(ui, device_symbol(&entry.label()), 18.0, row_color(on, false));
+                            icons::show(ui, device_symbol(&shown), 18.0, row_color(on, false));
                             ui.label(
-                                egui::RichText::new(entry.label())
+                                egui::RichText::new(&shown)
                                     .size(15.0)
                                     .strong()
                                     .color(p.text),
@@ -2585,6 +2612,115 @@ impl App {
                 self.edit_dev = None;
             }
         }
+    }
+
+    /// "Geraet hinzufuegen": ein kleines Fenster mit allem, was ein Eintrag
+    /// braucht. Vorher tat der Plus-Knopf nur dann etwas, wenn zufaellig
+    /// schon eine vollstaendige ID im Suchfeld stand - fuer jeden anderen
+    /// war er kaputt.
+    fn add_dev_ui(&mut self, ctx: &egui::Context) {
+        let Some(mut e) = self.add_dev.clone() else {
+            return;
+        };
+        let p = theme::palette();
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new(i18n::t("dev.add_title"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.add_space(2.0);
+                label_small(ui, i18n::t("dev.add_id"));
+                let id_field = ui.add(
+                    egui::TextEdit::singleline(&mut e.id)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(i18n::t("dev.add_id_hint")),
+                );
+                if self.add_dev.is_some() && !id_field.has_focus() && e.id.is_empty() {
+                    id_field.request_focus();
+                }
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("dev.add_name"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.name)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(i18n::t("dev.add_name_hint")),
+                );
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("dev.folder"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.folder)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(i18n::t("dev.folder_new")),
+                );
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("dev.add_pw"));
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.password)
+                        .password(true)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(i18n::t("dev.add_pw_hint")),
+                );
+                if !e.err.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(&e.err).size(11.5).color(p.violet),
+                    );
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, i18n::t("dev.add_ok"), true).clicked() {
+                        save = true;
+                    }
+                    if ghost_button(ui, i18n::t("dev.cancel")).clicked() {
+                        self.add_dev = None;
+                    }
+                });
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            save = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.add_dev = None;
+            return;
+        }
+        if !open {
+            self.add_dev = None;
+            return;
+        }
+        if !save {
+            self.add_dev = Some(e);
+            return;
+        }
+        let id: String = e.id.chars().filter(|c| c.is_ascii_digit()).collect();
+        if id.len() != 9 {
+            e.err = i18n::t("dev.add_bad_id").to_string();
+        } else if self.is_me(&id) {
+            e.err = i18n::t("dev.add_self").to_string();
+        } else if self.book.get(&id).is_some() {
+            e.err = i18n::t("dev.add_known").to_string();
+        } else {
+            self.book.started(&id, "", false);
+            if !e.name.trim().is_empty() {
+                self.book.rename(&id, &e.name);
+            }
+            if !e.folder.trim().is_empty() {
+                self.book.set_group(&id, &e.folder);
+            }
+            if !e.password.is_empty() {
+                self.book.set_password(&id, Some(&e.password));
+            }
+            self.book.save();
+            self.presence.watch(vec![id.clone()]);
+            self.search.clear();
+            self.selected = Some(id);
+            self.add_dev = None;
+            return;
+        }
+        self.add_dev = Some(e);
     }
 
     /// Einstellungen: links die Bereiche, rechts der gewählte Bereich.
@@ -3749,62 +3885,55 @@ impl App {
         if self.full {
             // ---- schwebende Leiste (Windows-Fernverbindung laesst gruessen)
             let screen = ctx.screen_rect();
+            // Wie bei der Windows-Fernverbindung: die Leiste kommt zurueck,
+            // sobald die Maus den oberen Bildschirmrand beruehrt.
             let pointer_top = ctx
                 .input(|i| i.pointer.hover_pos())
-                .map(|p| p.y < 8.0)
+                .map(|p| p.y <= screen.top() + 3.0)
                 .unwrap_or(false);
             if pointer_top {
                 self.bar_seen = std::time::Instant::now();
             }
             let offen = self.bar_pinned
                 || self.bar_seen.elapsed() < Duration::from_millis(2500);
-            let breite = if offen { self.bar_w.max(120.0) } else { 96.0 };
+            let breite = self.bar_w.max(120.0);
             let links = (screen.width() - breite).max(0.0) * self.bar_x.clamp(0.0, 1.0);
             let pos = egui::pos2(screen.left() + links, screen.top() + 2.0);
             let p = theme::palette();
 
-            let area = egui::Area::new(egui::Id::new("fv_fullbar"))
-                .order(egui::Order::Foreground)
-                .fade_in(false)
-                .fixed_pos(pos)
-                .show(ctx, |ui| {
-                    egui::Frame::NONE
-                        .fill(p.card.gamma_multiply(0.97))
-                        .stroke(egui::Stroke::new(1.0, p.line))
-                        .corner_radius(9.0)
-                        .shadow(egui::epaint::Shadow {
-                            offset: [0, 3],
-                            blur: 12,
-                            spread: 0,
-                            color: egui::Color32::from_black_alpha(90),
-                        })
-                        .inner_margin(egui::Margin::symmetric(8, 4))
-                        .show(ui, |ui| {
-                            if offen {
+            // Ausgeblendet heisst ausgeblendet: kein Griff, kein Schatten,
+            // nichts. Der obere Bildschirmrand ist der Schalter - genau wie
+            // bei der Windows-Fernverbindung.
+            if offen {
+                let area = egui::Area::new(egui::Id::new("fv_fullbar"))
+                    .order(egui::Order::Foreground)
+                    .fade_in(false)
+                    .fixed_pos(pos)
+                    .show(ctx, |ui| {
+                        egui::Frame::NONE
+                            .fill(p.card.gamma_multiply(0.97))
+                            .stroke(egui::Stroke::new(1.0, p.line))
+                            .corner_radius(9.0)
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 3],
+                                blur: 12,
+                                spread: 0,
+                                color: egui::Color32::from_black_alpha(90),
+                            })
+                            .inner_margin(egui::Margin::symmetric(8, 4))
+                            .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     self.session_bar(ui, &mut a, true);
                                 });
-                            } else {
-                                // zurueckgezogen: nur ein Griff, der die
-                                // Leiste beim Beruehren wieder hervorholt
-                                ui.horizontal(|ui| {
-                                    ui.add_space(6.0);
-                                    icons::show(ui, "grip", 13.0, p.muted);
-                                    ui.label(
-                                        egui::RichText::new("FreeViewer")
-                                            .size(11.0)
-                                            .color(p.muted),
-                                    );
-                                });
-                            }
-                        });
-                });
-            let bar_rect = area.response.rect;
-            if offen && bar_rect.width() > 20.0 {
-                self.bar_w = bar_rect.width();
-            }
-            if area.response.hovered() || area.response.contains_pointer() {
-                self.bar_seen = std::time::Instant::now();
+                            });
+                    });
+                let bar_rect = area.response.rect;
+                if bar_rect.width() > 20.0 {
+                    self.bar_w = bar_rect.width();
+                }
+                if area.response.hovered() || area.response.contains_pointer() {
+                    self.bar_seen = std::time::Instant::now();
+                }
             }
             if a.drag != 0.0 {
                 let span = (screen.width() - self.bar_w).max(1.0);
@@ -4216,10 +4345,8 @@ impl eframe::App for App {
             _ => {}
         }
 
-        if self.shared.connected.load(Ordering::Relaxed) {
-            self.session_ui(ctx);
-            ctx.request_repaint_after(Duration::from_millis(8));
-        } else {
+        let connected = self.shared.connected.load(Ordering::Relaxed);
+        if !connected {
             if self.session.is_some() && !self.shared.connecting.load(Ordering::Relaxed) {
                 // the session died on its own - still book the time
                 self.close_session();
@@ -4227,32 +4354,72 @@ impl eframe::App for App {
             if vinput::is_active() {
                 vinput::set_active(false);
             }
-            if self.full {
-                self.set_full(ctx, false);
-            }
-            paint_background(ctx);
-            self.rail(ctx);
-            self.header(ctx);
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::NONE
-                        .fill(egui::Color32::TRANSPARENT)
-                        .inner_margin(egui::Margin::symmetric(16, 10)),
-                )
-                .show(ctx, |ui| {
-                    // Inhalt nicht ueber die ganze Breite ziehen
-                    let full = ui.available_width();
-                    let w = full.min(CONTENT_MAX);
-                    let pad = ((full - w) / 2.0).max(0.0);
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(pad);
-                        ui.vertical(|ui| {
-                            ui.set_width(w);
-                            self.home_ui(ui);
-                        });
+            // Das Vollbild gehoerte dem Sitzungsfenster, das gerade zugeht -
+            // hier nur noch den Merker zuruecksetzen, das Hauptfenster war nie
+            // im Vollbild.
+            self.full = false;
+        }
+
+        // Das Hauptfenster bleibt immer das Hauptfenster: Geraete, Meet und
+        // Einstellungen sind auch waehrend einer laufenden Sitzung bedienbar.
+        paint_background(ctx);
+        self.rail(ctx);
+        self.header(ctx);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(egui::Color32::TRANSPARENT)
+                    .inner_margin(egui::Margin::symmetric(16, 10)),
+            )
+            .show(ctx, |ui| {
+                // Inhalt nicht ueber die ganze Breite ziehen
+                let full = ui.available_width();
+                let w = full.min(CONTENT_MAX);
+                let pad = ((full - w) / 2.0).max(0.0);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(pad);
+                    ui.vertical(|ui| {
+                        ui.set_width(w);
+                        self.home_ui(ui);
                     });
                 });
-            ctx.request_repaint_after(Duration::from_millis(250));
+            });
+        self.add_dev_ui(ctx);
+        ctx.request_repaint_after(Duration::from_millis(250));
+
+        // Die Sitzung laeuft in einem eigenen Betriebssystem-Fenster. Damit
+        // bleibt das Hauptfenster benutzbar (zweite Sitzung aufmachen, Datei
+        // suchen), und Vollbild betrifft nur den entfernten Bildschirm.
+        if connected {
+            let title = match self.shared.host_peer.lock().unwrap().clone() {
+                s if s.is_empty() => i18n::t("sess.window").to_string(),
+                _ => {
+                    let id = self.partner_id.clone();
+                    if id.is_empty() {
+                        i18n::t("sess.window").to_string()
+                    } else {
+                        format!("{} - {}", i18n::t("sess.window"), partners::pretty_id(&id))
+                    }
+                }
+            };
+            let mut closed = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("fv_session"),
+                egui::ViewportBuilder::default()
+                    .with_title(title)
+                    .with_inner_size([1280.0, 800.0])
+                    .with_min_inner_size([480.0, 320.0]),
+                |vctx, _class| {
+                    self.session_ui(vctx);
+                    if vctx.input(|i| i.viewport().close_requested()) {
+                        closed = true;
+                    }
+                    vctx.request_repaint_after(Duration::from_millis(8));
+                },
+            );
+            if closed {
+                self.stop_session();
+            }
         }
 
         // --shot: ein paar Frames zeichnen lassen, dann ein Bild anfordern
@@ -4313,6 +4480,17 @@ struct BarActs {
 
 fn game_mode(shared: &Arc<Shared>) -> bool {
     shared.game_mode()
+}
+
+/// Was im "Geraet hinzufuegen"-Fenster steht, solange es offen ist.
+#[derive(Clone, Default)]
+struct AddDev {
+    id: String,
+    name: String,
+    folder: String,
+    password: String,
+    /// Warum das Hinzufuegen gerade nicht geht.
+    err: String,
 }
 
 /// Was im Bearbeiten-Feld eines Geraetes steht, solange es offen ist.

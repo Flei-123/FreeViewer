@@ -232,10 +232,23 @@ impl P2p {
     }
 
     /// Receives datagrams, answers punches and hands finished messages on.
-    pub async fn recv_loop(self: Arc<Self>, sink: impl Fn(Vec<u8>) + Send + 'static) {
+    ///
+    /// `on_loss` fires as soon as a picture cannot be put back together any
+    /// more. One lost datagram breaks the H.264 reference chain, and a
+    /// decoder that keeps going on a broken chain paints exactly the smeared
+    /// half-old rubbish this call exists to prevent: the viewer asks for a
+    /// fresh keyframe over the reliable channel instead.
+    pub async fn recv_loop(
+        self: Arc<Self>,
+        sink: impl Fn(Vec<u8>) + Send + 'static,
+        on_loss: impl Fn() + Send + 'static,
+    ) {
         let mut buf = vec![0u8; 65536];
         let mut pending: HashMap<u32, Pending> = HashMap::new();
         let started = Instant::now();
+        // highest picture id that was handed on complete - everything older
+        // that is still half finished can never be completed in order again
+        let mut newest: u32 = 0;
         while !self.stop.load(Ordering::Relaxed) {
             let (n, from) = match tokio::time::timeout(
                 Duration::from_millis(500),
@@ -246,7 +259,7 @@ impl P2p {
                 Ok(Ok(v)) => v,
                 Ok(Err(_)) => continue,
                 Err(_) => {
-                    drop_stale(&mut pending, &self);
+                    drop_stale(&mut pending, &self, &on_loss);
                     continue;
                 }
             };
@@ -315,9 +328,24 @@ impl P2p {
                             msg.extend_from_slice(p);
                         }
                         pending.remove(&id);
+                        // Anything older than the picture we just finished is
+                        // a lost cause: its missing datagrams would arrive out
+                        // of order at best. Reporting it right here - instead
+                        // of waiting out the reassembly timeout - keeps the
+                        // gap in the reference chain down to a single frame.
+                        if id.wrapping_sub(newest) < u32::MAX / 2 {
+                            newest = id;
+                        }
+                        let before = pending.len();
+                        pending.retain(|k, _| newest.wrapping_sub(*k) >= u32::MAX / 2);
+                        let stale = before - pending.len();
+                        if stale > 0 {
+                            self.lost_frames.fetch_add(stale as u64, Ordering::Relaxed);
+                            on_loss();
+                        }
                         sink(msg);
                     }
-                    drop_stale(&mut pending, &self);
+                    drop_stale(&mut pending, &self, &on_loss);
                 }
                 _ => {}
             }
@@ -325,12 +353,17 @@ impl P2p {
     }
 }
 
-fn drop_stale(pending: &mut HashMap<u32, Pending>, p2p: &Arc<P2p>) {
+fn drop_stale(
+    pending: &mut HashMap<u32, Pending>,
+    p2p: &Arc<P2p>,
+    on_loss: &(impl Fn() + Send + 'static),
+) {
     let before = pending.len();
     pending.retain(|_, v| v.started.elapsed() < REASSEMBLY_TIMEOUT);
     let lost = before - pending.len();
     if lost > 0 {
         p2p.lost_frames.fetch_add(lost as u64, Ordering::Relaxed);
+        on_loss();
     }
 }
 

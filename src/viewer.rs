@@ -1,6 +1,6 @@
 //! Viewer side: connect to a remote FreeViewer host through the relay.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -271,8 +271,10 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                             match crate::p2p::P2p::new(session_key.unwrap_or([0u8; 32]), false, stop) {
                                 Ok(p) => {
-                                    let sink = pipe.sender();
+                                    let gate = pipe.gate();
+                                    let gate_loss = gate.clone();
                                     let sh_v = shared.clone();
+                                    let sh_loss = shared.clone();
                                     let sh_off = shared.clone();
                                     let sh_state = shared.clone();
                                     let p_off = p.clone();
@@ -292,20 +294,26 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                         tokio::spawn(p_punch.punch_loop(move |direct, _rtt| {
                                             sh_state.direct.store(direct, Ordering::Relaxed);
                                         }));
-                                        tokio::spawn(p_off.recv_loop(move |plain| {
-                                            sh_v.video_bytes
-                                                .fetch_add(plain.len() as u64, Ordering::Relaxed);
-                                            if let Some(Msg::Video {
-                                                width,
-                                                height,
-                                                key,
-                                                data,
-                                            }) = decode(&plain)
-                                            {
-                                                sh_v.udp_frames.fetch_add(1, Ordering::Relaxed);
-                                                let _ = sink.send((width, height, key, data));
-                                            }
-                                        }));
+                                        tokio::spawn(p_off.recv_loop(
+                                            move |plain| {
+                                                sh_v.video_bytes.fetch_add(
+                                                    plain.len() as u64,
+                                                    Ordering::Relaxed,
+                                                );
+                                                if let Some(Msg::Video {
+                                                    width,
+                                                    height,
+                                                    key,
+                                                    data,
+                                                }) = decode(&plain)
+                                                {
+                                                    sh_v.udp_frames
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    gate.push(&sh_v, width, height, key, data);
+                                                }
+                                            },
+                                            move || gate_loss.lost(&sh_loss),
+                                        ));
                                     });
                                     p2p = Some(p);
                                 }
@@ -499,17 +507,24 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
 struct VideoPipe {
     tx: std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)>,
     pending: Arc<std::sync::atomic::AtomicI64>,
-    /// true while we wait for the keyframe that restarts the stream
-    resyncing: bool,
+    /// true while we wait for the keyframe that restarts the stream. Shared,
+    /// because the direct UDP path feeds the very same decoder from another
+    /// task and must not slip broken pictures past the gate.
+    resyncing: Arc<AtomicBool>,
 }
 
 /// More than this many undecoded pictures means the viewer cannot keep up.
 const MAX_BACKLOG: i64 = 24;
 
 impl VideoPipe {
-    /// A clone of the input side, for the direct UDP path.
-    fn sender(&self) -> std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)> {
-        self.tx.clone()
+    /// Everything the direct UDP path needs to feed the same decoder through
+    /// the same gate.
+    fn gate(&self) -> VideoGate {
+        VideoGate {
+            tx: self.tx.clone(),
+            pending: self.pending.clone(),
+            resyncing: self.resyncing.clone(),
+        }
     }
 
     fn start(shared: Arc<Shared>) -> Self {
@@ -520,18 +535,42 @@ impl VideoPipe {
         Self {
             tx,
             pending,
-            resyncing: false,
+            resyncing: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn push(&mut self, shared: &Arc<Shared>, w: u32, h: u32, key: bool, data: Vec<u8>) {
-        if self.resyncing && !key {
+        self.gate().push(shared, w, h, key, data);
+    }
+}
+
+/// The gate in front of the decoder thread. Both transports (relay WebSocket
+/// and direct UDP) hand their pictures in here, so a resync started by one of
+/// them really does stop the other one from pushing broken frames.
+#[derive(Clone)]
+struct VideoGate {
+    tx: std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)>,
+    pending: Arc<std::sync::atomic::AtomicI64>,
+    resyncing: Arc<AtomicBool>,
+}
+
+impl VideoGate {
+    /// Something ate a picture - stop decoding until a keyframe arrives.
+    fn lost(&self, shared: &Arc<Shared>) {
+        if !self.resyncing.swap(true, Ordering::Relaxed) {
+            shared.send_input(Msg::NeedKeyframe);
+        }
+    }
+
+    fn push(&self, shared: &Arc<Shared>, w: u32, h: u32, key: bool, data: Vec<u8>) {
+        if self.resyncing.load(Ordering::Relaxed) && !key {
+            // still waiting for the restart - a P frame on a broken reference
+            // chain would paint garbage, so it goes in the bin
             return;
         }
-        self.resyncing = false;
+        self.resyncing.store(false, Ordering::Relaxed);
         if self.pending.load(Ordering::Relaxed) > MAX_BACKLOG && !key {
-            self.resyncing = true;
-            shared.send_input(Msg::NeedKeyframe);
+            self.lost(shared);
             return;
         }
         self.pending.fetch_add(1, Ordering::Relaxed);
