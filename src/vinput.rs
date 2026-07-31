@@ -23,6 +23,9 @@ use crate::shared::Shared;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// Relative Maus (Spielmodus). Die Tastatur wird auch in der Fernwartung
+/// komplett uebernommen, die Maus aber nur im Spielmodus umgestellt.
+static REL: AtomicBool = AtomicBool::new(false);
 static CX: AtomicI32 = AtomicI32::new(0);
 static CY: AtomicI32 = AtomicI32::new(0);
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
@@ -59,6 +62,15 @@ fn host_key_pressed() {
 
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Maus relativ messen (nur Spielmodus).
+pub fn set_relative(on: bool) {
+    REL.store(on, Ordering::Relaxed);
+}
+
+pub fn is_relative() -> bool {
+    REL.load(Ordering::Relaxed)
 }
 
 /// Center of the remote picture in physical screen pixels - the pointer is
@@ -131,7 +143,7 @@ mod imp {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
-                let active = ACTIVE.load(Ordering::Relaxed);
+                let active = ACTIVE.load(Ordering::Relaxed) && REL.load(Ordering::Relaxed);
                 if active {
                     let cx = CX.load(Ordering::Relaxed);
                     let cy = CY.load(Ordering::Relaxed);

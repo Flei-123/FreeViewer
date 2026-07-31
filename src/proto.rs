@@ -99,7 +99,9 @@ pub enum Msg {
     P2pOffer { token: u64, addrs: Vec<String> },
     /// The direct path is up (or down again) - purely informational.
     P2pState { direct: bool, rtt_ms: u32 },
-    /// The video path lost data, please send a full frame.
+    /// One 20 ms packet of speech: mono, 24 kHz, IMA-ADPCM. Travels in both
+    /// directions inside the same encrypted channel as everything else.
+    Audio { seq: u32, data: Vec<u8> },    /// The video path lost data, please send a full frame.
     NeedKeyframe,
     Ping { ts: u64 },
     Pong { ts: u64 },
@@ -162,6 +164,7 @@ const T_FACK: u8 = 0x53;
 const T_P2P: u8 = 0x60;
 const T_P2PST: u8 = 0x61;
 const T_NEEDKEY: u8 = 0x62;
+const T_AUDIO: u8 = 0x70;
 const T_PING: u8 = 0x40;
 const T_PONG: u8 = 0x41;
 
@@ -179,6 +182,8 @@ pub const CHUNK: usize = 64 * 1024;
 pub const MAX_NAME: usize = 512;
 const MAX_MONITORS: usize = 32;
 const MAX_ADDRS: usize = 8;
+/// One speech packet is 243 bytes; anything much larger is not ours.
+pub const MAX_AUDIO: usize = 4096;
 
 /// Is this encoded message a video frame? The direct UDP path only carries
 /// those; everything else stays on the reliable relay channel.
@@ -373,7 +378,14 @@ pub fn encode(m: &Msg) -> Vec<u8> {
             v.push(if *direct { 1 } else { 0 });
             pu32(&mut v, *rtt_ms);
         }
-        Msg::NeedKeyframe => {
+        Msg::Audio { seq, data } => {
+            let n = data.len().min(MAX_AUDIO);
+            v.reserve(n + 12);
+            v.push(T_AUDIO);
+            pu32(&mut v, *seq);
+            pu32(&mut v, n as u32);
+            v.extend_from_slice(&data[..n]);
+        }        Msg::NeedKeyframe => {
             v.push(T_NEEDKEY);
         }
         Msg::Ping { ts } => {
@@ -607,7 +619,15 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
             rtt_ms: r.u32()?,
         }),
         T_NEEDKEY => Some(Msg::NeedKeyframe),
-        T_PING => Some(Msg::Ping { ts: r.u64()? }),
+        T_AUDIO => {
+            let seq = r.u32()?;
+            let n = r.u32()? as usize;
+            if n > MAX_AUDIO {
+                return None;
+            }
+            let data = r.take(n)?.to_vec();
+            Some(Msg::Audio { seq, data })
+        }        T_PING => Some(Msg::Ping { ts: r.u64()? }),
         T_PONG => Some(Msg::Pong { ts: r.u64()? }),
         _ => None,
     }

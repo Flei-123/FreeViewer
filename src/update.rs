@@ -93,7 +93,34 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Downloads the build and writes it next to the running exe (".new").
+/// Ordner fuer die frische Datei.
+///
+/// Am liebsten direkt neben der laufenden Exe - dann ist der Tausch ein
+/// simples Umbenennen. Liegt die Installation aber in "C:\Program Files",
+/// darf ein normaler Nutzer dort nicht schreiben (os error 5). Dann weichen
+/// wir in den Temp-Ordner aus; getauscht wird spaeter mit Rechten.
+fn staging() -> PathBuf {
+    if let Ok(cur) = std::env::current_exe() {
+        if let Some(dir) = cur.parent() {
+            let probe = dir.join(".fv-write-test");
+            if std::fs::write(&probe, b"x").is_ok() {
+                let _ = std::fs::remove_file(&probe);
+                return dir.to_path_buf();
+            }
+        }
+    }
+    let d = std::env::temp_dir().join("freeviewer-update");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Ist das ein "darfst du nicht"-Fehler?
+fn denied(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    s.contains("os error 5") || s.contains("Zugriff verweigert") || s.contains("Access is denied")
+}
+
+/// Downloads the build and writes it into the staging folder.
 pub fn download(rel: &Release) -> Result<PathBuf> {
     let bytes = fetch(&rel.url)?;
     if rel.size != 0 && bytes.len() as u64 != rel.size {
@@ -107,8 +134,7 @@ pub fn download(rel: &Release) -> Result<PathBuf> {
     if got != rel.sha256 {
         return Err(anyhow!("Pruefsumme falsch"));
     }
-    let cur = std::env::current_exe()?;
-    let tmp = cur.with_extension("new");
+    let tmp = staging().join(format!("freeviewer-{}.exe", rel.version));
     let _ = std::fs::remove_file(&tmp);
     std::fs::write(&tmp, &bytes)?;
     Ok(tmp)
@@ -117,15 +143,25 @@ pub fn download(rel: &Release) -> Result<PathBuf> {
 /// Puts the downloaded file in the place of the running one.
 pub fn swap(fresh: &Path) -> Result<PathBuf> {
     let cur = std::env::current_exe()?;
-    let old = cur.with_extension("old");
+    swap_into(fresh, &cur)?;
+    Ok(cur)
+}
+
+/// Legt `fresh` an die Stelle von `target`. Windows kann eine laufende Exe
+/// nicht ueberschreiben, aber umbenennen - danach ist der Platz frei.
+/// Kopiert wird, nicht umbenannt: die frische Datei kann auf einem anderen
+/// Laufwerk liegen.
+pub fn swap_into(fresh: &Path, target: &Path) -> Result<()> {
+    let old = target.with_extension("old");
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(&cur, &old).map_err(|e| anyhow!("Umbenennen fehlgeschlagen: {}", e))?;
-    if let Err(e) = std::fs::rename(fresh, &cur) {
-        // put the running binary back, otherwise the installation is broken
-        let _ = std::fs::rename(&old, &cur);
+    std::fs::rename(target, &old).map_err(|e| anyhow!("Umbenennen fehlgeschlagen: {}", e))?;
+    if let Err(e) = std::fs::copy(fresh, target) {
+        // die laufende Installation wieder herstellen, sonst ist alles kaputt
+        let _ = std::fs::rename(&old, target);
         return Err(anyhow!("Ersetzen fehlgeschlagen: {}", e));
     }
-    Ok(cur)
+    let _ = std::fs::remove_file(fresh);
+    Ok(())
 }
 
 /// Removes the leftover of a previous update (called at every start).
@@ -148,10 +184,105 @@ pub fn restart_into(exe: &Path) -> ! {
 }
 
 /// Download + verify + swap + restart.
+///
+/// Liegt FreeViewer in einem geschuetzten Ordner ("C:\Program Files"), macht
+/// den Tausch ein kurzer Helfer mit Administrator-Rechten - gestartet aus der
+/// FRISCHEN Datei, damit auch alte Staende diesen Weg nehmen koennen.
 pub fn install(rel: &Release) -> Result<()> {
     let fresh = download(rel)?;
-    let target = swap(&fresh)?;
-    restart_into(&target);
+    let target = std::env::current_exe()?;
+    match swap_into(&fresh, &target) {
+        Ok(()) => restart_into(&target),
+        Err(e) if denied(&e) => {
+            elevated_swap(&fresh, &target)?;
+            std::thread::sleep(Duration::from_millis(300));
+            std::process::exit(0);
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Startet die frische Exe mit Administrator-Rechten, damit sie sich selbst
+/// an die richtige Stelle legt.
+#[cfg(windows)]
+pub fn elevated_swap(fresh: &Path, target: &Path) -> Result<()> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let exe = wide(&fresh.to_string_lossy());
+    let args = format!(
+        "--apply-update \"{}\" \"{}\" {}",
+        fresh.display(),
+        target.display(),
+        std::process::id()
+    );
+    let params = wide(&args);
+    let r = unsafe {
+        ShellExecuteW(
+            HWND::default(),
+            w!("runas"),
+            PCWSTR(exe.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "FreeViewer liegt in einem geschuetzten Ordner - fuer das Update werden Administrator-Rechte gebraucht"
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn elevated_swap(_fresh: &Path, _target: &Path) -> Result<()> {
+    Err(anyhow!("nur unter Windows"))
+}
+
+/// `freeviewer --apply-update <frisch> <ziel> <pid>`
+///
+/// Laeuft mit Administrator-Rechten: tauscht die Datei, startet den Dienst neu
+/// und holt das Fenster als normaler Nutzer zurueck (ueber den Explorer, damit
+/// die App nicht dauerhaft erhoehte Rechte behaelt).
+pub fn apply_update(fresh: &Path, target: &Path, pid: u32) -> Result<()> {
+    // dem Aufrufer einen Moment geben, sich zu beenden
+    std::thread::sleep(Duration::from_millis(600));
+    let _ = pid;
+    let mut last: Option<anyhow::Error> = None;
+    for _ in 0..10 {
+        match swap_into(fresh, target) {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }
+    }
+    if let Some(e) = last {
+        return Err(e);
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("sc")
+            .args(["stop", crate::service::SERVICE_NAME])
+            .output();
+        std::thread::sleep(Duration::from_millis(800));
+        let _ = std::process::Command::new("sc")
+            .args(["start", crate::service::SERVICE_NAME])
+            .output();
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(target.as_os_str())
+            .spawn();
+    }
+    Ok(())
 }
 
 /// True while a session is running - never interrupt that for an update.

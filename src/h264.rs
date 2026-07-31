@@ -820,6 +820,10 @@ mod stub {
         pub fn size(&self) -> (u32, u32) {
             (0, 0)
         }
+        /// Breite, Hoehe, Zeilenabstand - wie beim echten Dekodierer.
+        pub fn raw_size(&self) -> (u32, u32, usize) {
+            (0, 0, 0)
+        }
         pub fn decode(&mut self, _au: &[u8], _rgba: &mut Vec<u8>) -> Result<Option<(u32, u32)>> {
             Ok(None)
         }
