@@ -391,7 +391,14 @@ fn named_key(code: u32) -> Option<enigo::Key> {
         proto::KEY_END => Key::End,
         proto::KEY_PAGEUP => Key::PageUp,
         proto::KEY_PAGEDOWN => Key::PageDown,
+        // Der Mac hat keine Einfg-Taste, deshalb kennt enigo dort auch kein
+        // Key::Insert. Auf macOS schicken wir stattdessen den rohen Tastencode
+        // 0x72 (Help/Insert) - die Taste existiert im Tastaturlayout, nur nicht
+        // als benannte Variante.
+        #[cfg(not(target_os = "macos"))]
         proto::KEY_INSERT => Key::Insert,
+        #[cfg(target_os = "macos")]
+        proto::KEY_INSERT => Key::Other(0x72),
         proto::KEY_SPACE => Key::Space,
         proto::KEY_SHIFT => Key::Shift,
         proto::KEY_CTRL => Key::Control,
