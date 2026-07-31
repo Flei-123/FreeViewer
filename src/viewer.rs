@@ -1,6 +1,6 @@
 //! Viewer side: connect to a remote FreeViewer host through the relay.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,20 +65,38 @@ fn clipboard_worker(shared: Arc<Shared>) {
     while shared.connected.load(Ordering::Relaxed) {
         let incoming = shared.clip_in.lock().unwrap().take();
         if let Some(text) = incoming {
-            clip.set(&text);
+            if shared.clip_on.load(Ordering::Relaxed) { clip.set(&text); }
         }
-        if let Some(text) = clip.poll() {
+        if let Some(text) = clip.poll().filter(|_| shared.clip_on.load(Ordering::Relaxed)) {
             shared.send_input(Msg::Clipboard { text });
         }
         std::thread::sleep(Duration::from_millis(150));
     }
 }
 
+/// How this viewer wants to get in.
+#[derive(Clone, Debug)]
+pub enum Auth {
+    /// classic: the session password of the host
+    Password(String),
+    /// no password - the person over there has to allow the session
+    Ask,
+}
+
 pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
+    run_viewer_auth(shared, id, Auth::Password(password)).await
+}
+
+/// Knock instead of unlocking: the host shows a dialog and decides.
+pub async fn run_viewer_ask(shared: Arc<Shared>, id: String) {
+    run_viewer_auth(shared, id, Auth::Ask).await
+}
+
+pub async fn run_viewer_auth(shared: Arc<Shared>, id: String, auth: Auth) {
     shared.connecting.store(true, Ordering::Relaxed);
     shared.set_viewer_status(format!("Verbinde mit {} ...", id));
 
-    let result = viewer_once(&shared, &id, &password).await;
+    let result = viewer_once(&shared, &id, &auth).await;
 
     shared.connected.store(false, Ordering::Relaxed);
     shared.connecting.store(false, Ordering::Relaxed);
@@ -95,7 +113,7 @@ pub async fn run_viewer(shared: Arc<Shared>, id: String, password: String) {
     }
 }
 
-async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<()> {
+async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> {
     let ws = net::connect(&shared.relay_url).await?;
     let (mut sink, mut stream) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<WsMsg>();
@@ -120,6 +138,8 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
     let mut win_frames = 0u32;
     let mut win_bytes = 0usize;
     let mut ping_task: Option<tokio::task::JoinHandle<()>> = None;
+    // voice link of this session (dropped when the session ends)
+    let mut voice: Option<crate::audio::Voice> = None;
     // H.264 runs on its own thread: the decoder is a COM object (not Send)
     // and decoding must never stall the socket.
     let mut video: Option<VideoPipe> = None;
@@ -174,16 +194,35 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                         let mut salt = [0u8; 16];
                         salt.copy_from_slice(&data[33..49]);
 
-                        let pw_key = crypto::password_key(password, &salt);
-                        let proof = crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
                         let key = crypto::session_key(&kp.secret, &host_pub, &salt);
                         cipher = Some(Arc::new(Mutex::new(Cipher::new(&key, false))));
                         session_key = Some(key);
+                        let code = crypto::session_code(&key);
+                        *shared.session_code.lock().unwrap() = code.clone();
 
-                        let mut out = Vec::with_capacity(33);
-                        out.push(crypto::TAG_PROOF);
-                        out.extend_from_slice(&proof);
-                        tx.send(WsMsg::Binary(out.into()))?;
+                        match auth {
+                            Auth::Password(password) => {
+                                let pw_key = crypto::password_key(password, &salt);
+                                let proof =
+                                    crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
+                                let mut out = Vec::with_capacity(33);
+                                out.push(crypto::TAG_PROOF);
+                                out.extend_from_slice(&proof);
+                                tx.send(WsMsg::Binary(out.into()))?;
+                            }
+                            Auth::Ask => {
+                                // tell them who is knocking, then wait
+                                let me = shared.device_name.lock().unwrap().clone();
+                                let mut out = Vec::with_capacity(1 + me.len());
+                                out.push(crypto::TAG_ASK);
+                                out.extend_from_slice(me.as_bytes());
+                                tx.send(WsMsg::Binary(out.into()))?;
+                                shared.set_viewer_status(format!(
+                                    "Warte auf Bestaetigung ... (Code {})",
+                                    code
+                                ));
+                            }
+                        }
                     }
                     crypto::TAG_OK => {
                         let c = match cipher.as_ref() {
@@ -232,8 +271,10 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
                             match crate::p2p::P2p::new(session_key.unwrap_or([0u8; 32]), false, stop) {
                                 Ok(p) => {
-                                    let sink = pipe.sender();
+                                    let gate = pipe.gate();
+                                    let gate_loss = gate.clone();
                                     let sh_v = shared.clone();
+                                    let sh_loss = shared.clone();
                                     let sh_off = shared.clone();
                                     let sh_state = shared.clone();
                                     let p_off = p.clone();
@@ -253,20 +294,26 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                         tokio::spawn(p_punch.punch_loop(move |direct, _rtt| {
                                             sh_state.direct.store(direct, Ordering::Relaxed);
                                         }));
-                                        tokio::spawn(p_off.recv_loop(move |plain| {
-                                            sh_v.video_bytes
-                                                .fetch_add(plain.len() as u64, Ordering::Relaxed);
-                                            if let Some(Msg::Video {
-                                                width,
-                                                height,
-                                                key,
-                                                data,
-                                            }) = decode(&plain)
-                                            {
-                                                sh_v.udp_frames.fetch_add(1, Ordering::Relaxed);
-                                                let _ = sink.send((width, height, key, data));
-                                            }
-                                        }));
+                                        tokio::spawn(p_off.recv_loop(
+                                            move |plain| {
+                                                sh_v.video_bytes.fetch_add(
+                                                    plain.len() as u64,
+                                                    Ordering::Relaxed,
+                                                );
+                                                if let Some(Msg::Video {
+                                                    width,
+                                                    height,
+                                                    key,
+                                                    data,
+                                                }) = decode(&plain)
+                                                {
+                                                    sh_v.udp_frames
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    gate.push(&sh_v, width, height, key, data);
+                                                }
+                                            },
+                                            move || gate_loss.lost(&sh_loss),
+                                        ));
                                     });
                                     p2p = Some(p);
                                 }
@@ -276,6 +323,16 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }
                         }
 
+                        // voice link: microphone out, speaker in
+                        {
+                            let sh = shared.clone();
+                            let vsend: Arc<dyn Fn(Msg) + Send + Sync> =
+                                Arc::new(move |m: Msg| sh.send_input(m));
+                            voice = Some(crate::audio::Voice::start(
+                                shared.voice.clone(),
+                                vsend,
+                            ));
+                        }
                         // clipboard sync (own thread, clipboard handles are not Send)
                         let sh_clip = shared.clone();
                         std::thread::spawn(move || clipboard_worker(sh_clip));
@@ -295,7 +352,12 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                             }
                         }));
                     }
-                    crypto::TAG_FAIL => break Err(anyhow!("Passwort falsch")),
+                    crypto::TAG_FAIL => {
+                        break Err(anyhow!(match auth {
+                            Auth::Password(_) => "Passwort falsch",
+                            Auth::Ask => "Anfrage abgelehnt oder nicht beantwortet",
+                        }))
+                    }
                     crypto::TAG_DATA => {
                         let plain = {
                             let c = match cipher.as_ref() {
@@ -315,7 +377,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
                                 *shared.monitors.lock().unwrap() = list;
                                 shared.active_monitor.store(active, Ordering::Relaxed);
                             }
-                            Some(Msg::Cursor { x, y, visible }) => {
+                            Some(Msg::Audio { seq, data }) => {
+                                if let Some(v) = voice.as_ref() {
+                                    v.feed(seq, &data);
+                                }
+                            }                            Some(Msg::Cursor { x, y, visible }) => {
                                 *shared.remote_cursor.lock().unwrap() = (x, y, visible);
                             }
                             Some(Msg::Clipboard { text }) => {
@@ -441,17 +507,24 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, password: &str) -> Result<(
 struct VideoPipe {
     tx: std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)>,
     pending: Arc<std::sync::atomic::AtomicI64>,
-    /// true while we wait for the keyframe that restarts the stream
-    resyncing: bool,
+    /// true while we wait for the keyframe that restarts the stream. Shared,
+    /// because the direct UDP path feeds the very same decoder from another
+    /// task and must not slip broken pictures past the gate.
+    resyncing: Arc<AtomicBool>,
 }
 
 /// More than this many undecoded pictures means the viewer cannot keep up.
 const MAX_BACKLOG: i64 = 24;
 
 impl VideoPipe {
-    /// A clone of the input side, for the direct UDP path.
-    fn sender(&self) -> std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)> {
-        self.tx.clone()
+    /// Everything the direct UDP path needs to feed the same decoder through
+    /// the same gate.
+    fn gate(&self) -> VideoGate {
+        VideoGate {
+            tx: self.tx.clone(),
+            pending: self.pending.clone(),
+            resyncing: self.resyncing.clone(),
+        }
     }
 
     fn start(shared: Arc<Shared>) -> Self {
@@ -462,18 +535,42 @@ impl VideoPipe {
         Self {
             tx,
             pending,
-            resyncing: false,
+            resyncing: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn push(&mut self, shared: &Arc<Shared>, w: u32, h: u32, key: bool, data: Vec<u8>) {
-        if self.resyncing && !key {
+        self.gate().push(shared, w, h, key, data);
+    }
+}
+
+/// The gate in front of the decoder thread. Both transports (relay WebSocket
+/// and direct UDP) hand their pictures in here, so a resync started by one of
+/// them really does stop the other one from pushing broken frames.
+#[derive(Clone)]
+struct VideoGate {
+    tx: std::sync::mpsc::Sender<(u32, u32, bool, Vec<u8>)>,
+    pending: Arc<std::sync::atomic::AtomicI64>,
+    resyncing: Arc<AtomicBool>,
+}
+
+impl VideoGate {
+    /// Something ate a picture - stop decoding until a keyframe arrives.
+    fn lost(&self, shared: &Arc<Shared>) {
+        if !self.resyncing.swap(true, Ordering::Relaxed) {
+            shared.send_input(Msg::NeedKeyframe);
+        }
+    }
+
+    fn push(&self, shared: &Arc<Shared>, w: u32, h: u32, key: bool, data: Vec<u8>) {
+        if self.resyncing.load(Ordering::Relaxed) && !key {
+            // still waiting for the restart - a P frame on a broken reference
+            // chain would paint garbage, so it goes in the bin
             return;
         }
-        self.resyncing = false;
+        self.resyncing.store(false, Ordering::Relaxed);
         if self.pending.load(Ordering::Relaxed) > MAX_BACKLOG && !key {
-            self.resyncing = true;
-            shared.send_input(Msg::NeedKeyframe);
+            self.lost(shared);
             return;
         }
         self.pending.fetch_add(1, Ordering::Relaxed);

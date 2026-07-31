@@ -41,6 +41,20 @@ pub struct Partner {
     /// Encrypted password (hex), only present if the user asked for it.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Ordner/Gruppe, in der das Geraet steht. Leer = "Alle".
+    #[serde(default)]
+    pub group: String,
+    /// Freie Notiz zum Geraet.
+    #[serde(default)]
+    pub note: String,
+    /// Wann dieser Eintrag zuletzt geaendert wurde (unix Sekunden).
+    /// Der Abgleich mit dem Konto entscheidet damit, welche Fassung neuer ist.
+    #[serde(default)]
+    pub at: u64,
+    /// Geloescht - bleibt als Grabstein liegen, damit ein auf einem PC
+    /// entferntes Geraet nicht beim naechsten Abgleich wieder auftaucht.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 impl Partner {
@@ -108,20 +122,61 @@ pub struct Book {
 const MAX_ENTRIES: usize = 200;
 
 impl Book {
-    fn path() -> std::path::PathBuf {
+    pub(crate) fn path() -> std::path::PathBuf {
         crate::ident::config_dir().join("partners.json")
     }
 
+    /// Die Sicherheitskopie der letzten Fassung.
+    fn backup_path() -> std::path::PathBuf {
+        crate::ident::config_dir().join("partners.bak.json")
+    }
+
+    /// Wie viele echte (nicht geloeschte) Eintraege stehen gerade in der Datei?
+    /// Wird gebraucht, um zu erkennen, dass ein Schreibvorgang eine gefuellte
+    /// Liste durch eine leere ersetzen wuerde.
+    fn on_disk() -> Option<Self> {
+        let s = std::fs::read_to_string(Self::path()).ok()?;
+        serde_json::from_str(&s).ok()
+    }
+
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+        // Kaputte Datei? Dann lieber die Sicherungskopie als eine leere Liste -
+        // ein Adressbuch verschwindet nicht, weil ein Byte falsch steht.
+        if let Some(b) = Self::on_disk() {
+            if !b.entries.is_empty() {
+                return b;
+            }
         }
+        if let Ok(s) = std::fs::read_to_string(Self::backup_path()) {
+            if let Ok(b) = serde_json::from_str::<Self>(&s) {
+                if !b.entries.is_empty() {
+                    return b;
+                }
+            }
+        }
+        Self::on_disk().unwrap_or_default()
     }
 
     pub fn save(&self) {
         let dir = crate::ident::config_dir();
         let _ = std::fs::create_dir_all(&dir);
+
+        // NIE eine gefuellte Liste durch eine leere ersetzen. Loeschen laeuft
+        // ueber Grabsteine (deleted = true), die Eintraege bleiben also immer
+        // stehen - eine leere Liste kann daher nur ein Fehler sein.
+        if self.entries.is_empty() {
+            if let Some(old) = Self::on_disk() {
+                if !old.entries.is_empty() {
+                    return;
+                }
+            }
+        }
+
+        // Vorherige Fassung als Sicherungskopie behalten.
+        if std::fs::metadata(Self::path()).is_ok() {
+            let _ = std::fs::copy(Self::path(), Self::backup_path());
+        }
+
         if let Ok(s) = serde_json::to_string_pretty(self) {
             let tmp = dir.join("partners.json.tmp");
             if std::fs::write(&tmp, s).is_ok() {
@@ -130,23 +185,33 @@ impl Book {
         }
     }
 
+    /// Alle sichtbaren Eintraege (ohne Grabsteine).
+    pub fn live(&self) -> impl Iterator<Item = &Partner> {
+        self.entries.iter().filter(|p| !p.deleted)
+    }
+
     /// Favourites first, then most recently used.
     pub fn sorted(&self) -> Vec<Partner> {
-        let mut v = self.entries.clone();
+        let mut v: Vec<Partner> = self.live().cloned().collect();
         v.sort_by(|a, b| b.favorite.cmp(&a.favorite).then(b.last.cmp(&a.last)));
         v
     }
 
     pub fn get(&self, id: &str) -> Option<&Partner> {
-        self.entries.iter().find(|p| p.id == id)
+        self.entries.iter().find(|p| p.id == id && !p.deleted)
     }
 
     fn entry(&mut self, id: &str) -> &mut Partner {
         if let Some(i) = self.entries.iter().position(|p| p.id == id) {
+            let e = &mut self.entries[i];
+            // wer einen Eintrag anfasst, holt ihn zurueck
+            e.deleted = false;
+            e.at = now();
             return &mut self.entries[i];
         }
         self.entries.push(Partner {
             id: id.to_string(),
+            at: now(),
             ..Default::default()
         });
         let n = self.entries.len() - 1;
@@ -196,9 +261,51 @@ impl Book {
         self.save();
     }
 
+    /// Entfernen heisst: als geloescht markieren. Der Grabstein wandert beim
+    /// naechsten Abgleich zum Konto und raeumt das Geraet auch auf den anderen
+    /// Rechnern weg. Nach 60 Tagen faellt er beim Aufraeumen selbst heraus.
     pub fn remove(&mut self, id: &str) {
-        self.entries.retain(|p| p.id != id);
+        if let Some(e) = self.entries.iter_mut().find(|p| p.id == id) {
+            e.deleted = true;
+            e.at = now();
+            e.secret = None;
+            e.favorite = false;
+        }
         self.save();
+    }
+
+    /// Ordner setzen (leer = kein Ordner).
+    pub fn set_group(&mut self, id: &str, group: &str) {
+        self.entry(id).group = group.trim().to_string();
+        self.save();
+    }
+
+    /// Notiz setzen.
+    pub fn set_note(&mut self, id: &str, note: &str) {
+        self.entry(id).note = note.trim().to_string();
+        self.save();
+    }
+
+    /// Passwort hinterlegen (None loescht es).
+    pub fn set_password(&mut self, id: &str, password: Option<&str>) {
+        let sealed = match password {
+            Some(pw) if !pw.is_empty() => protect(pw),
+            _ => None,
+        };
+        self.entry(id).secret = sealed;
+        self.save();
+    }
+
+    /// Alle vorhandenen Ordner, alphabetisch.
+    pub fn groups(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .live()
+            .map(|p| p.group.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// Decrypted password, if one was stored.
@@ -207,14 +314,125 @@ impl Book {
     }
 
     fn trim(&mut self) {
+        // alte Grabsteine zuerst - die braucht nach zwei Monaten niemand mehr
+        let cut = now().saturating_sub(60 * 24 * 3600);
+        self.entries.retain(|p| !p.deleted || p.at > cut);
         if self.entries.len() <= MAX_ENTRIES {
             return;
         }
         let mut v = std::mem::take(&mut self.entries);
-        v.sort_by(|a, b| b.favorite.cmp(&a.favorite).then(b.last.cmp(&a.last)));
-        v.truncate(MAX_ENTRIES);
+        v.sort_by(|a, b| {
+            a.deleted
+                .cmp(&b.deleted)
+                .then(b.favorite.cmp(&a.favorite))
+                .then(b.last.cmp(&a.last))
+        });
+        v.drain(MAX_ENTRIES..);
         self.entries = v;
     }
+
+    // ------------------------------------------------------ Konto-Abgleich
+
+    /// Was zum Konto hochgeht: alles ausser den gespeicherten Passwoertern.
+    /// Die sind mit der Kennung DIESES Rechners verschluesselt und waeren
+    /// woanders ohnehin nicht zu entschluesseln - also bleiben sie hier.
+    pub fn to_sync(&self) -> Vec<SyncDevice> {
+        self.entries
+            .iter()
+            .map(|p| SyncDevice {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                group: p.group.clone(),
+                note: p.note.clone(),
+                favorite: p.favorite,
+                last: p.last,
+                count: p.count,
+                seconds: p.seconds,
+                at: if p.at == 0 { p.last } else { p.at },
+                deleted: p.deleted,
+            })
+            .collect()
+    }
+
+    /// Uebernimmt die Fassung des Kontos, wo sie neuer ist. Gibt zurueck, ob
+    /// sich lokal etwas geaendert hat.
+    pub fn merge_remote(&mut self, remote: &[SyncDevice]) -> bool {
+        let mut changed = false;
+        for r in remote {
+            if r.id.is_empty() {
+                continue;
+            }
+            match self.entries.iter_mut().find(|p| p.id == r.id) {
+                Some(mine) => {
+                    let mine_at = if mine.at == 0 { mine.last } else { mine.at };
+                    if r.at <= mine_at {
+                        continue;
+                    }
+                    mine.name = r.name.clone();
+                    mine.group = r.group.clone();
+                    mine.note = r.note.clone();
+                    mine.favorite = r.favorite;
+                    mine.last = mine.last.max(r.last);
+                    mine.count = mine.count.max(r.count);
+                    mine.seconds = mine.seconds.max(r.seconds);
+                    mine.at = r.at;
+                    if r.deleted != mine.deleted {
+                        mine.deleted = r.deleted;
+                        if r.deleted {
+                            mine.secret = None;
+                        }
+                    }
+                    changed = true;
+                }
+                None => {
+                    self.entries.push(Partner {
+                        id: r.id.clone(),
+                        name: r.name.clone(),
+                        group: r.group.clone(),
+                        note: r.note.clone(),
+                        favorite: r.favorite,
+                        last: r.last,
+                        count: r.count,
+                        seconds: r.seconds,
+                        at: r.at,
+                        deleted: r.deleted,
+                        secret: None,
+                    });
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.trim();
+            self.save();
+        }
+        changed
+    }
+}
+
+/// Ein Geraet, wie es zwischen Rechner und Konto hin und her geht.
+/// Bewusst ohne Passwortfeld - siehe `Book::to_sync`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SyncDevice {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub last: u64,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub seconds: u64,
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 // ------------------------------------------------------------- encryption --
@@ -254,6 +472,147 @@ fn unprotect(stored: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eigener Ordner nur fuer diesen Test.
+    fn eigener_ordner(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("fv-book-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        crate::ident::set_test_config_dir(d.clone());
+        d
+    }
+
+    /// Der Ausloeser des Datenverlusts vom 31.07.2026: ein Testlauf hat ueber
+    /// merge_remote() -> save() das echte Adressbuch ueberschrieben.
+    #[test]
+    fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
+        eigener_ordner("isoliert");
+        let mut b = Book::default();
+        b.merge_remote(&[dev("111111111", "Neu", 200)]);
+        assert!(Book::path().starts_with(std::env::temp_dir()));
+        if let Some(m) = crate::ident::machine_config_dir() {
+            assert!(!Book::path().starts_with(m));
+        }
+        assert!(!Book::path().starts_with(crate::ident::user_config_dir()));
+    }
+
+    /// Eine gefuellte Liste darf nie durch eine leere ersetzt werden.
+    #[test]
+    fn eine_leere_liste_ueberschreibt_keine_gefuellte() {
+        eigener_ordner("nichtleeren");
+        let mut voll = Book::default();
+        voll.entries = vec![Partner {
+            id: "123456789".into(),
+            name: "Buero-PC".into(),
+            at: 100,
+            ..Default::default()
+        }];
+        voll.save();
+        Book::default().save();
+        let wieder = Book::load();
+        assert_eq!(wieder.sorted().len(), 1);
+        assert_eq!(wieder.sorted()[0].name, "Buero-PC");
+    }
+
+    /// Kaputte Datei -> die Sicherungskopie rettet die Liste.
+    #[test]
+    fn eine_kaputte_datei_faellt_auf_die_sicherung_zurueck() {
+        eigener_ordner("sicherung");
+        let mut b = Book::default();
+        b.entries = vec![Partner {
+            id: "222222222".into(),
+            name: "Laptop".into(),
+            at: 1,
+            ..Default::default()
+        }];
+        b.save();
+        // zweiter Schreibvorgang legt die Sicherungskopie an
+        b.rename("222222222", "Laptop 2");
+        std::fs::write(Book::path(), b"{ kaputt").unwrap();
+        let wieder = Book::load();
+        assert_eq!(wieder.sorted().len(), 1);
+        assert_eq!(wieder.sorted()[0].id, "222222222");
+    }
+
+    fn dev(id: &str, name: &str, at: u64) -> SyncDevice {
+        SyncDevice {
+            id: id.into(),
+            name: name.into(),
+            at,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn der_neuere_eintrag_gewinnt() {
+        let mut b = Book::default();
+        b.entries = vec![Partner {
+            id: "111111111".into(),
+            name: "Alt".into(),
+            at: 100,
+            ..Default::default()
+        }];
+        // aelter als unserer: bleibt liegen
+        assert!(!b.merge_remote(&[dev("111111111", "Noch aelter", 50)]));
+        assert_eq!(b.get("111111111").unwrap().name, "Alt");
+        // neuer: wird uebernommen
+        assert!(b.merge_remote(&[dev("111111111", "Neu", 200)]));
+        assert_eq!(b.get("111111111").unwrap().name, "Neu");
+    }
+
+    #[test]
+    fn ein_unbekanntes_geraet_kommt_dazu() {
+        let mut b = Book::default();
+        assert!(b.merge_remote(&[dev("222222222", "Laptop", 10)]));
+        assert_eq!(b.sorted().len(), 1);
+        assert_eq!(b.sorted()[0].name, "Laptop");
+    }
+
+    #[test]
+    fn ein_grabstein_raeumt_auch_hier_auf() {
+        let mut b = Book::default();
+        b.entries = vec![Partner {
+            id: "333333333".into(),
+            name: "Weg damit".into(),
+            at: now().saturating_sub(60),
+            ..Default::default()
+        }];
+        // frischer Grabstein - ein uralter faellt beim Aufraeumen heraus
+        let mut tot = dev("333333333", "", now());
+        tot.deleted = true;
+        assert!(b.merge_remote(&[tot]));
+        assert!(b.get("333333333").is_none());
+        assert_eq!(b.sorted().len(), 0);
+        // der Grabstein selbst bleibt, sonst kaeme das Geraet zurueck
+        assert_eq!(b.to_sync().len(), 1);
+        assert!(b.to_sync()[0].deleted);
+    }
+
+    #[test]
+    fn entfernen_erzeugt_einen_grabstein_statt_einer_luecke() {
+        let mut b = Book::default();
+        b.entries = vec![Partner {
+            id: "444444444".into(),
+            name: "Tschuess".into(),
+            at: 1,
+            ..Default::default()
+        }];
+        b.remove("444444444");
+        assert!(b.get("444444444").is_none());
+        let s = b.to_sync();
+        assert_eq!(s.len(), 1);
+        assert!(s[0].deleted);
+        assert!(s[0].at > 1);
+    }
+
+    #[test]
+    fn passwoerter_gehen_nie_zum_konto() {
+        let mut b = Book::default();
+        b.started("555555555", "geheim", true);
+        assert!(b.password("555555555").is_some());
+        let json = serde_json::to_string(&b.to_sync()).unwrap();
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("geheim"));
+    }
 
     #[test]
     fn ids_are_grouped_for_reading() {

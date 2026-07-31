@@ -31,7 +31,23 @@ pub const TAG_HELLO_ACK: u8 = 0x02;
 pub const TAG_PROOF: u8 = 0x03;
 pub const TAG_OK: u8 = 0x04;
 pub const TAG_FAIL: u8 = 0x05;
+/// The viewer has no password and asks the person at the other end to allow
+/// the session by hand (TeamViewer calls this "Bestaetigung anfordern").
+pub const TAG_ASK: u8 = 0x06;
 pub const TAG_DATA: u8 = 0x10;
+
+/// Four digits derived from the session key. Both sides show the same number,
+/// so a connection made without a password can still be verified by reading
+/// it out loud - the relay cannot produce it without the private keys.
+pub fn session_code(key: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"freeviewer-v1 code");
+    h.update(key);
+    let d = h.finalize();
+    let n = u32::from_be_bytes([d[0], d[1], d[2], d[3]]) % 10_000;
+    format!("{:04}", n)
+}
 
 pub fn random_bytes(n: usize) -> Vec<u8> {
     let mut v = vec![0u8; n];
