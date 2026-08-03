@@ -62,6 +62,16 @@ pub fn forget() {
 
 /// `wss://host/fv/ws` -> `https://host/fv/account/<was>`
 pub fn url(relay_url: &str, what: &str) -> String {
+    format!("{}/account/{}", base_url(relay_url), what)
+}
+
+/// `wss://host/fv/ws` -> `https://host/fv/<was>` - OHNE /account/ dazwischen.
+/// Die Einrichtungs-Endpunkte (/fv/setup/*) haengen direkt an der Basis.
+pub fn plain_url(relay_url: &str, what: &str) -> String {
+    format!("{}/{}", base_url(relay_url), what)
+}
+
+fn base_url(relay_url: &str) -> String {
     let http = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{}", rest)
     } else if let Some(rest) = relay_url.strip_prefix("ws://") {
@@ -69,11 +79,10 @@ pub fn url(relay_url: &str, what: &str) -> String {
     } else {
         relay_url.to_string()
     };
-    let base = match http.rfind("/ws") {
+    match http.rfind("/ws") {
         Some(i) if i + 3 == http.len() => http[..i].to_string(),
         _ => http.trim_end_matches('/').to_string(),
-    };
-    format!("{}/account/{}", base, what)
+    }
 }
 
 #[derive(Serialize)]
@@ -355,7 +364,7 @@ pub fn setup_create(
     password: &str,
     name_hint: &str,
 ) -> Result<(String, String, String)> {
-    let target = format!("{}?token={}", url(relay_url, "setup/create"), urlenc(token));
+    let target = format!("{}?token={}", plain_url(relay_url, "setup/create"), urlenc(token));
     let body = serde_json::to_string(&SetupCreateReq { password, name_hint })
         .map_err(|e| anyhow!("{}", e))?;
     let (status, text) = post_json(&target, &body)?;
@@ -376,7 +385,7 @@ pub fn setup_create(
 
 /// Posteingang des Besitzers: wartende Codes + frisch eingerichtete Geraete.
 pub fn setup_inbox(relay_url: &str, token: &str) -> Result<(Vec<SetupPending>, Vec<SetupClaimed>)> {
-    let target = format!("{}?token={}", url(relay_url, "setup/inbox"), urlenc(token));
+    let target = format!("{}?token={}", plain_url(relay_url, "setup/inbox"), urlenc(token));
     let (status, text) = get_json(&target)?;
     if status == 401 {
         return Err(anyhow!("nicht angemeldet"));
@@ -396,7 +405,7 @@ pub fn setup_inbox(relay_url: &str, token: &str) -> Result<(Vec<SetupPending>, V
 pub fn setup_claim(relay_url: &str, code: &str, id: &str, name: &str) -> Result<SetupClaimReply> {
     let body = serde_json::to_string(&SetupClaimReq { code, id, name })
         .map_err(|e| anyhow!("{}", e))?;
-    let (status, text) = post_json(&url(relay_url, "setup/claim"), &body)?;
+    let (status, text) = post_json(&plain_url(relay_url, "setup/claim"), &body)?;
     let r: SetupClaimReply = serde_json::from_str(&text).unwrap_or_default();
     if status != 200 {
         let msg = if r.error.is_empty() {
@@ -465,6 +474,22 @@ pub fn setup_inbox_async(
         *out.lock().unwrap() = Some(res);
         busy.store(false, Ordering::SeqCst);
     });
+}
+
+/// URLs: Konto-Endpunkte unter /account/, Einrichtung direkt an der Basis.
+#[cfg(test)]
+mod url_tests {
+    #[test]
+    fn setup_urls_liegen_nicht_unter_account() {
+        assert_eq!(
+            super::plain_url("wss://freeviewer.fleitec.com/fv/ws", "setup/create"),
+            "https://freeviewer.fleitec.com/fv/setup/create"
+        );
+        assert_eq!(
+            super::url("wss://freeviewer.fleitec.com/fv/ws", "login"),
+            "https://freeviewer.fleitec.com/fv/account/login"
+        );
+    }
 }
 
 #[cfg(test)]
