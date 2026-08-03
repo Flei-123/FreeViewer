@@ -824,7 +824,20 @@ fn main() -> eframe::Result<()> {
                         "about" => SettingsTab::About,
                         _ => SettingsTab::General,
                     };
-                }                app.shot = Some(std::path::PathBuf::from(path));
+                }
+                if std::env::args().any(|a| a == "--meetshot") {
+                    // Das eigene Meeting-Fenster oeffnen und DAVON das Bild:
+                    // so laesst sich der Zoom-Ablauf fotografieren.
+                    app.meet_win_open(meet::Meeting {
+                        id: "482-913-770".to_string(),
+                        titel: "Fenster-Test".to_string(),
+                        passwort: "test1234".to_string(),
+                        termin_text: String::new(),
+                    });
+                    app.meet_shot = Some(std::path::PathBuf::from(path));
+                } else {
+                    app.shot = Some(std::path::PathBuf::from(path));
+                }
                 Ok(Box::new(app))
             }),
         );
@@ -921,6 +934,11 @@ struct App {
     presence: Arc<presence::Watch>,
     /// --shot: wohin das Bild der eigenen Oberflaeche geschrieben wird.
     shot: Option<std::path::PathBuf>,
+    /// --meetshot: dasselbe fuer das eigene Meeting-Fenster (Testhaken).
+    meet_shot: Option<std::path::PathBuf>,
+    /// Framezaehler und Scharfschaltung des Meetshots.
+    meet_shot_n: u32,
+    meet_shot_arm: u32,
     /// Gezeichnete Frames seit dem Start im --shot-Modus.
     /// Gewaehltes Aussehen (Vorlage, Akzent, Groesse, Rundung).
     look: theme::Appearance,
@@ -1037,6 +1055,9 @@ impl App {
             selected: None,
             presence: watch,
             shot: None,
+            meet_shot: None,
+            meet_shot_n: 0,
+            meet_shot_arm: 0,
             look: theme::load(),
             stab: SettingsTab::General,
             fb_bug: true,
@@ -5256,6 +5277,41 @@ impl eframe::App for App {
                         closed = true;
                     }
                     vctx.request_repaint_after(Duration::from_millis(150));
+                    // --meetshot: auf die Geraeteliste warten, dann aufnehmen.
+                    if let Some(path) = self.meet_shot.clone() {
+                        self.meet_shot_n += 1;
+                        let n = self.meet_shot_n;
+                        if self.meet_win.geraete_da && self.meet_shot_arm == 0 {
+                            self.meet_shot_arm = n;
+                        }
+                        let arm = self.meet_shot_arm;
+                        if arm > 0 && n == arm + 12 {
+                            vctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                                egui::UserData::default(),
+                            ));
+                        }
+                        if arm > 0 && n > arm + 12 {
+                            let img = vctx.input(|i| {
+                                i.events.iter().rev().find_map(|e| match e {
+                                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                                    _ => None,
+                                })
+                            });
+                            if let Some(img) = img {
+                                save_shot(&img, &path);
+                                std::process::exit(0);
+                            }
+                            if n > arm + 150 {
+                                eprintln!("MEETSHOT: kein Bild bekommen");
+                                std::process::exit(2);
+                            }
+                        }
+                        // Notaus, falls die Geraeteabfrage haengt.
+                        if n > 250 {
+                            eprintln!("MEETSHOT: Geraete kamen nie");
+                            std::process::exit(2);
+                        }
+                    }
                 },
             );
             if closed {
