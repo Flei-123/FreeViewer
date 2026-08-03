@@ -261,8 +261,8 @@ mod tests {
     #[test]
     fn online_url_is_derived_from_the_relay_url() {
         assert_eq!(
-            online_url("wss://jarvis.fleitec.com/fv/ws"),
-            "https://jarvis.fleitec.com/fv/online"
+            online_url("wss://freeviewer.fleitec.com/fv/ws"),
+            "https://freeviewer.fleitec.com/fv/online"
         );
         assert_eq!(
             online_url("ws://192.168.1.60:7180/fv/ws"),

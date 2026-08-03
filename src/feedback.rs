@@ -12,14 +12,14 @@ pub static STATE: AtomicU8 = AtomicU8::new(0);
 pub static MESSAGE: Mutex<String> = Mutex::new(String::new());
 
 fn url() -> String {
-    // aus wss://jarvis.fleitec.com/fv/ws wird https://jarvis.fleitec.com/fv-feedback
+    // aus wss://freeviewer.fleitec.com/fv/ws wird https://freeviewer.fleitec.com/fv-feedback
     let relay = std::env::var("FV_RELAY").unwrap_or_else(|_| crate::DEFAULT_RELAY.to_string());
     let host = relay
         .trim_start_matches("wss://")
         .trim_start_matches("ws://")
         .split('/')
         .next()
-        .unwrap_or("jarvis.fleitec.com")
+        .unwrap_or("freeviewer.fleitec.com")
         .to_string();
     let scheme = if relay.starts_with("ws://") { "http" } else { "https" };
     std::env::var("FV_FEEDBACK_URL").unwrap_or_else(|_| format!("{}://{}/fv-feedback", scheme, host))

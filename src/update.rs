@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::shared::Shared;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-const FEED: &str = "https://jarvis.fleitec.com/fv/version";
+const FEED: &str = "https://freeviewer.fleitec.com/fv/version";
 /// How often a running instance looks for a new build.
 const EVERY: Duration = Duration::from_secs(30 * 60);
 const MAX_BYTES: u64 = 256 * 1024 * 1024;

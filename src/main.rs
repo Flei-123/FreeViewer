@@ -49,7 +49,7 @@ use std::time::Duration;
 use proto::Msg;
 use shared::Shared;
 
-pub const DEFAULT_RELAY: &str = "wss://jarvis.fleitec.com/fv/ws";
+pub const DEFAULT_RELAY: &str = "wss://freeviewer.fleitec.com/fv/ws";
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 

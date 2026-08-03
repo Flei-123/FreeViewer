@@ -259,8 +259,8 @@ mod tests {
     #[test]
     fn die_adresse_kommt_vom_relay() {
         assert_eq!(
-            url("wss://jarvis.fleitec.com/fv/ws", "login"),
-            "https://jarvis.fleitec.com/fv/account/login"
+            url("wss://freeviewer.fleitec.com/fv/ws", "login"),
+            "https://freeviewer.fleitec.com/fv/account/login"
         );
         assert_eq!(
             url("ws://192.168.1.60:7180/fv/ws", "data"),
