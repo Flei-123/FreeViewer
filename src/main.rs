@@ -960,6 +960,8 @@ struct App {
     meet_loaded: bool,
     /// Beim Beitritt anbieten, dass andere diesen PC steuern duerfen.
     meet_offer_control: bool,
+    /// Das eigene Meet-Fenster (Zoom-Ablauf in einem separaten Viewport).
+    meet_win: MeetWin,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
     /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
     full: bool,
@@ -1060,6 +1062,7 @@ impl App {
             meet_err: Arc::new(std::sync::Mutex::new(String::new())),
             meet_loaded: false,
             meet_offer_control: true,
+            meet_win: MeetWin::default(),
             full: false,
             bar_x: 0.5,
             bar_w: 700.0,
@@ -1280,10 +1283,15 @@ impl App {
                 self.view = View::Meet;
                 self.meet_id = room.clone();
                 self.meet_pw = pass.clone();
-                let url = meet::join_url(&room, &pass);
-                if let Err(e) = meet::open_window(&url) {
-                    self.hint = format!("{}", e);
-                }
+                // Einladungslinks landen jetzt im eigenen Meeting-Fenster
+                // (Geraete waehlen, Einladung kopieren), nicht mehr sofort
+                // im Browser.
+                self.meet_win_open(meet::Meeting {
+                    id: room.clone(),
+                    titel: String::new(),
+                    passwort: pass.clone(),
+                    termin_text: String::new(),
+                });
             }
         }
     }
@@ -1938,7 +1946,9 @@ impl App {
                         Ok(m) => {
                             self.meet_id = m.id.clone();
                             self.meet_pw = m.passwort.clone();
-                            self.meet_last = Some(m);
+                            self.meet_last = Some(m.clone());
+                            // Sofort ins eigene Meeting-Fenster wechseln.
+                            self.meet_win_open(m);
                             self.hint = i18n::t("meet.created").to_string();
                             self.meet_loaded = false;
                         }
@@ -1973,15 +1983,7 @@ impl App {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ghost_button(ui, i18n::t("meet.join")).clicked() {
-                            let me = self.shared.my_id.lock().unwrap().clone();
-                            let url = if self.meet_offer_control {
-                                meet::join_url_with_id(&m.id, &m.passwort, &me)
-                            } else {
-                                meet::join_url(&m.id, &m.passwort)
-                            };
-                            if let Err(e) = meet::open_window(&url) {
-                                self.hint = format!("{}", e);
-                            }
+                            self.meet_win_open(m.clone());
                         }
                         ui.add_space(6.0);
                         if ghost_button(ui, i18n::t("meet.copy_invite")).clicked() {
@@ -2021,16 +2023,12 @@ impl App {
                     if id.is_empty() {
                         self.hint = i18n::t("meet.need_id").to_string();
                     } else {
-                        let me = self.shared.my_id.lock().unwrap().clone();
-                        let url = if self.meet_offer_control {
-                            meet::join_url_with_id(&id, &self.meet_pw, &me)
-                        } else {
-                            meet::join_url(&id, &self.meet_pw)
-                        };
-                        match meet::open_window(&url) {
-                            Ok(()) => self.hint = i18n::t("meet.opening").to_string(),
-                            Err(e) => self.hint = format!("{}", e),
-                        }
+                        self.meet_win_open(meet::Meeting {
+                            id,
+                            titel: String::new(),
+                            passwort: self.meet_pw.clone(),
+                            termin_text: String::new(),
+                        });
                     }
                 }
                 ui.add_space(8.0);
@@ -2085,6 +2083,342 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Oeffnet das eigene Meeting-Fenster fuer dieses Meeting (Zoom-Ablauf:
+    /// erst Geraete pruefen und Einladung kopieren, dann beitreten).
+    fn meet_win_open(&mut self, m: meet::Meeting) {
+        self.meet_win.offen = true;
+        self.meet_win.beigetreten = false;
+        self.meet_win.toast = None;
+        self.meet_win.meeting = Some(m);
+        self.meet_win.tn.lock().unwrap().clear();
+        // Gleich einmal nachsehen, wer schon da ist.
+        self.meet_win.tn_next = std::time::Instant::now();
+        if !self.meet_win.geraete_geladen {
+            self.meet_win.geraete_geladen = true;
+            let slot = self.meet_win.geraete.clone();
+            std::thread::spawn(move || {
+                let g = meet::geraete();
+                *slot.lock().unwrap() = Some(g);
+            });
+        }
+    }
+
+    /// Teilnehmerliste nachladen - alle 5 s, in einem Hintergrundfaden,
+    /// damit eine haengende Leitung das Fenster nicht einfriert.
+    fn meet_win_poll(&mut self) {
+        if !self.meet_win.offen
+            || self.meet_win.tn_busy.load(Ordering::Relaxed)
+            || std::time::Instant::now() < self.meet_win.tn_next
+        {
+            return;
+        }
+        let (id, pass) = match self.meet_win.meeting.as_ref() {
+            Some(m) => (m.id.clone(), m.passwort.clone()),
+            None => return,
+        };
+        if pass.is_empty() {
+            // Ohne Passwort verraet der Server die Liste nicht.
+            return;
+        }
+        self.meet_win.tn_busy.store(true, Ordering::Relaxed);
+        self.meet_win.tn_next = std::time::Instant::now() + Duration::from_secs(5);
+        let tn = self.meet_win.tn.clone();
+        let busy = self.meet_win.tn_busy.clone();
+        std::thread::spawn(move || {
+            if let Ok(v) = meet::teilnehmer(&id, &pass) {
+                *tn.lock().unwrap() = v;
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Das eigene Meeting-Fenster: Vorbereitung, Einladung, Teilnehmer.
+    fn meet_win_ui(&mut self, ctx: &egui::Context) {
+        let p = theme::palette();
+        // Geraeteliste uebernehmen, sobald der Hintergrundfaden fertig ist.
+        if !self.meet_win.geraete_da {
+            if let Some((mics, cams)) = self.meet_win.geraete.lock().unwrap().clone() {
+                self.meet_win.mics = mics;
+                self.meet_win.cams = cams;
+                self.meet_win.geraete_da = true;
+            }
+        }
+        self.meet_win_poll();
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(p.bg)
+                    .inner_margin(egui::Margin::symmetric(22, 16)),
+            )
+            .show(ctx, |ui| {
+                let m = match self.meet_win.meeting.clone() {
+                    Some(m) => m,
+                    None => return,
+                };
+                // Kopf: Name und grosse Meeting-ID.
+                ui.label(
+                    egui::RichText::new(i18n::t("meet.window"))
+                        .size(20.0)
+                        .strong()
+                        .color(p.text),
+                );
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&m.id)
+                            .size(17.0)
+                            .family(egui::FontFamily::Monospace)
+                            .color(p.accent),
+                    );
+                    if !m.titel.is_empty() {
+                        ui.label(egui::RichText::new(&m.titel).size(13.0).color(p.muted));
+                    }
+                });
+                ui.add_space(12.0);
+
+                ui.columns(2, |cols| {
+                    // ------------------------------------- Vorbereitung
+                    let ui = &mut cols[0];
+                    section(ui, i18n::t("meet.prejoin"));
+                    card(ui, |ui| {
+                        if !self.meet_win.geraete_da {
+                            label_small(ui, i18n::t("meet.devices_load"));
+                            ui.add_space(6.0);
+                        }
+                        label_small(ui, i18n::t("meet.cam"));
+                        {
+                            let wahl = &mut self.meet_win.cam_sel;
+                            let namen = &self.meet_win.cams;
+                            let cur = if *wahl == 0 {
+                                i18n::t("meet.dev_default").to_string()
+                            } else {
+                                namen
+                                    .get(*wahl - 1)
+                                    .cloned()
+                                    .unwrap_or_else(|| i18n::t("meet.dev_default").to_string())
+                            };
+                            egui::ComboBox::from_id_salt("meet_cam_pick")
+                                .width(230.0)
+                                .selected_text(cur)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(*wahl == 0, i18n::t("meet.dev_default"))
+                                        .clicked()
+                                    {
+                                        *wahl = 0;
+                                    }
+                                    for (i, n) in namen.iter().enumerate() {
+                                        if ui.selectable_label(*wahl == i + 1, n).clicked() {
+                                            *wahl = i + 1;
+                                        }
+                                    }
+                                });
+                        }
+                        ui.add_space(6.0);
+                        label_small(ui, i18n::t("meet.mic"));
+                        {
+                            let wahl = &mut self.meet_win.mic_sel;
+                            let namen = &self.meet_win.mics;
+                            let cur = if *wahl == 0 {
+                                i18n::t("meet.dev_default").to_string()
+                            } else {
+                                namen
+                                    .get(*wahl - 1)
+                                    .cloned()
+                                    .unwrap_or_else(|| i18n::t("meet.dev_default").to_string())
+                            };
+                            egui::ComboBox::from_id_salt("meet_mic_pick")
+                                .width(230.0)
+                                .selected_text(cur)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(*wahl == 0, i18n::t("meet.dev_default"))
+                                        .clicked()
+                                    {
+                                        *wahl = 0;
+                                    }
+                                    for (i, n) in namen.iter().enumerate() {
+                                        if ui.selectable_label(*wahl == i + 1, n).clicked() {
+                                            *wahl = i + 1;
+                                        }
+                                    }
+                                });
+                        }
+                        ui.add_space(10.0);
+                        check(ui, &mut self.meet_win.stumm, i18n::t("meet.mute_join"));
+                        ui.add_space(4.0);
+                        check(ui, &mut self.meet_win.ohne_video, i18n::t("meet.camoff_join"));
+                        ui.add_space(12.0);
+                        let knopf = if self.meet_win.beigetreten {
+                            i18n::t("meet.reopen")
+                        } else {
+                            i18n::t("meet.join_now")
+                        };
+                        if accent_button(ui, knopf, true).clicked() {
+                            let me = self.shared.my_id.lock().unwrap().clone();
+                            let fvid = if self.meet_offer_control && !me.trim().is_empty() {
+                                Some(me.as_str())
+                            } else {
+                                None
+                            };
+                            let mic = if self.meet_win.mic_sel == 0 {
+                                None
+                            } else {
+                                self.meet_win
+                                    .mics
+                                    .get(self.meet_win.mic_sel - 1)
+                                    .map(|s| s.as_str())
+                            };
+                            let cam = if self.meet_win.cam_sel == 0 {
+                                None
+                            } else {
+                                self.meet_win
+                                    .cams
+                                    .get(self.meet_win.cam_sel - 1)
+                                    .map(|s| s.as_str())
+                            };
+                            let url = meet::join_url_ex(
+                                &m.id,
+                                &m.passwort,
+                                fvid,
+                                mic,
+                                cam,
+                                self.meet_win.stumm,
+                                self.meet_win.ohne_video,
+                            );
+                            match meet::open_window(&url) {
+                                Ok(()) => {
+                                    self.meet_win.beigetreten = true;
+                                    // Gleich wieder nachsehen, wer im Raum ist.
+                                    self.meet_win.tn_next = std::time::Instant::now();
+                                }
+                                Err(e) => {
+                                    self.meet_win.toast =
+                                        Some((format!("{}", e), std::time::Instant::now()));
+                                }
+                            }
+                        }
+                        if self.meet_win.beigetreten {
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(i18n::t("meet.in_meeting"))
+                                    .size(11.5)
+                                    .color(p.green),
+                            );
+                        }
+                    });
+
+                    // ------------------------------------- Einladung + Teilnehmer
+                    let ui = &mut cols[1];
+                    section(ui, i18n::t("meet.invite_head"));
+                    card(ui, |ui| {
+                        if ghost_button(ui, i18n::t("meet.copy_invite")).clicked() {
+                            ui.ctx().copy_text(meet::invite(&m));
+                            self.meet_win.toast = Some((
+                                i18n::t("meet.toast_copied").to_string(),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  ·  {} {}",
+                                i18n::t("meet.id"),
+                                i18n::t("meet.pw"),
+                                m.passwort
+                            ))
+                            .size(11.0)
+                            .color(p.muted),
+                        );
+                    });
+                    ui.add_space(10.0);
+                    section(ui, i18n::t("meet.people"));
+                    card(ui, |ui| {
+                        let liste = self.meet_win.tn.lock().unwrap().clone();
+                        if liste.is_empty() {
+                            ui.label(
+                                egui::RichText::new(i18n::t("meet.people_none"))
+                                    .size(12.0)
+                                    .color(p.muted),
+                            );
+                        }
+                        for t in liste.iter() {
+                            ui.horizontal(|ui| {
+                                dot(ui, true);
+                                ui.label(egui::RichText::new(&t.name).size(13.0).color(p.text));
+                                if t.host {
+                                    ui.label(
+                                        egui::RichText::new(i18n::t("meet.host"))
+                                            .size(11.0)
+                                            .color(p.accent),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if t.hand {
+                                            ui.label(
+                                                egui::RichText::new(i18n::t("meet.hand_up"))
+                                                    .size(11.0)
+                                                    .color(p.violet),
+                                            );
+                                        }
+                                        if t.kamera_aus {
+                                            ui.label(
+                                                egui::RichText::new(i18n::t("meet.c_off"))
+                                                    .size(11.0)
+                                                    .color(p.muted),
+                                            );
+                                        }
+                                        if t.mikro_aus {
+                                            ui.label(
+                                                egui::RichText::new(i18n::t("meet.m_off"))
+                                                    .size(11.0)
+                                                    .color(p.muted),
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+                            ui.add_space(3.0);
+                        }
+                    });
+                });
+
+                // Toast: kurzer, sichtbarer Hinweis ("Link kopiert").
+                if let Some((text, seit)) = self.meet_win.toast.clone() {
+                    let alt = seit.elapsed().as_secs_f32();
+                    if alt > 2.4 {
+                        self.meet_win.toast = None;
+                    } else {
+                        let deck = if alt > 1.8 {
+                            ((2.4 - alt) / 0.6).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        egui::Area::new(egui::Id::new("meet_toast"))
+                            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -26.0))
+                            .order(egui::Order::Foreground)
+                            .show(ctx, |ui| {
+                                egui::Frame::NONE
+                                    .fill(p.accent.gamma_multiply(deck))
+                                    .corner_radius(egui::CornerRadius::same(14))
+                                    .inner_margin(egui::Margin::symmetric(16, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(&text)
+                                                .size(13.0)
+                                                .color(p.on_accent.gamma_multiply(deck)),
+                                        );
+                                    });
+                            });
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                }
+            });
     }
 
     /// Kopfzeile: Seitenname, Suche, eigener Zustand.
@@ -4905,6 +5239,30 @@ impl eframe::App for App {
             }
         }
 
+        // Das Meeting bekommt wie die Fernsitzung ein eigenes Fenster:
+        // Vorbereitung, Einladung und Teilnehmerliste laufen neben dem
+        // Hauptfenster her, nicht als Karteikarte darin.
+        if self.meet_win.offen {
+            let mut closed = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("fv_meet"),
+                egui::ViewportBuilder::default()
+                    .with_title(i18n::t("meet.window"))
+                    .with_inner_size([920.0, 600.0])
+                    .with_min_inner_size([560.0, 430.0]),
+                |vctx, _class| {
+                    self.meet_win_ui(vctx);
+                    if vctx.input(|i| i.viewport().close_requested()) {
+                        closed = true;
+                    }
+                    vctx.request_repaint_after(Duration::from_millis(150));
+                },
+            );
+            if closed {
+                self.meet_win.offen = false;
+            }
+        }
+
         // --shot: ein paar Frames zeichnen lassen, dann ein Bild anfordern
         if let Some(path) = self.shot.clone() {
             self.shot_n += 1;
@@ -4944,6 +5302,55 @@ enum View {
     Start,
     Devices,
     Settings,
+}
+
+/// Zustand des eigenen Meet-Fensters (separater Viewport, Zoom-Ablauf).
+struct MeetWin {
+    offen: bool,
+    meeting: Option<meet::Meeting>,
+    /// Der Browser mit Bild und Ton laeuft bereits.
+    beigetreten: bool,
+    /// Geraetenamen, wie das System sie meldet (Mikrofone, Kameras).
+    mics: Vec<String>,
+    cams: Vec<String>,
+    /// 0 = Browser-Standard, sonst Index+1 in mics/cams.
+    mic_sel: usize,
+    cam_sel: usize,
+    stumm: bool,
+    ohne_video: bool,
+    /// Einmalig im Hintergrund eingelesen (die Abfrage dauert einen Moment).
+    geraete: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>)>>>,
+    geraete_geladen: bool,
+    geraete_da: bool,
+    /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
+    tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
+    tn_busy: Arc<std::sync::atomic::AtomicBool>,
+    tn_next: std::time::Instant,
+    /// Kurzer Hinweis im Fenster ("Link kopiert") und wann er kam.
+    toast: Option<(String, std::time::Instant)>,
+}
+
+impl Default for MeetWin {
+    fn default() -> Self {
+        Self {
+            offen: false,
+            meeting: None,
+            beigetreten: false,
+            mics: Vec::new(),
+            cams: Vec::new(),
+            mic_sel: 0,
+            cam_sel: 0,
+            stumm: false,
+            ohne_video: false,
+            geraete: Arc::new(std::sync::Mutex::new(None)),
+            geraete_geladen: false,
+            geraete_da: false,
+            tn: Arc::new(std::sync::Mutex::new(Vec::new())),
+            tn_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tn_next: std::time::Instant::now(),
+            toast: None,
+        }
+    }
 }
 
 /// Was in einer Sitzungsleiste angeklickt wurde.

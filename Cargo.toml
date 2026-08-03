@@ -1,6 +1,6 @@
 ﻿[package]
 name = "freeviewer"
-version = "0.23.6"
+version = "0.24.0"
 edition = "2021"
 description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
 license = "GPL-3.0"

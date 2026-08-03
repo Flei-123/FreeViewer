@@ -325,3 +325,219 @@ mod tests {
         assert!(base().starts_with("https://"));
     }
 }
+
+// ------------------------------------------------- eigener Meeting-Modus --
+
+/// Ein Teilnehmer, wie ihn der Meet-Server gerade meldet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Teilnehmer {
+    pub name: String,
+    pub host: bool,
+    pub mikro_aus: bool,
+    pub kamera_aus: bool,
+    pub hand: bool,
+    /// Bietet an, dass andere seine Maschine steuern duerfen (FreeViewer-ID).
+    pub fv: bool,
+}
+
+fn tn_aus_json(v: &serde_json::Value) -> Vec<Teilnehmer> {
+    let arr = v.as_array().cloned().unwrap_or_default();
+    let wahr = |x: &serde_json::Value, k: &str| {
+        x.get(k).and_then(|b| b.as_bool()).unwrap_or(false)
+    };
+    arr.iter()
+        .map(|x| Teilnehmer {
+            name: x
+                .get("name")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            host: wahr(x, "host"),
+            mikro_aus: wahr(x, "audio_muted"),
+            kamera_aus: wahr(x, "video_muted"),
+            hand: wahr(x, "hand"),
+            fv: wahr(x, "fv"),
+        })
+        .collect()
+}
+
+/// Wer sitzt gerade im Raum? Das Passwort gehoert zur Abfrage - die ID
+/// allein darf nichts verraten (gleiche Regel wie beim Loeschen).
+pub fn teilnehmer(id: &str, pass: &str) -> Result<Vec<Teilnehmer>> {
+    let url = format!(
+        "{}/api/meeting/{}/teilnehmer?pass={}",
+        base(),
+        urlenc(id.trim()),
+        urlenc(pass.trim())
+    );
+    let v = get_json(&url)?;
+    Ok(tn_aus_json(&v))
+}
+
+/// Mikrofone und Kameras dieses Rechners als (Mikrofone, Kameras).
+///
+/// Die Namen meldet das System; der Browser nennt sie fast gleich, darum
+/// findet die Meet-Seite ein Wunschgeraet anhand seines Namens wieder.
+pub fn geraete() -> (Vec<String>, Vec<String>) {
+    (crate::audio::input_devices(), kameras())
+}
+
+/// Kameras des Rechners. Windows fragt die Geraeteverwaltung (PnP), Linux
+/// liest die Namen der Video4Linux-Knoten, macOS den Systembericht.
+/// Alles laeuft lokal - dafuer geht kein Paket ins Netz.
+pub fn kameras() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Ohne Fenster - sonst blitzt bei jeder Abfrage eine Konsole auf.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let ps = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-PnpDevice -Class CAMERA -Status OK -ErrorAction SilentlyContinue | ForEach-Object { $_.FriendlyName }",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Ok(out) = ps {
+            let text = String::from_utf8_lossy(&out.stdout);
+            return text
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+        }
+        return Vec::new();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut v = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("/sys/class/video4linux") {
+            for e in rd.flatten() {
+                if let Ok(name) = std::fs::read_to_string(e.path().join("name")) {
+                    let name = name.trim().to_string();
+                    if !name.is_empty() {
+                        v.push(name);
+                    }
+                }
+            }
+        }
+        v.sort();
+        v.dedup();
+        return v;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("system_profiler")
+            .arg("SPCameraDataType")
+            .output();
+        if let Ok(out) = out {
+            let text = String::from_utf8_lossy(&out.stdout);
+            return text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| l.ends_with(':') && l.len() > 2)
+                .map(|l| l.trim_end_matches(':').to_string())
+                .filter(|l| !l.starts_with("Camera") && !l.starts_with("Kamera"))
+                .collect();
+        }
+        return Vec::new();
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        Vec::new()
+    }
+}
+
+/// Beitritts-Adresse mit allem, was das eigene Meeting-Fenster einstellen
+/// kann: eigene FreeViewer-ID, Wunschgeraete und Startzustand von
+/// Mikrofon und Kamera. Die Meet-Seite liest die Werte aus und stellt
+/// ihren Vorbereitungsbildschirm danach.
+pub fn join_url_ex(
+    id: &str,
+    pass: &str,
+    fvid: Option<&str>,
+    mic: Option<&str>,
+    cam: Option<&str>,
+    stumm: bool,
+    ohne_video: bool,
+) -> String {
+    let mut u = join_url(id, pass);
+    if let Some(f) = fvid {
+        let ziffern: String = f.chars().filter(|c| c.is_ascii_digit()).take(12).collect();
+        if !ziffern.is_empty() {
+            u = format!("{}&fv={}", u, ziffern);
+        }
+    }
+    if let Some(m) = mic {
+        if !m.trim().is_empty() {
+            u = format!("{}&mic={}", u, urlenc(m.trim()));
+        }
+    }
+    if let Some(c) = cam {
+        if !c.trim().is_empty() {
+            u = format!("{}&cam={}", u, urlenc(c.trim()));
+        }
+    }
+    if stumm {
+        u = format!("{}&mute=1", u);
+    }
+    if ohne_video {
+        u = format!("{}&novideo=1", u);
+    }
+    u
+}
+
+#[cfg(test)]
+mod tests_meetwin {
+    use super::*;
+
+    #[test]
+    fn join_url_ex_traegt_geraete_und_zustand() {
+        let u = join_url_ex(
+            "1-2-3",
+            "pw",
+            Some("123 456 789"),
+            Some("Mikrofon (Realtek)"),
+            Some("HD Cam"),
+            true,
+            true,
+        );
+        assert!(u.contains("room=1-2-3"), "{}", u);
+        assert!(u.contains("&pass=pw"), "{}", u);
+        assert!(u.contains("&fv=123456789"), "{}", u);
+        assert!(u.contains("&mic=Mikrofon%20%28Realtek%29"), "{}", u);
+        assert!(u.contains("&cam=HD%20Cam"), "{}", u);
+        assert!(u.contains("&mute=1"), "{}", u);
+        assert!(u.ends_with("&novideo=1"), "{}", u);
+    }
+
+    #[test]
+    fn join_url_ex_laesst_leeres_weg() {
+        let u = join_url_ex("1-2-3", "pw", None, None, Some("  "), false, false);
+        assert_eq!(u, join_url("1-2-3", "pw"));
+    }
+
+    #[test]
+    fn teilnehmerliste_wird_gelesen() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[
+              {"name":"Justin","host":true,"audio_muted":false,"video_muted":true,"hand":false,"fv":true},
+              {"name":"Gast 7","host":false,"audio_muted":true,"video_muted":false,"hand":true,"fv":false}
+            ]"#,
+        )
+        .unwrap();
+        let t = tn_aus_json(&v);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].name, "Justin");
+        assert!(t[0].host && t[0].kamera_aus && t[0].fv && !t[0].mikro_aus);
+        assert_eq!(t[1].name, "Gast 7");
+        assert!(t[1].mikro_aus && t[1].hand && !t[1].host);
+        // Fehlende Felder sind kein Fehler - aeltere Server liefern weniger.
+        let leer: serde_json::Value = serde_json::from_str(r#"[{"name":"N"}]"#).unwrap();
+        let t = tn_aus_json(&leer);
+        assert_eq!(t.len(), 1);
+        assert!(!t[0].host && !t[0].mikro_aus && !t[0].fv);
+    }
+}
