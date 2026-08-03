@@ -43,11 +43,9 @@ mod imp {
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
         ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW,
-        DISPLAY_DEVICEW, CDS_UPDATEREGISTRY, DISP_CHANGE_SUCCESSFUL, ENUM_CURRENT_SETTINGS,
+        DISPLAY_DEVICEW, CDS_UPDATEREGISTRY, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
+        DM_PELSWIDTH, ENUM_CURRENT_SETTINGS,
     };
-
-    const DM_PELSWIDTH: u32 = 0x0008_0000;
-    const DM_PELSHEIGHT: u32 = 0x0010_0000;
 
     fn devicename(index: usize) -> Result<Vec<u16>> {
         let mut dd = DISPLAY_DEVICEW::default();
