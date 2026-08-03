@@ -509,7 +509,7 @@ fn main() -> eframe::Result<()> {
         let host_shared = shared.clone();
         let host_secret = secret.clone();
         rt().spawn(async move {
-            hostside::run_host(host_shared, host_secret).await;
+            hostside::run_host(host_shared, host_secret, is_agent).await;
         });
     }
     if cfg!(target_os = "macos") && !viewer_only && !service_owns_host {
@@ -979,6 +979,8 @@ struct App {
     dep_next: std::time::Instant,
     /// Einrichtungs-Dialog (freeviewer://setup/<code>).
     setup_dlg: Option<SetupDlg>,
+    /// Passwort-Nachfrage vor dem Verbinden (Partner-ID).
+    pw_ask: Option<String>,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -1065,6 +1067,7 @@ impl App {
             dep_out: Arc::new(std::sync::Mutex::new(None)),
             dep_next: std::time::Instant::now(),
             setup_dlg: None,
+            pw_ask: None,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1790,7 +1793,10 @@ impl App {
         self.partner_pw = self.book.password(id).unwrap_or_default();
         self.selected = Some(id.to_string());
         if self.partner_pw.is_empty() {
-            self.start_ask_session();
+            // Kein gespeichertes Passwort: nicht still auf "Anfrage"
+            // umschalten - erst nach dem Passwort fragen. Wer keins weiss,
+            // kann im Dialog immer noch eine Anfrage schicken.
+            self.pw_ask = Some(id.to_string());
         } else {
             self.start_session();
         }
@@ -3501,6 +3507,79 @@ impl App {
         }
     }
 
+    /// Passwort-Nachfrage: "Verbinden" heisst direkt verbinden. Ohne
+    /// gespeichertes Passwort fragt dieser Dialog nach - die Anfrage beim
+    /// Gegenueber (klopfen) ist hier eine bewusste zweite Option.
+    fn pw_ask_ui(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.pw_ask.clone() else {
+            return;
+        };
+        let mut offen = true;
+        let mut verbinden = false;
+        let mut anfragen = false;
+        let mut weg = false;
+        let name = self
+            .book
+            .get(&id)
+            .map(|x| x.label())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| partners::pretty_id(&id));
+        egui::Window::new(i18n::tf("pwask.title", &name))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut offen)
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(theme::card())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label(
+                    egui::RichText::new(i18n::t("pwask.note"))
+                        .size(12.0)
+                        .color(theme::muted()),
+                );
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("pwask.pw"));
+                let enter = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.partner_pw)
+                            .desired_width(220.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let hat_pw = !self.partner_pw.trim().is_empty();
+                    if accent_button(ui, i18n::t("start.connect"), hat_pw).clicked()
+                        || (enter && hat_pw)
+                    {
+                        verbinden = true;
+                    }
+                    if ghost_button(ui, i18n::t("pwask.ask")).clicked() {
+                        anfragen = true;
+                    }
+                    if ghost_button(ui, i18n::t("setup.cancel")).clicked() {
+                        weg = true;
+                    }
+                });
+            });
+        if verbinden {
+            self.pw_ask = None;
+            self.start_session();
+        } else if anfragen {
+            self.pw_ask = None;
+            self.start_ask_session();
+        } else if weg || !offen {
+            self.pw_ask = None;
+        }
+    }
+
     /// Einrichtungs-Dialog: dieses Geraet per Einmal-Code einrichten und
     /// danach installieren (mit Dienst).
     fn setup_dialog_ui(&mut self, ctx: &egui::Context) {
@@ -4672,6 +4751,7 @@ impl eframe::App for App {
         }
         self.tray_ui(ctx);
         self.knock_ui(ctx);
+        self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);
         self.pull_frame(ctx);
         // eframe setzt beim Start (und wenn Windows zwischen hell und dunkel

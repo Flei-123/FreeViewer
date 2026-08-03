@@ -58,16 +58,40 @@ pub fn profile(mode: u8) -> Profile {
     }
 }
 
-pub async fn run_host(shared: Arc<Shared>, secret: String) {
+pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
     loop {
         shared.set_host_status("Verbinde mit Relay...");
+        let mut replaced = false;
         match host_once(&shared, &secret).await {
             Ok(()) => shared.set_host_status("Relay-Verbindung beendet"),
-            Err(e) => shared.set_host_status(format!("Relay-Fehler: {}", e)),
+            Err(e) => {
+                replaced = e.to_string().contains("neu registriert");
+                shared.set_host_status(format!("Relay-Fehler: {}", e));
+            }
         }
         *shared.my_id.lock().unwrap() = String::new();
         *shared.host_peer.lock().unwrap() = "Keine aktive Sitzung".to_string();
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        if replaced && !agent {
+            // Ein anderer Prozess (meist der Dienst) hat diese ID am Relay
+            // uebernommen. Sofort zurueckschlagen wuerde ein endloses
+            // Hin-und-Her-Kicken ausloesen (alle 3 s offline/online). Also
+            // lange warten - und wenn inzwischen der Dienst den Host
+            // betreibt, hoert diese Oberflaeche ganz auf zu registrieren.
+            let mut dienst = false;
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if crate::service::running() {
+                    dienst = true;
+                    break;
+                }
+            }
+            if dienst {
+                shared.set_host_status("Der Dienst betreibt den Host - auch am Anmeldebildschirm");
+                return;
+            }
+        } else {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
     }
 }
 
