@@ -153,12 +153,28 @@ fn urlenc(s: &str) -> String {
     out
 }
 
+/// Haengt `app=1` an die Meeting-Adresse, solange es noch fehlt.
+///
+/// Die Meet-Seite versucht bei Einladungslinks, den installierten Client
+/// ueber das freeviewer://-Schema zu starten. Dieses Fenster hier IST schon
+/// der Client - ohne das Merkmal wuerde die Seite darin das Schema erneut
+/// anstossen und sich selbst im Kreis oeffnen.
+fn mit_app_merkmal(url: &str) -> String {
+    if url.contains("app=") {
+        return url.to_string();
+    }
+    let trenn = if url.contains('?') { "&" } else { "?" };
+    format!("{}{}app=1", url, trenn)
+}
+
 /// Oeffnet das Meeting in einem eigenen Fenster ohne Adressleiste.
 ///
 /// Edge und Chrome koennen mit `--app=` genau das: ein nacktes Fenster, das
 /// wie ein Programm aussieht. Gibt es beide nicht, nehmen wir den normalen
 /// Browser - Hauptsache, der Nutzer landet im Meeting.
 pub fn open_window(url: &str) -> Result<()> {
+    let markiert = mit_app_merkmal(url);
+    let url = markiert.as_str();
     #[cfg(windows)]
     {
         let candidates = [
@@ -290,6 +306,17 @@ mod tests {
         let m = from_json(&v);
         assert_eq!(m.id, "1-2-3");
         assert_eq!(m.passwort, "p");
+    }
+
+    #[test]
+    fn app_merkmal_wird_genau_einmal_angehaengt() {
+        let u = mit_app_merkmal("https://meet.fleitec.com/?room=1-2-3&pass=x");
+        assert!(u.ends_with("&app=1"), "{}", u);
+        // Schon markiert? Dann bleibt die Adresse unangetastet.
+        let m = mit_app_merkmal(&u);
+        assert_eq!(m, u);
+        // Ganz ohne Parameter bekommt die Adresse ein Fragezeichen.
+        assert_eq!(mit_app_merkmal("https://x.test/"), "https://x.test/?app=1");
     }
 
     #[test]
