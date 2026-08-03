@@ -273,6 +273,7 @@ pub fn sync_async(
 struct SetupCreateReq<'a> {
     password: &'a str,
     name_hint: &'a str,
+    max_uses: u32,
 }
 
 #[derive(Deserialize, Default)]
@@ -296,6 +297,16 @@ pub struct SetupPending {
     pub name_hint: String,
     #[serde(default)]
     pub at: u64,
+    /// Wie viele Geraete der Link insgesamt einrichten darf.
+    #[serde(default = "one")]
+    pub max_uses: u32,
+    /// Wie viele schon eingerichtet sind.
+    #[serde(default)]
+    pub uses: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
@@ -363,10 +374,15 @@ pub fn setup_create(
     token: &str,
     password: &str,
     name_hint: &str,
+    max_uses: u32,
 ) -> Result<(String, String, String)> {
     let target = format!("{}?token={}", plain_url(relay_url, "setup/create"), urlenc(token));
-    let body = serde_json::to_string(&SetupCreateReq { password, name_hint })
-        .map_err(|e| anyhow!("{}", e))?;
+    let body = serde_json::to_string(&SetupCreateReq {
+        password,
+        name_hint,
+        max_uses,
+    })
+    .map_err(|e| anyhow!("{}", e))?;
     let (status, text) = post_json(&target, &body)?;
     let r: SetupCreateReply = serde_json::from_str(&text).unwrap_or_default();
     if status == 401 {
@@ -422,6 +438,32 @@ pub fn setup_claim(relay_url: &str, code: &str, id: &str, name: &str) -> Result<
     Ok(r)
 }
 
+#[derive(Serialize)]
+struct SetupRevokeReq<'a> {
+    code: &'a str,
+}
+
+/// Einen wartenden Link widerrufen - schon eingerichtete Geraete behalten
+/// ihre Einrichtung, der Rest des Links wird sofort unbrauchbar.
+pub fn setup_revoke(relay_url: &str, token: &str, code: &str) -> Result<()> {
+    let target = format!("{}?token={}", plain_url(relay_url, "setup/revoke"), urlenc(token));
+    let body = serde_json::to_string(&SetupRevokeReq { code }).map_err(|e| anyhow!("{}", e))?;
+    let (status, _text) = post_json(&target, &body)?;
+    match status {
+        200 => Ok(()),
+        401 => Err(anyhow!("nicht angemeldet")),
+        404 => Err(anyhow!("Code unbekannt")),
+        _ => Err(anyhow!("Relay meldet Fehler {}", status)),
+    }
+}
+
+/// Widerrufen im Hintergrund (das Ergebnis holt die naechste Inbox-Runde).
+pub fn setup_revoke_async(relay_url: String, token: String, code: String) {
+    std::thread::spawn(move || {
+        let _ = setup_revoke(&relay_url, &token, &code);
+    });
+}
+
 /// Was ein Einrichtungslauf im Hintergrund zurueckmeldet.
 #[derive(Debug, Clone)]
 pub enum SetupOut {
@@ -438,6 +480,7 @@ pub fn setup_create_async(
     token: String,
     password: String,
     name_hint: String,
+    max_uses: u32,
     out: std::sync::Arc<std::sync::Mutex<Option<SetupOut>>>,
     busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -446,7 +489,7 @@ pub fn setup_create_async(
         return;
     }
     std::thread::spawn(move || {
-        let res = match setup_create(&relay_url, &token, &password, &name_hint) {
+        let res = match setup_create(&relay_url, &token, &password, &name_hint, max_uses) {
             Ok((code, link, web)) => SetupOut::Created { code, link, web },
             Err(e) => SetupOut::Failed(e.to_string()),
         };

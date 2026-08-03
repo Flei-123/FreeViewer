@@ -983,6 +983,8 @@ struct App {
     /// Einrichten-Tab: Einmal-Links fuer neue Geraete.
     dep_pw: String,
     dep_hint_name: String,
+    /// Wie viele Geraete sich mit einem Link einrichten duerfen (1-25).
+    dep_count: u32,
     dep_link: String,
     dep_msg: String,
     dep_pending: Vec<account::SetupPending>,
@@ -1072,6 +1074,7 @@ impl App {
             acc_next: std::time::Instant::now(),
             dep_pw: ident::random_password(),
             dep_hint_name: String::new(),
+            dep_count: 1,
             dep_link: String::new(),
             dep_msg: String::new(),
             dep_pending: Vec::new(),
@@ -3375,6 +3378,13 @@ impl App {
                     .margin(egui::Margin::symmetric(8, 4))
                     .hint_text(i18n::t("dep.name_hint_ph")),
             );
+            ui.add_space(6.0);
+            label_small(ui, i18n::t("dep.count"));
+            ui.add(
+                egui::DragValue::new(&mut self.dep_count)
+                    .range(1..=25)
+                    .speed(0.2),
+            );
             ui.add_space(8.0);
             let busy = self.acc_busy.load(Ordering::Relaxed);
             let label = if busy {
@@ -3388,6 +3398,7 @@ impl App {
                     sess.token.clone(),
                     self.dep_pw.trim().to_string(),
                     self.dep_hint_name.trim().to_string(),
+                    self.dep_count,
                     self.dep_out.clone(),
                     self.acc_busy.clone(),
                 );
@@ -3440,7 +3451,9 @@ impl App {
                         .color(p.muted),
                 );
             }
-            for pend in &self.dep_pending {
+            let pending = self.dep_pending.clone();
+            let mut revoke: Option<String> = None;
+            for pend in &pending {
                 ui.horizontal(|ui| {
                     icons::show(ui, "refresh", 14.0, p.muted);
                     let was = if pend.name_hint.is_empty() {
@@ -3448,13 +3461,33 @@ impl App {
                     } else {
                         format!("{} ({})", pend.name_hint, pend.code)
                     };
+                    let zeile = if pend.max_uses > 1 {
+                        format!(
+                            "{} - {} ({})",
+                            was,
+                            i18n::t("dep.waiting"),
+                            i18n::tf("dep.left", &format!("{} ({} von {})", pend.max_uses - pend.uses, pend.uses, pend.max_uses))
+                        )
+                    } else {
+                        format!("{} - {}", was, i18n::t("dep.waiting"))
+                    };
                     ui.label(
-                        egui::RichText::new(format!("{} - {}", was, i18n::t("dep.waiting")))
-                            .size(12.0)
-                            .color(p.muted),
+                        egui::RichText::new(zeile).size(12.0).color(p.muted),
                     );
+                    if icon_ghost(ui, "trash", i18n::t("dep.revoke_tip")).clicked() {
+                        revoke = Some(pend.code.clone());
+                    }
                 });
                 ui.add_space(2.0);
+            }
+            if let Some(code) = revoke {
+                account::setup_revoke_async(
+                    self.shared.relay_url.clone(),
+                    sess.token.clone(),
+                    code,
+                );
+                // gleich neu lesen, damit die Zeile verschwindet
+                self.dep_next = std::time::Instant::now();
             }
             let claimed = self.dep_claimed.clone();
             for cl in &claimed {
