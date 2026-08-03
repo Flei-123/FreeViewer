@@ -4,6 +4,11 @@ name: macOS Build
 # nicht - das Apple-SDK gibt es nur auf macOS. Signieren und Notarisieren
 # passieren nur, wenn die Geheimnisse hinterlegt sind; ohne sie entsteht
 # trotzdem ein lauffaehiges, unsigniertes Programm zum Ausprobieren.
+#
+# WICHTIG: Das Verteil-Zip wird HIER auf dem Mac mit `ditto` erzeugt und als
+# Artefakt hochgeladen. Es darf auf dem Weg zum Relay NICHT neu gezippt werden
+# (Windows/Info-Zip verliert die Unix-Dateirechte -> Binary im Bundle ist dann
+# nicht mehr ausfuehrbar -> "cant open this application").
 
 on:
   push:
@@ -37,10 +42,13 @@ jobs:
 
       - name: App-Bundle schnueren
         run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "Version aus Cargo.toml: $VERSION"
           APP="target/FreeViewer.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/release/freeviewer "$APP/Contents/MacOS/FreeViewer"
-          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          chmod 755 "$APP/Contents/MacOS/FreeViewer"
+          cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -50,8 +58,8 @@ jobs:
             <key>CFBundleIdentifier</key><string>com.fleitec.freeviewer</string>
             <key>CFBundleExecutable</key><string>FreeViewer</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.22.1</string>
-            <key>CFBundleVersion</key><string>0.22.1</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
             <key>LSMinimumSystemVersion</key><string>12.3</string>
             <key>NSHighResolutionCapable</key><true/>
             <key>NSCameraUsageDescription</key><string>FreeViewer nutzt die Kamera nur, wenn du sie in einem Meeting einschaltest.</string>
@@ -82,11 +90,27 @@ jobs:
           xcrun notarytool submit /tmp/FreeViewer.zip \
             --apple-id "$AC_APPLE_ID" --password "$AC_PASSWORD" --team-id "$AC_TEAM_ID" --wait
           xcrun stapler staple target/FreeViewer.app
+          xcrun stapler validate target/FreeViewer.app
 
-      - name: Ergebnis einsammeln
+      - name: Verteil-Zip erzeugen (Permissions bleiben erhalten)
+        run: |
+          chmod 755 target/FreeViewer.app/Contents/MacOS/FreeViewer
+          ditto -c -k --keepParent --sequesterRsrc target/FreeViewer.app target/FreeViewer-macOS.zip
+          unzip -l target/FreeViewer-macOS.zip
+          zipinfo target/FreeViewer-macOS.zip | grep MacOS/FreeViewer
+
+      - name: Ergebnis einsammeln (Zip - DAS ist die Verteil-Datei)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: freeviewer-macos-arm64
+          path: target/FreeViewer-macOS.zip
+          if-no-files-found: warn
+
+      - name: Ergebnis einsammeln (App-Bundle, nur zur Diagnose)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freeviewer-macos-app
           path: target/FreeViewer.app
           if-no-files-found: warn
