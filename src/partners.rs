@@ -94,6 +94,15 @@ impl Partner {
     }
 }
 
+/// Suche: Gross-/Kleinschreibung und Trennzeichen (Leerzeichen, Bindestrich,
+/// Unterstrich, Punkt) sind egal - "flei one" findet "FLEI-ONE".
+pub fn search_norm(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_' | '.'))
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// 497628420 -> "497 628 420"
 pub fn pretty_id(id: &str) -> String {
     if id.len() == 9 {
@@ -674,5 +683,13 @@ mod tests {
         };
         assert_eq!(p2.label(), "Werkstatt-PC");
         assert_eq!(p.ago(), "noch nie");
+    }
+
+    #[test]
+    fn suche_ignoriert_trennzeichen_und_grossbuchstaben() {
+        assert_eq!(search_norm("flei one"), "fleione");
+        assert_eq!(search_norm("FLEI-ONE"), "fleione");
+        assert_eq!(search_norm(" 497 628 420 "), "497628420");
+        assert!(search_norm("FLEI-ONE").contains(&search_norm("flei one")));
     }
 }

@@ -252,6 +252,221 @@ pub fn sync_async(
     });
 }
 
+
+// --------------------------------------------------------- Einrichtungs-Links
+//
+// Der Installation-Tab erzeugt am Relay einen Einmal-Code; ein frisches
+// Geraet loest ihn genau einmal ein und bekommt das gewaehlte Passwort.
+// Danach liegt das Geraet (ohne Passwort) im Konto-Adressbuch, das Passwort
+// holt sich der Besitzer einmalig ueber die Inbox.
+
+#[derive(Serialize)]
+struct SetupCreateReq<'a> {
+    password: &'a str,
+    name_hint: &'a str,
+}
+
+#[derive(Deserialize, Default)]
+struct SetupCreateReply {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    link: String,
+    #[serde(default)]
+    web: String,
+    #[serde(default)]
+    error: String,
+}
+
+/// Ein noch nicht eingeloester Code (Anzeige im Tab).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SetupPending {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub name_hint: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SetupClaimed {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct SetupInboxReply {
+    #[serde(default)]
+    pending: Vec<SetupPending>,
+    #[serde(default)]
+    claimed: Vec<SetupClaimed>,
+    #[serde(default)]
+    error: String,
+}
+
+#[derive(Serialize)]
+struct SetupClaimReq<'a> {
+    code: &'a str,
+    id: &'a str,
+    name: &'a str,
+}
+
+/// Was das frische Geraet beim Einloesen des Codes zurueckbekommt.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SetupClaimReply {
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub name_hint: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// Ein GET mit JSON-Antwort (die Inbox ist ein GET).
+fn get_json(target: &str) -> Result<(u16, String)> {
+    match ureq::get(target).call() {
+        Ok(mut r) => {
+            let code = r.status().as_u16();
+            let text = r
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| anyhow!("Antwort unlesbar: {}", e))?;
+            Ok((code, text))
+        }
+        Err(ureq::Error::StatusCode(code)) => Ok((code, String::new())),
+        Err(e) => Err(anyhow!("nicht erreichbar: {}", e)),
+    }
+}
+
+/// Einmal-Code erzeugen (braucht die Konto-Anmeldung).
+pub fn setup_create(
+    relay_url: &str,
+    token: &str,
+    password: &str,
+    name_hint: &str,
+) -> Result<(String, String, String)> {
+    let target = format!("{}?token={}", url(relay_url, "setup/create"), urlenc(token));
+    let body = serde_json::to_string(&SetupCreateReq { password, name_hint })
+        .map_err(|e| anyhow!("{}", e))?;
+    let (status, text) = post_json(&target, &body)?;
+    let r: SetupCreateReply = serde_json::from_str(&text).unwrap_or_default();
+    if status == 401 {
+        return Err(anyhow!("nicht angemeldet"));
+    }
+    if status != 200 || r.code.is_empty() {
+        let msg = if r.error.is_empty() {
+            format!("Relay meldet Fehler {}", status)
+        } else {
+            r.error
+        };
+        return Err(anyhow!(msg));
+    }
+    Ok((r.code, r.link, r.web))
+}
+
+/// Posteingang des Besitzers: wartende Codes + frisch eingerichtete Geraete.
+pub fn setup_inbox(relay_url: &str, token: &str) -> Result<(Vec<SetupPending>, Vec<SetupClaimed>)> {
+    let target = format!("{}?token={}", url(relay_url, "setup/inbox"), urlenc(token));
+    let (status, text) = get_json(&target)?;
+    if status == 401 {
+        return Err(anyhow!("nicht angemeldet"));
+    }
+    if status != 200 {
+        return Err(anyhow!("Relay meldet Fehler {}", status));
+    }
+    let r: SetupInboxReply =
+        serde_json::from_str(&text).map_err(|e| anyhow!("Antwort unverstaendlich: {}", e))?;
+    if !r.error.is_empty() {
+        return Err(anyhow!(r.error));
+    }
+    Ok((r.pending, r.claimed))
+}
+
+/// Die andere Seite: das frische Geraet loest den Code ein (ohne Anmeldung).
+pub fn setup_claim(relay_url: &str, code: &str, id: &str, name: &str) -> Result<SetupClaimReply> {
+    let body = serde_json::to_string(&SetupClaimReq { code, id, name })
+        .map_err(|e| anyhow!("{}", e))?;
+    let (status, text) = post_json(&url(relay_url, "setup/claim"), &body)?;
+    let r: SetupClaimReply = serde_json::from_str(&text).unwrap_or_default();
+    if status != 200 {
+        let msg = if r.error.is_empty() {
+            match status {
+                404 => "Code unbekannt oder abgelaufen".to_string(),
+                410 => "Code wurde schon verwendet".to_string(),
+                _ => format!("Relay meldet Fehler {}", status),
+            }
+        } else {
+            r.error
+        };
+        return Err(anyhow!(msg));
+    }
+    Ok(r)
+}
+
+/// Was ein Einrichtungslauf im Hintergrund zurueckmeldet.
+#[derive(Debug, Clone)]
+pub enum SetupOut {
+    /// Code erzeugt: (code, freeviewer://-Link, Web-Link).
+    Created { code: String, link: String, web: String },
+    /// Posteingang: wartende Codes, frisch eingerichtete Geraete.
+    Inbox { pending: Vec<SetupPending>, claimed: Vec<SetupClaimed> },
+    Failed(String),
+}
+
+/// Code erzeugen im Hintergrund (Oberflaeche wartet nie).
+pub fn setup_create_async(
+    relay_url: String,
+    token: String,
+    password: String,
+    name_hint: String,
+    out: std::sync::Arc<std::sync::Mutex<Option<SetupOut>>>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    if busy.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let res = match setup_create(&relay_url, &token, &password, &name_hint) {
+            Ok((code, link, web)) => SetupOut::Created { code, link, web },
+            Err(e) => SetupOut::Failed(e.to_string()),
+        };
+        *out.lock().unwrap() = Some(res);
+        busy.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Posteingang holen im Hintergrund.
+pub fn setup_inbox_async(
+    relay_url: String,
+    token: String,
+    out: std::sync::Arc<std::sync::Mutex<Option<SetupOut>>>,
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    if busy.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let res = match setup_inbox(&relay_url, &token) {
+            Ok((pending, claimed)) => SetupOut::Inbox { pending, claimed },
+            Err(e) => SetupOut::Failed(e.to_string()),
+        };
+        *out.lock().unwrap() = Some(res);
+        busy.store(false, Ordering::SeqCst);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

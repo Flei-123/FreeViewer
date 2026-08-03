@@ -212,6 +212,7 @@ mod imp {
                 "identity.txt",
                 "password.txt",
                 "partners.json",
+                "name.txt",
                 "noupdate",
             ] {
                 let src = old.join(name);

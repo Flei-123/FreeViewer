@@ -76,7 +76,7 @@ fn desktop_link() -> PathBuf {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS};
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS};
     use winreg::RegKey;
 
     fn wide(s: &str) -> Vec<u16> {
@@ -247,6 +247,16 @@ mod imp {
         let _ = std::fs::remove_file(start_menu_link());
         let _ = std::fs::remove_file(desktop_link());
         remove_uninstall_entry();
+        // freeviewer://-Registrierung wegraeumen (HKLM von der Installation,
+        // HKCU vom portablen Lauf) - sonst starten Links ins Leere.
+        for root in [
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            RegKey::predef(HKEY_CURRENT_USER),
+        ] {
+            if let Ok(k) = root.open_subkey_with_flags(r"Software\Classes", KEY_ALL_ACCESS) {
+                let _ = k.delete_subkey_all(crate::link::SCHEME);
+            }
+        }
 
         // Laufende Prozesse beenden, dann Ordner loeschen. Eine Exe kann sich
         // nicht selbst loeschen, darum macht das ein kurzer cmd-Aufruf,

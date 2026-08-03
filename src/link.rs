@@ -24,6 +24,8 @@ pub enum Action {
     Control(String),
     /// Einem Meeting beitreten.
     Meet { room: String, pass: String },
+    /// Ein neues Geraet einrichten (Einmal-Code aus dem Installation-Tab).
+    Setup(String),
 }
 
 /// Zerlegt `freeviewer://control/123456789` bzw.
@@ -47,6 +49,18 @@ pub fn parse(url: &str) -> Option<Action> {
                 return None;
             }
             Some(Action::Control(id))
+        }
+        "setup" => {
+            // base64url, 8 Zeichen - kommt vom Relay (/fv/setup/create)
+            if wert.len() < 6
+                || wert.len() > 24
+                || !wert
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return None;
+            }
+            Some(Action::Setup(wert))
         }
         "meet" => {
             if wert.is_empty() {
@@ -189,6 +203,16 @@ mod tests {
                 pass: "ab c".into()
             })
         );
+    }
+
+    #[test]
+    fn setup_link_tragt_den_code() {
+        assert_eq!(
+            parse("freeviewer://setup/zZpRpr4L"),
+            Some(Action::Setup("zZpRpr4L".into()))
+        );
+        assert_eq!(parse("freeviewer://setup/kurz"), None);
+        assert_eq!(parse("freeviewer://setup/mit leer!"), None);
     }
 
     #[test]

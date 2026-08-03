@@ -966,6 +966,19 @@ struct App {
     acc_busy: Arc<std::sync::atomic::AtomicBool>,
     acc_out: Arc<std::sync::Mutex<Option<account::SyncOut>>>,
     acc_next: std::time::Instant,
+    /// Einrichten-Tab: Einmal-Links fuer neue Geraete.
+    dep_pw: String,
+    dep_hint_name: String,
+    dep_link: String,
+    dep_msg: String,
+    dep_pending: Vec<account::SetupPending>,
+    dep_claimed: Vec<account::SetupClaimed>,
+    dep_seen: std::collections::HashSet<String>,
+    dep_booted: bool,
+    dep_out: Arc<std::sync::Mutex<Option<account::SetupOut>>>,
+    dep_next: std::time::Instant,
+    /// Einrichtungs-Dialog (freeviewer://setup/<code>).
+    setup_dlg: Option<SetupDlg>,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -1041,6 +1054,17 @@ impl App {
             acc_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             acc_out: Arc::new(std::sync::Mutex::new(None)),
             acc_next: std::time::Instant::now(),
+            dep_pw: ident::random_password(),
+            dep_hint_name: String::new(),
+            dep_link: String::new(),
+            dep_msg: String::new(),
+            dep_pending: Vec::new(),
+            dep_claimed: Vec::new(),
+            dep_seen: std::collections::HashSet::new(),
+            dep_booted: false,
+            dep_out: Arc::new(std::sync::Mutex::new(None)),
+            dep_next: std::time::Instant::now(),
+            setup_dlg: None,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1221,6 +1245,15 @@ impl App {
                 self.view = View::Start;
                 self.hint = i18n::tf("link.control", &partners::pretty_id(&id));
                 self.connect_to(&id);
+            }
+            link::Action::Setup(code) => {
+                // Einmal-Link vom Besitzer: diesen Rechner einrichten und
+                // anschliessend richtig installieren (mit Dienst).
+                self.setup_dlg = Some(SetupDlg {
+                    code,
+                    name: presence::machine_name(),
+                    ..Default::default()
+                });
             }
             link::Action::Meet { room, pass } => {
                 self.view = View::Meet;
@@ -2098,10 +2131,14 @@ impl App {
         let all = self.book.sorted();
         self.presence
             .watch(all.iter().map(|x| x.id.clone()).collect());
-        let q = self.search.trim().to_lowercase();
+        // Fuzzy: Gross-/Kleinschreibung und Trennzeichen sind egal -
+        // "flei one" findet "FLEI-ONE", "497 628" findet die ID.
+        let q = partners::search_norm(&self.search);
         let folder = self.folder.clone();
         let hit = |x: &partners::Partner| {
-            let text = q.is_empty() || x.label().to_lowercase().contains(&q) || x.id.contains(&q);
+            let text = q.is_empty()
+                || partners::search_norm(&x.label()).contains(&q)
+                || partners::search_norm(&x.id).contains(&q);
             let fold = folder.is_empty() || x.group == folder;
             text && fold
         };
@@ -2734,6 +2771,7 @@ impl App {
                     (SettingsTab::General, "settings", i18n::t("set.general")),
                     (SettingsTab::Access, "shield", i18n::t("set.access")),
                     (SettingsTab::Account, "user", i18n::t("set.account")),
+                    (SettingsTab::Deploy, "laptop", i18n::t("set.deploy")),
                     (SettingsTab::Audio, "mic", i18n::t("set.audio")),
                     (SettingsTab::Look, "palette", i18n::t("set.look")),
                     (SettingsTab::Update, "refresh", i18n::t("set.update")),
@@ -2790,6 +2828,7 @@ impl App {
                     SettingsTab::General => self.set_general(ui),
                     SettingsTab::Access => self.set_access(ui),
                     SettingsTab::Account => self.set_account(ui),
+                    SettingsTab::Deploy => self.set_deploy(ui),
                     SettingsTab::Audio => self.set_audio(ui),
                     SettingsTab::Look => self.set_look(ui),
                     SettingsTab::Update => self.set_update(ui),
@@ -3270,6 +3309,328 @@ impl App {
             account::SyncOut::Failed(msg) => {
                 self.acc_msg = msg;
             }
+        }
+    }
+
+    /// Einrichten-Tab: per Einmal-Link ein neues Geraet aufsetzen.
+    fn set_deploy(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        self.take_setup_result();
+        label_small(ui, i18n::t("dep.title"));
+        let Some(sess) = self.acc.clone() else {
+            card(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(i18n::t("dep.need_login"))
+                        .size(12.0)
+                        .color(p.muted),
+                );
+                ui.add_space(8.0);
+                if accent_button(ui, i18n::t("dep.to_account"), true).clicked() {
+                    self.stab = SettingsTab::Account;
+                }
+            });
+            return;
+        };
+        card(ui, |ui| {
+            ui.label(
+                egui::RichText::new(i18n::t("dep.lead"))
+                    .size(12.0)
+                    .color(p.muted),
+            );
+            ui.add_space(8.0);
+            label_small(ui, i18n::t("dep.pw"));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.dep_pw)
+                        .desired_width(200.0)
+                        .margin(egui::Margin::symmetric(8, 4)),
+                );
+                if ghost_button(ui, i18n::t("dep.pw_new")).clicked() {
+                    self.dep_pw = ident::random_password();
+                }
+            });
+            ui.add_space(6.0);
+            label_small(ui, i18n::t("dep.name_hint"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.dep_hint_name)
+                    .desired_width(200.0)
+                    .margin(egui::Margin::symmetric(8, 4))
+                    .hint_text(i18n::t("dep.name_hint_ph")),
+            );
+            ui.add_space(8.0);
+            let busy = self.acc_busy.load(Ordering::Relaxed);
+            let label = if busy {
+                i18n::t("dep.making")
+            } else {
+                i18n::t("dep.make")
+            };
+            if accent_button(ui, label, !busy && !self.dep_pw.trim().is_empty()).clicked() {
+                account::setup_create_async(
+                    self.shared.relay_url.clone(),
+                    sess.token.clone(),
+                    self.dep_pw.trim().to_string(),
+                    self.dep_hint_name.trim().to_string(),
+                    self.dep_out.clone(),
+                    self.acc_busy.clone(),
+                );
+            }
+            if !self.dep_link.is_empty() {
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("dep.link"));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&self.dep_link)
+                            .size(12.0)
+                            .color(p.accent),
+                    );
+                    if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
+                        ui.ctx().copy_text(self.dep_link.clone());
+                    }
+                });
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(i18n::t("dep.link_note"))
+                        .size(11.0)
+                        .color(p.muted),
+                );
+            }
+            if !self.dep_msg.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(&self.dep_msg).size(12.0).color(p.accent));
+            }
+        });
+        ui.add_space(10.0);
+        label_small(ui, i18n::t("dep.status"));
+        card(ui, |ui| {
+            // Solange der Tab offen ist: alle 5 s in den Posteingang sehen.
+            if std::time::Instant::now() >= self.dep_next
+                && !self.acc_busy.load(Ordering::Relaxed)
+            {
+                self.dep_next = std::time::Instant::now() + Duration::from_secs(5);
+                account::setup_inbox_async(
+                    self.shared.relay_url.clone(),
+                    sess.token.clone(),
+                    self.dep_out.clone(),
+                    self.acc_busy.clone(),
+                );
+                ui.ctx().request_repaint_after(Duration::from_secs(5));
+            }
+            if self.dep_pending.is_empty() && self.dep_claimed.is_empty() {
+                ui.label(
+                    egui::RichText::new(i18n::t("dep.none"))
+                        .size(12.0)
+                        .color(p.muted),
+                );
+            }
+            for pend in &self.dep_pending {
+                ui.horizontal(|ui| {
+                    icons::show(ui, "refresh", 14.0, p.muted);
+                    let was = if pend.name_hint.is_empty() {
+                        pend.code.clone()
+                    } else {
+                        format!("{} ({})", pend.name_hint, pend.code)
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{} - {}", was, i18n::t("dep.waiting")))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                });
+                ui.add_space(2.0);
+            }
+            let claimed = self.dep_claimed.clone();
+            for cl in &claimed {
+                ui.horizontal(|ui| {
+                    dot(ui, true);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  {}  -  {}",
+                            cl.name,
+                            partners::pretty_id(&cl.id),
+                            i18n::t("dep.done_row")
+                        ))
+                        .size(12.0),
+                    );
+                    if icon_ghost(ui, "copy", &cl.password).clicked() {
+                        ui.ctx().copy_text(cl.password.clone());
+                    }
+                });
+                ui.add_space(2.0);
+            }
+        });
+    }
+
+    /// Ergebnisse der Einrichtungs-Hintergrundlaeufe abholen.
+    fn take_setup_result(&mut self) {
+        let res = self.dep_out.lock().unwrap().take();
+        let Some(res) = res else { return };
+        match res {
+            account::SetupOut::Created { link, web, .. } => {
+                self.dep_link = if web.is_empty() { link } else { web };
+                self.dep_msg = String::new();
+                // gleich in den Posteingang sehen
+                self.dep_next = std::time::Instant::now();
+            }
+            account::SetupOut::Inbox { pending, claimed } => {
+                if self.dep_booted {
+                    let mut neue = Vec::new();
+                    for cl in &claimed {
+                        if !self.dep_seen.contains(&cl.id) {
+                            self.dep_seen.insert(cl.id.clone());
+                            neue.push(cl.name.clone());
+                        }
+                    }
+                    if !neue.is_empty() {
+                        // liegt jetzt im Konto-Adressbuch - einmal abgleichen
+                        self.hint = i18n::tf("dep.arrived", &neue.join(", "));
+                        self.start_sync(false);
+                    }
+                } else {
+                    // erste Fuellung: nur merken, nichts melden
+                    for cl in &claimed {
+                        self.dep_seen.insert(cl.id.clone());
+                    }
+                    self.dep_booted = true;
+                }
+                self.dep_pending = pending;
+                self.dep_claimed = claimed;
+            }
+            account::SetupOut::Failed(msg) => {
+                self.dep_msg = msg;
+            }
+        }
+    }
+
+    /// Einrichtungs-Dialog: dieses Geraet per Einmal-Code einrichten und
+    /// danach installieren (mit Dienst).
+    fn setup_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.setup_dlg.as_mut() else {
+            return;
+        };
+        // Ergebnis des Einloesens abholen
+        let got = dlg.out.lock().unwrap().take();
+        if let Some(res) = got {
+            match res {
+                Ok(r) => {
+                    let name = presence::clean(&dlg.name);
+                    *self.shared.device_name.lock().unwrap() = name.clone();
+                    let _ = presence::save_device_name(&name);
+                    if !r.password.is_empty() {
+                        *self.shared.password.lock().unwrap() = r.password.clone();
+                        let _ = ident::set_fixed_password(Some(&r.password));
+                        self.pw_fixed = true;
+                    }
+                    dlg.owner = if r.owner.is_empty() { r.name_hint } else { r.owner };
+                    dlg.done = true;
+                    // Installation mit Dienst - fragt einmal nach Admin-Rechten
+                    if !setup::running_installed() {
+                        if let Err(e) = service::elevate("--install --with-service") {
+                            dlg.err = format!("{}", e);
+                        }
+                    }
+                }
+                Err(e) => dlg.err = e,
+            }
+        }
+        let mut offen = true;
+        let mut los = false;
+        let mut weg = false;
+        egui::Window::new(i18n::t("setup.title"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut offen)
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(theme::card())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                if dlg.done {
+                    ui.label(
+                        egui::RichText::new(i18n::tf("setup.done", &dlg.owner))
+                            .size(13.5),
+                    );
+                    if !dlg.err.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&dlg.err)
+                                .size(12.0)
+                                .color(theme::muted()),
+                        );
+                    }
+                    ui.add_space(10.0);
+                    if accent_button(ui, "OK", true).clicked() {
+                        weg = true;
+                    }
+                    return;
+                }
+                ui.label(
+                    egui::RichText::new(i18n::t("setup.lead"))
+                        .size(12.0)
+                        .color(theme::muted()),
+                );
+                ui.add_space(8.0);
+                label_small(ui, i18n::t("setup.name"));
+                let enter = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut dlg.name)
+                            .desired_width(240.0)
+                            .margin(egui::Margin::symmetric(8, 4)),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if !dlg.err.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(&dlg.err)
+                            .size(12.0)
+                            .color(theme::muted()),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let busy = dlg.busy.load(Ordering::Relaxed);
+                    let label = if busy {
+                        i18n::t("setup.working")
+                    } else {
+                        i18n::t("setup.ok")
+                    };
+                    if accent_button(ui, label, !busy).clicked() || (enter && !busy) {
+                        if dlg.name.trim().is_empty() {
+                            dlg.err = i18n::t("setup.noname").to_string();
+                        } else {
+                            dlg.err.clear();
+                            los = true;
+                        }
+                    }
+                    if ghost_button(ui, i18n::t("setup.cancel")).clicked() {
+                        weg = true;
+                    }
+                });
+            });
+        if los {
+            let dlg = self.setup_dlg.as_ref().unwrap();
+            let relay = self.shared.relay_url.clone();
+            let code = dlg.code.clone();
+            let name = presence::clean(&dlg.name);
+            let id = self.shared.my_id.lock().unwrap().clone();
+            let busy = dlg.busy.clone();
+            let out = dlg.out.clone();
+            if !busy.swap(true, Ordering::SeqCst) {
+                std::thread::spawn(move || {
+                    let res = account::setup_claim(&relay, &code, &id, &name)
+                        .map_err(|e| e.to_string());
+                    *out.lock().unwrap() = Some(res);
+                    busy.store(false, Ordering::SeqCst);
+                });
+            }
+        }
+        if weg || !offen {
+            self.setup_dlg = None;
         }
     }
 
@@ -4311,6 +4672,7 @@ impl eframe::App for App {
         }
         self.tray_ui(ctx);
         self.knock_ui(ctx);
+        self.setup_dialog_ui(ctx);
         self.pull_frame(ctx);
         // eframe setzt beim Start (und wenn Windows zwischen hell und dunkel
         // wechselt) sein eigenes Aussehen durch - dann fehlen zum Beispiel die
@@ -4503,12 +4865,25 @@ struct DevEdit {
     folder: String,
 }
 
+/// Zustand des Einrichtungs-Dialogs (freeviewer://setup/<code>).
+#[derive(Default)]
+struct SetupDlg {
+    code: String,
+    name: String,
+    busy: Arc<std::sync::atomic::AtomicBool>,
+    out: Arc<std::sync::Mutex<Option<Result<account::SetupClaimReply, String>>>>,
+    err: String,
+    owner: String,
+    done: bool,
+}
+
 /// Bereiche innerhalb der Einstellungen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
     Access,
     Account,
+    Deploy,
     Audio,
     Look,
     Update,
