@@ -524,11 +524,25 @@ fn main() -> eframe::Result<()> {
     }
     if service_owns_host {
         shared.set_host_status("Der Dienst betreibt den Host - auch am Anmeldebildschirm");
+    }
+    if !is_agent && !viewer_only {
+        // ID und Passwort vom Dienst-Agenten uebernehmen, sobald er sie
+        // veroeffentlicht - egal ob der Dienst schon beim Start lief oder
+        // die Oberflaeche erst spaeter ersetzt wurde. Nur frische Angaben
+        // (< 90 s) gelten, damit eine alte state.json nichts ueberschreibt.
         let sh = shared.clone();
         std::thread::spawn(move || loop {
             if let Some(p) = service::published() {
-                *sh.my_id.lock().unwrap() = p.id;
-                *sh.password.lock().unwrap() = p.password;
+                let frisch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .saturating_sub(p.at)
+                    < 90;
+                if frisch && !p.id.is_empty() {
+                    *sh.my_id.lock().unwrap() = p.id;
+                    *sh.password.lock().unwrap() = p.password;
+                }
             }
             std::thread::sleep(Duration::from_secs(2));
         });
@@ -804,7 +818,7 @@ fn main() -> eframe::Result<()> {
                         "account" => SettingsTab::Account,
                         "audio" => SettingsTab::Audio,
                         "look" => SettingsTab::Look,
-                        "update" => SettingsTab::Update,
+                        "deploy" => SettingsTab::Deploy,
                         "feedback" => SettingsTab::Feedback,
                         "about" => SettingsTab::About,
                         _ => SettingsTab::General,
@@ -2780,7 +2794,6 @@ impl App {
                     (SettingsTab::Deploy, "laptop", i18n::t("set.deploy")),
                     (SettingsTab::Audio, "mic", i18n::t("set.audio")),
                     (SettingsTab::Look, "palette", i18n::t("set.look")),
-                    (SettingsTab::Update, "refresh", i18n::t("set.update")),
                     (SettingsTab::Feedback, "chat", i18n::t("set.feedback")),
                     (SettingsTab::About, "eye", i18n::t("set.about")),
                 ] {
@@ -2837,7 +2850,6 @@ impl App {
                     SettingsTab::Deploy => self.set_deploy(ui),
                     SettingsTab::Audio => self.set_audio(ui),
                     SettingsTab::Look => self.set_look(ui),
-                    SettingsTab::Update => self.set_update(ui),
                     SettingsTab::Feedback => self.set_feedback(ui),
                     SettingsTab::About => self.set_about(ui),
                 }
@@ -3916,40 +3928,6 @@ impl App {
     }
 
     /// Update-Karte: Version, Suchen, Automatik.
-    fn set_update(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette();
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                info_row(ui, i18n::t("set.version"), update::VERSION);
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if icons::text_button(ui, "refresh", i18n::t("upd.check"), false).clicked() {
-                    let sh = self.shared.clone();
-                    sh.set_update_status(i18n::t("upd.checking"));
-                    std::thread::spawn(move || match update::check() {
-                        Ok(rel) => {
-                            if update::newer(&rel.version, update::VERSION) {
-                                sh.set_update_status(format!("{} {}", i18n::t("upd.found"), rel.version));
-                                *sh.update.lock().unwrap() = Some(rel);
-                            } else {
-                                sh.set_update_status(format!("{} (v{})", i18n::t("upd.current"), update::VERSION));
-                            }
-                        }
-                        Err(e) => sh.set_update_status(format!("{}: {}", i18n::t("upd.failed"), e)),
-                    });
-                }
-                self.update_ui(ui);
-            });
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(i18n::t("upd.note"))
-                    .size(11.0)
-                    .color(p.muted),
-            );
-        });
-    }
-
     /// Rueckmeldung: Fehler oder Idee, direkt aus dem Programm.
     fn set_feedback(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
@@ -4966,7 +4944,6 @@ enum SettingsTab {
     Deploy,
     Audio,
     Look,
-    Update,
     Feedback,
     About,
 }
