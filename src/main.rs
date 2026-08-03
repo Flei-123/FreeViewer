@@ -4637,17 +4637,28 @@ fn paint_background(ctx: &egui::Context) {
 
 /// Marke oben links: abgerundetes Quadrat mit Auge.
 fn logo(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::accent().gamma_multiply(0.18));
-    p.rect_stroke(
-        rect,
-        10.0,
-        egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.55)),
-        egui::StrokeKind::Inside,
-    );
-    p.circle_stroke(rect.center(), 8.0, egui::Stroke::new(2.0, theme::accent()));
-    p.circle_filled(rect.center(), 3.0, theme::accent());
+    // Das echte FreeViewer-Logo - dasselbe Bild wie auf der Webseite und als
+    // Fenstersymbol. Einmal als Textur laden, danach nur noch malen.
+    let id = egui::Id::new("fv_logo_tex");
+    let tex = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<egui::TextureHandle>(id))
+        .unwrap_or_else(|| {
+            let bild = image::load_from_memory(include_bytes!("../assets/icon.png"))
+                .map(|i| i.to_rgba8())
+                .unwrap_or_else(|_| {
+                    image::RgbaImage::from_pixel(1, 1, image::Rgba([0x38, 0xbd, 0xf8, 0xff]))
+                });
+            let (w, h) = bild.dimensions();
+            let ci =
+                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &bild.into_raw());
+            let t = ui
+                .ctx()
+                .load_texture("fv_logo", ci, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, t.clone()));
+            t
+        });
+    ui.image((tex.id(), egui::vec2(34.0, 34.0)));
 }
 
 /// Reiter in der Kopfzeile.
