@@ -266,6 +266,9 @@ impl Session {
     }
 
     fn stop(self) {
+        // vom Zugreifenden geaenderte Aufloesung wieder zuruecksetzen
+        let idx = self.monitor.load(Ordering::Relaxed) as usize;
+        crate::res::restore(idx);
         self.stop.store(true, Ordering::Relaxed);
     }
 
@@ -403,6 +406,10 @@ impl Session {
                         }
                         Msg::SetMonitor { index } => {
                             self.monitor.store(index, Ordering::Relaxed);
+                        }
+                        Msg::SetResolution { width, height } => {
+                            let idx = self.monitor.load(Ordering::Relaxed) as usize;
+                            let _ = crate::res::set_resolution(idx, width, height);
                         }
                         Msg::NeedKeyframe => {
                             self.force_key.store(true, Ordering::Relaxed);

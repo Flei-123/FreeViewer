@@ -27,6 +27,7 @@ mod meet;
 mod input;
 mod net;
 mod p2p;
+mod res;
 mod partners;
 mod presence;
 mod pwlist;
@@ -4202,6 +4203,32 @@ impl App {
                 });
         }
 
+        // Aufloesung des fernen Bildschirms - der Host stellt um und setzt
+        // am Sitzungsende die vorherige wieder.
+        ui.separator();
+        {
+            let (rw, rh) = *self.shared.remote_size.lock().unwrap();
+            egui::ComboBox::from_id_salt("res_pick")
+                .selected_text(format!("{}x{}", rw, rh))
+                .show_ui(ui, |ui| {
+                    for (w, h) in [
+                        (1280u32, 720u32),
+                        (1600, 900),
+                        (1920, 1080),
+                        (2560, 1440),
+                        (3440, 1440),
+                        (3840, 2160),
+                    ] {
+                        if ui
+                            .selectable_label(w == rw && h == rh, format!("{}x{}", w, h))
+                            .clicked()
+                        {
+                            a.res = Some((w, h));
+                        }
+                    }
+                });
+        }
+
         ui.separator();
         self.voice_buttons(ui, 16.0);
         ui.separator();
@@ -4501,6 +4528,9 @@ impl App {
             self.shared.send_input(Msg::SetMonitor { index: i });
             self.tex = None;
             self.last_seq = 0;
+        }
+        if let Some((w, h)) = a.res {
+            self.shared.send_input(Msg::SetResolution { width: w, height: h });
         }
         if let Some(code) = a.special {
             self.shared.send_input(Msg::Special { code });
@@ -4922,6 +4952,8 @@ struct BarActs {
     disconnect: bool,
     mode: Option<u8>,
     monitor: Option<u8>,
+    /// Gewuenschte Aufloesung auf dem Host (Breite, Hoehe).
+    res: Option<(u32, u32)>,
     special: Option<u8>,
     pick: bool,
     open_dir: bool,

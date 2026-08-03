@@ -87,6 +87,9 @@ pub enum Msg {
     Monitors { active: u8, list: Vec<MonitorInfo> },
     /// Viewer picks the screen to capture (index into the list above).
     SetMonitor { index: u8 },
+    /// Viewer asks the host to change the resolution of the captured screen.
+    /// The host puts the old one back when the session ends.
+    SetResolution { width: u32, height: u32 },
     /// Start of a file transfer. Works in both directions.
     FileOffer { id: u32, name: String, size: u64 },
     /// One piece of the file at byte offset `off`.
@@ -157,6 +160,7 @@ const T_MONS: u8 = 0x24;
 const T_VIDEO: u8 = 0x25;
 const T_CAPS: u8 = 0x26;
 const T_SETMON: u8 = 0x39;
+const T_SETRES: u8 = 0x3A;
 const T_FOFFER: u8 = 0x50;
 const T_FCHUNK: u8 = 0x51;
 const T_FEND: u8 = 0x52;
@@ -329,6 +333,11 @@ pub fn encode(m: &Msg) -> Vec<u8> {
         Msg::SetMonitor { index } => {
             v.push(T_SETMON);
             v.push(*index);
+        }
+        Msg::SetResolution { width, height } => {
+            v.push(T_SETRES);
+            pu32(&mut v, *width);
+            pu32(&mut v, *height);
         }
         Msg::FileOffer { id, name, size } => {
             let nb = name.as_bytes();
@@ -564,6 +573,10 @@ pub fn decode(b: &[u8]) -> Option<Msg> {
             Some(Msg::Monitors { active, list })
         }
         T_SETMON => Some(Msg::SetMonitor { index: r.u8()? }),
+        T_SETRES => Some(Msg::SetResolution {
+            width: r.u32()?,
+            height: r.u32()?,
+        }),
         T_FOFFER => {
             let id = r.u32()?;
             let size = r.u64()?;
