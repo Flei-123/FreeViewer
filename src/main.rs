@@ -296,6 +296,10 @@ fn main() -> eframe::Result<()> {
     // ---- the Windows service -------------------------------------------
     // "freeviewer --service" is what the service control manager starts.
     if std::env::args().any(|a| a == "--service") {
+        // Der Dienst spielt Updates selbst ein - er laeuft als SYSTEM und
+        // braucht dafuer keine Administrator-Nachfrage.
+        #[cfg(windows)]
+        update::service_watcher();
         if let Err(e) = service::run() {
             service::log(&format!("Dienst konnte nicht starten: {}", e));
         }
@@ -763,7 +767,10 @@ fn main() -> eframe::Result<()> {
     }
 
     vinput::init(shared.clone());
-    update::watcher(shared.clone());
+    // Ist der Dienst installiert, macht ER das Update (als SYSTEM, ohne
+    // Nachfrage). Oberflaeche und Agent sehen dann nur nach und melden es -
+    // sonst fragten beide staendig nach Administrator-Rechten.
+    update::watcher(shared.clone(), !service::installed());
 
     // Bild der eigenen Oberflaeche:
     //   freeviewer --shot C:\bild.jpg [--view start|devices|settings] [--demo]

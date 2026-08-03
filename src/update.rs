@@ -164,11 +164,44 @@ pub fn swap_into(fresh: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes the leftover of a previous update (called at every start).
+/// Raeumt weg, was ein frueheres Update liegen gelassen hat (bei jedem Start).
+///
+/// Frueher wurden nur ".old" und ".new" geloescht. Konnte die alte Datei nicht
+/// weg (weil sie noch lief), blieben Reste wie "freeviewer.old2" fuer immer im
+/// Programmordner liegen - deshalb wird jetzt alles aufgeraeumt, was neben der
+/// Exe mit demselben Namen und einer Update-Endung steht.
 pub fn cleanup() {
-    if let Ok(cur) = std::env::current_exe() {
-        let _ = std::fs::remove_file(cur.with_extension("old"));
-        let _ = std::fs::remove_file(cur.with_extension("new"));
+    let Ok(cur) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::fs::remove_file(cur.with_extension("old"));
+    let _ = std::fs::remove_file(cur.with_extension("new"));
+    let (Some(dir), Some(stem)) = (cur.parent(), cur.file_stem()) else {
+        return;
+    };
+    let stem = stem.to_string_lossy().to_lowercase();
+    let Ok(eintraege) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in eintraege.flatten() {
+        let p = e.path();
+        if p == cur {
+            continue;
+        }
+        let gleicher_name = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase() == stem)
+            .unwrap_or(false);
+        let update_rest = p
+            .extension()
+            .map(|x| {
+                let x = x.to_string_lossy().to_lowercase();
+                x == "new" || x.starts_with("old")
+            })
+            .unwrap_or(false);
+        if gleicher_name && update_rest {
+            let _ = std::fs::remove_file(&p);
+        }
     }
 }
 
@@ -292,24 +325,44 @@ fn busy(shared: &Arc<Shared>) -> bool {
         || shared.connecting.load(Ordering::Relaxed)
 }
 
-/// Background thread: looks for a new build now and every few hours.
-pub fn watcher(shared: Arc<Shared>) {
+/// Hintergrund-Faden: sucht jetzt und alle paar Stunden nach einem neuen Stand.
+///
+/// `darf_einspielen` = false heisst: nur nachsehen und Bescheid sagen. Das ist
+/// der Normalfall, sobald der Dienst installiert ist - der laeuft als SYSTEM,
+/// darf nach "Programme" schreiben und braucht dafuer KEINE Nachfrage. Frueher
+/// versuchten Oberflaeche UND Agent den Tausch selbst; beide landeten bei
+/// "Zugriff verweigert", riefen die Administrator-Abfrage auf und probierten
+/// es jede Minute erneut - daher die vielen Nachfragen.
+pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
     cleanup();
     std::thread::spawn(move || loop {
+        // Nach einem gescheiterten Versuch (z. B. Nachfrage abgelehnt) wird in
+        // dieser Runde nicht noch einmal angesetzt.
+        let mut gescheitert = false;
         match check() {
             Ok(rel) => {
                 if newer(&rel.version, VERSION) {
                     *shared.update.lock().unwrap() = Some(rel.clone());
-                    shared.set_update_status(format!(
-                        "Update {} verfuegbar (dieser Stand: {})",
-                        rel.version, VERSION
-                    ));
-                    if shared.auto_update.load(Ordering::Relaxed) && !busy(&shared) {
-                        shared.set_update_status(format!("Installiere Update {} ...", rel.version));
-                        match install(&rel) {
-                            Ok(()) => {}
-                            Err(e) => shared.set_update_status(format!("Update fehlgeschlagen: {}", e)),
+                    if darf_einspielen {
+                        shared.set_update_status(format!(
+                            "Update {} verfuegbar (dieser Stand: {})",
+                            rel.version, VERSION
+                        ));
+                        if shared.auto_update.load(Ordering::Relaxed) && !busy(&shared) {
+                            shared.set_update_status(format!(
+                                "Installiere Update {} ...",
+                                rel.version
+                            ));
+                            if let Err(e) = install(&rel) {
+                                gescheitert = true;
+                                shared.set_update_status(format!("Update fehlgeschlagen: {}", e));
+                            }
                         }
+                    } else {
+                        shared.set_update_status(format!(
+                            "Update {} wird vom Dienst eingespielt (dieser Stand: {})",
+                            rel.version, VERSION
+                        ));
                     }
                 } else {
                     *shared.update.lock().unwrap() = None;
@@ -318,20 +371,64 @@ pub fn watcher(shared: Arc<Shared>) {
             }
             Err(e) => shared.set_update_status(format!("Update-Pruefung: {}", e)),
         }
-        // check again later, but look every minute whether a pending update can
-        // finally be installed (session ended in the meantime)
+        // Spaeter neu nachsehen. Wartet ein Update darauf, dass eine Sitzung
+        // endet, wird minuetlich geprueft - aber nur, wenn dieser Prozess
+        // ueberhaupt einspielen darf und es nicht gerade gescheitert ist.
         for _ in 0..(EVERY.as_secs() / 60) {
             std::thread::sleep(Duration::from_secs(60));
+            if !darf_einspielen || gescheitert {
+                continue;
+            }
             let pending = shared.update.lock().unwrap().clone();
             if let Some(rel) = pending {
                 if shared.auto_update.load(Ordering::Relaxed) && !busy(&shared) {
                     shared.set_update_status(format!("Installiere Update {} ...", rel.version));
                     if let Err(e) = install(&rel) {
+                        gescheitert = true;
                         shared.set_update_status(format!("Update fehlgeschlagen: {}", e));
                     }
                 }
             }
         }
+    });
+}
+
+/// Der Updater des Dienstes. Laeuft als SYSTEM, darf also direkt nach
+/// "Programme" schreiben - ohne jede Administrator-Nachfrage. Nach dem Tausch
+/// startet der Dienst sich selbst neu; dabei bekommt auch der Agent im
+/// Benutzer-Desktop den frischen Stand.
+#[cfg(windows)]
+pub fn service_watcher() {
+    cleanup();
+    std::thread::spawn(move || loop {
+        if let Ok(rel) = check() {
+            if newer(&rel.version, VERSION) && crate::ident::auto_update_enabled() {
+                crate::service::log(&format!("Update {} gefunden", rel.version));
+                match download(&rel).and_then(|fresh| {
+                    let ziel = std::env::current_exe()?;
+                    swap_into(&fresh, &ziel)
+                }) {
+                    Ok(()) => {
+                        crate::service::log("Update eingespielt - Dienst startet neu");
+                        // Der Neustart muss von aussen kommen: ein Dienst kann
+                        // sich nicht selbst stoppen und wieder starten.
+                        let _ = crate::service::kill_agent();
+                        let _ = std::process::Command::new("cmd")
+                            .args([
+                                "/c",
+                                &format!(
+                                    "sc stop {n} & ping -n 3 127.0.0.1 >nul & sc start {n}",
+                                    n = crate::service::SERVICE_NAME
+                                ),
+                            ])
+                            .spawn();
+                        return;
+                    }
+                    Err(e) => crate::service::log(&format!("Update fehlgeschlagen: {}", e)),
+                }
+            }
+        }
+        std::thread::sleep(EVERY);
     });
 }
 
