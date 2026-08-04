@@ -1,0 +1,684 @@
+From fe379876a7aedbe7d2e4eb1e6f02b121a72de7b4 Mon Sep 17 00:00:00 2001
+From: Justin <justin@fleitec.com>
+Date: Tue, 4 Aug 2026 12:29:08 +0000
+Subject: [PATCH] v0.26.0: Lizenz-Geruest hinter Cargo-Merkmal license -
+ Ed25519-Schluessel, Aktivierungs-Fenster, Karte in Ueber, keygen-Werkzeug.
+ FreeViewer-Build bleibt ohne Merkmal komplett frei.
+
+---
+ Cargo.toml        |  14 +-
+ src/bin/keygen.rs |  95 ++++++++++++++
+ src/i18n.rs       |  16 +++
+ src/license.rs    | 316 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/main.rs       | 127 +++++++++++++++++++
+ 5 files changed, 567 insertions(+), 1 deletion(-)
+ create mode 100644 src/bin/keygen.rs
+ create mode 100644 src/license.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 3faa8c1..bda1817 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ ﻿[package]
+ name = "freeviewer"
+-version = "0.25.0"
++version = "0.26.0"
+ edition = "2021"
+ description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
+ license = "GPL-3.0"
+@@ -44,6 +44,7 @@ hmac = "0.12"
+ sha2 = "0.10"
+ argon2 = "0.5"
+ rand = "0.8"
++ed25519-dalek = { version = "2", optional = true }
+ 
+ # DXGI Desktop Duplication capture + SendInput / low level hooks (Windows only)
+ [target.'cfg(windows)'.dependencies.windows]
+@@ -77,6 +78,11 @@ features = [
+ [target.'cfg(windows)'.dependencies]
+ winreg = "0.52"
+ 
++[features]
++# Lizenz-Pruefung - NUR fuer Marken-Builds (X-Remote). Der normale
++# FreeViewer-Build bleibt ohne dieses Merkmal komplett frei.
++license = ["dep:ed25519-dalek"]
++
+ [profile.release]
+ opt-level = 3
+ lto = true
+@@ -85,3 +91,9 @@ strip = true
+ [[bin]]
+ name = "freeviewer"
+ path = "src/main.rs"
++
++# Schluessel-Werkzeug - wird nur gebaut, wenn das Lizenz-Merkmal an ist.
++[[bin]]
++name = "keygen"
++path = "src/bin/keygen.rs"
++required-features = ["license"]
+diff --git a/src/bin/keygen.rs b/src/bin/keygen.rs
+new file mode 100644
+index 0000000..26b9f81
+--- /dev/null
++++ b/src/bin/keygen.rs
+@@ -0,0 +1,95 @@
++//! Schluessel-Werkzeug fuer X-Remote-Lizenzen. Liegt zwar im oeffentlichen
++//! Repo, ist aber ohne den privaten Schluessel nutzlos - der bleibt beim
++//! Verkaeufer. Bauen: cargo build --release --features license --bin keygen
++//!
++//! Aufruf:
++//!   keygen new                              -> neues Schluesselpaar (einmalig!)
++//!   keygen make <priv-hex> "Name" [tage]    -> Lizenzschluessel
++//!     tage: Laufzeit ab heute, 0 oder weglassen = unbegrenzt
++//!
++//! Das Format (Nachricht || Ed25519-Signatur, Base32-Crockford) muss exakt
++//! dem in src/license.rs entsprechen - dort sitzt die Pruefung im Client.
++
++const B32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
++
++fn b32_encode(data: &[u8]) -> String {
++    let mut out = String::with_capacity(data.len() * 8 / 5 + data.len() / 5);
++    let (mut acc, mut bits) = (0u32, 0u32);
++    let mut n = 0usize;
++    for &b in data {
++        acc = (acc << 8) | b as u32;
++        bits += 8;
++        while bits >= 5 {
++            bits -= 5;
++            out.push(B32[((acc >> bits) & 31) as usize] as char);
++            n += 1;
++            if n % 5 == 0 {
++                out.push('-');
++            }
++        }
++    }
++    if bits > 0 {
++        out.push(B32[((acc << (5 - bits)) & 31) as usize] as char);
++    }
++    out.trim_end_matches('-').to_string()
++}
++
++fn days_since_2026() -> u32 {
++    const EPOCH_2026: u64 = 1_767_225_600;
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs())
++        .unwrap_or(0);
++    (now.saturating_sub(EPOCH_2026) / 86_400) as u32
++}
++
++fn main() {
++    let args: Vec<String> = std::env::args().collect();
++    match args.get(1).map(|s| s.as_str()) {
++        Some("new") => {
++            use ed25519_dalek::SigningKey;
++            let mut seed = [0u8; 32];
++            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
++            let sk = SigningKey::from_bytes(&seed);
++            println!("privat (GEHEIM halten, nie ins Repo!):");
++            println!("  {}", hex::encode(sk.to_bytes()));
++            println!("oeffentlich (gehoert in license.rs / FV_LICENSE_PUBKEY):");
++            println!("  {}", hex::encode(sk.verifying_key().to_bytes()));
++        }
++        Some("make") => {
++            use ed25519_dalek::{Signer, SigningKey};
++            let (Some(priv_hex), Some(name)) = (args.get(2), args.get(3)) else {
++                eprintln!("keygen make <priv-hex> \"Name\" [tage]");
++                std::process::exit(2);
++            };
++            let days: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
++            let expires = if days == 0 { 0 } else { days_since_2026() + days };
++            let raw = hex::decode(priv_hex).expect("privater Schluessel: kein hex");
++            assert!(raw.len() == 32, "privater Schluessel: 32 Bytes erwartet");
++            let mut b = [0u8; 32];
++            b.copy_from_slice(&raw);
++            let sk = SigningKey::from_bytes(&b);
++            let n = name.trim();
++            assert!(!n.is_empty() && n.len() <= 60, "Name: 1-60 Zeichen");
++            // Nachricht: "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8
++            let mut msg = Vec::new();
++            msg.extend_from_slice(b"XRL1");
++            msg.push(n.len() as u8);
++            msg.extend_from_slice(n.as_bytes());
++            msg.extend_from_slice(&expires.to_le_bytes());
++            msg.push(0u8); // Ausgabe 0 = Pro
++            let sig = sk.sign(&msg);
++            msg.extend_from_slice(&sig.to_bytes());
++            println!("{}", b32_encode(&msg));
++            if expires != 0 {
++                eprintln!("(laeuft ab: Tag {} seit 1.1.2026)", expires);
++            }
++        }
++        _ => {
++            eprintln!("X-Remote Lizenz-Schluessel-Werkzeug");
++            eprintln!("  keygen new");
++            eprintln!("  keygen make <priv-hex> \"Name\" [tage]");
++            std::process::exit(2);
++        }
++    }
++}
+diff --git a/src/i18n.rs b/src/i18n.rs
+index 6002024..2b88760 100644
+--- a/src/i18n.rs
++++ b/src/i18n.rs
+@@ -517,6 +517,22 @@ const TABLE: &[(&str, &str, &str)] = &[
+         "Damit dieser Mac freigegeben werden kann: Systemeinstellungen - Datenschutz & Sicherheit - Bildschirmaufnahme UND Bedienungshilfen fuer FreeViewer einschalten.",
+         "To share this Mac: System Settings - Privacy & Security - turn on Screen Recording AND Accessibility for FreeViewer.",
+     ),
++    // Lizenz (nur Marken-Builds mit dem Lizenz-Merkmal, z. B. X-Remote)
++    ("lic.title", "Lizenz", "License"),
++    (
++        "lic.intro",
++        "Gib deinen Lizenzschlüssel ein, um diese Installation freizuschalten. Du bekommst ihn beim Kauf per E-Mail.",
++        "Enter your license key to activate this installation. You receive it by e-mail when you buy.",
++    ),
++    ("lic.key_ph", "XXXXX-XXXXX-XXXXX-…", "XXXXX-XXXXX-XXXXX-…"),
++    ("lic.activate", "Aktivieren", "Activate"),
++    ("lic.later", "Später", "Later"),
++    ("lic.holder", "Lizenziert für", "Licensed to"),
++    ("lic.expires", "Gültig bis", "Valid until"),
++    ("lic.none", "Keine Lizenz auf diesem Rechner.", "No license on this machine."),
++    ("lic.invalid", "Schlüssel ungültig: {}", "Invalid key: {}"),
++    ("lic.ok_msg", "Lizenz aktiviert für {}", "License activated for {}"),
++    ("lic.remove", "Lizenz entfernen", "Remove license"),
+ ];
+ 
+ pub fn t(key: &str) -> &'static str {
+diff --git a/src/license.rs b/src/license.rs
+new file mode 100644
+index 0000000..2911807
+--- /dev/null
++++ b/src/license.rs
+@@ -0,0 +1,316 @@
++//! Lizenz-Pruefung fuer Marken-Builds (z. B. X-Remote). Dieses Modul wird
++//! NUR mit `--features license` kompiliert - der FreeViewer-Build enthaelt
++//! keinen Lizenzcode und bleibt komplett frei.
++//!
++//! Prinzip: Der Lizenzschluessel ist eine Nachricht (Name, Ablaufdatum,
++//! Ausgabe) plus einer Ed25519-Signatur. Unterschreiben kann nur, wer den
++//! privaten Schluessel hat (der bleibt beim Verkaeufer, NIEMALS im Repo).
++//! Im Build steckt nur der oeffentliche Schluessel - gefaelsche Schluessel
++//! fallen bei der Pruefung durch.
++//!
++//! Format des Schluessels, wie ihn der Kunde bekommt:
++//!   Base32-Crockford der Bytes  nachricht || signatur(64)
++//!   nachricht = "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8
++//!   in Fuenfergruppen mit Bindestrichen.
++//!
++//! Ablauf: Tage seit dem 1.1.2026, 0 = unbegrenzt. Ausgabe: 0 = Pro.
++
++use std::fs;
++use std::path::PathBuf;
++
++/// Oeffentlicher Pruef-Schluessel (Ed25519, 32 Bytes, hex). Darf per
++/// FV_LICENSE_PUBKEY beim Bauen ueberschrieben werden; der eingebaute Wert
++/// ist der Produktiv-Schluessel von X-Remote. Der zugehoerige private
++/// Schluessel liegt ausserhalb des Repos.
++pub const PUBKEY_HEX: &str = match option_env!("FV_LICENSE_PUBKEY") {
++    Some(s) => s,
++    None => "9c24c5d917aa3cab5f3ddc63f7e7026efd08bd68f82d5177089efc8fe5364230",
++};
++
++/// Eine gueltige Lizenz.
++#[derive(Clone, Debug)]
++pub struct License {
++    /// Wem die Lizenz gehoert (Name oder E-Mail des Kunden).
++    pub name: String,
++    /// Ablauftag (Tage seit 1.1.2026) - 0 heisst unbegrenzt.
++    pub expires: u32,
++    /// 0 = Pro (spaeter weitere Stufen).
++    pub edition: u8,
++}
++
++/// Was die Pruefung ergeben hat.
++#[derive(Clone, Debug)]
++pub enum Status {
++    /// Gueltige Lizenz auf diesem Rechner gespeichert.
++    Active(License),
++    /// Noch kein Schluessel eingegeben.
++    Missing,
++    /// Es gibt einen Schluessel, aber er ist ungueltig oder abgelaufen.
++    Invalid(String),
++}
++
++fn key_file() -> PathBuf {
++    crate::ident::config_dir().join("license.key")
++}
++
++/// Heutige Tag-Nummer (Tage seit dem 1.1.2026).
++fn today() -> u32 {
++    // Ein Tag Unschaerfe bei Ablaufdaten ist egal - die Uhr des Rechners
++    // ist ohnehin nur so genau wie der Benutzer sie stellt.
++    const EPOCH_2026: u64 = 1_767_225_600;
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs())
++        .unwrap_or(0);
++    (now.saturating_sub(EPOCH_2026) / 86_400) as u32
++}
++
++impl License {
++    /// Abgelaufen? Unbegrenzte Lizenzen (0) laufen nie ab.
++    pub fn expired(&self) -> bool {
++        self.expires != 0 && today() > self.expires
++    }
++
++    /// Lesbares Ablaufdatum oder "unbegrenzt".
++    pub fn expiry_text(&self) -> String {
++        if self.expires == 0 {
++            return "unbegrenzt".to_string();
++        }
++        // Tage seit 1.1.2026 zurueckrechnen (Schaltjahre beachten).
++        let mut days = self.expires as i64;
++        let mut year = 2026i64;
++        loop {
++            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
++            let yd = if leap { 366 } else { 365 };
++            if days < yd {
++                break;
++            }
++            days -= yd;
++            year += 1;
++        }
++        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
++        const MLEN: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
++        let mut month = 0usize;
++        while month < 12 {
++            let m = if month == 1 && leap { 29 } else { MLEN[month] };
++            if days < m {
++                break;
++            }
++            days -= m;
++            month += 1;
++        }
++        format!("{:02}.{:02}.{}", days + 1, month + 1, year)
++    }
++}
++
++// ---------------------------------------------------------------- base32 ---
++// Crockford: ohne I, L, O, U - keine Verwechslungen beim Abtippen.
++
++const B32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
++
++fn b32_encode(data: &[u8]) -> String {
++    let mut out = String::with_capacity(data.len() * 8 / 5 + data.len() / 5);
++    let (mut acc, mut bits) = (0u32, 0u32);
++    let mut n = 0usize;
++    for &b in data {
++        acc = (acc << 8) | b as u32;
++        bits += 8;
++        while bits >= 5 {
++            bits -= 5;
++            out.push(B32[((acc >> bits) & 31) as usize] as char);
++            n += 1;
++            if n % 5 == 0 {
++                out.push('-');
++            }
++        }
++    }
++    if bits > 0 {
++        out.push(B32[((acc << (5 - bits)) & 31) as usize] as char);
++    }
++    out.trim_end_matches('-').to_string()
++}
++
++fn b32_decode(s: &str) -> Option<Vec<u8>> {
++    let mut out = Vec::with_capacity(s.len() * 5 / 8);
++    let (mut acc, mut bits) = (0u32, 0u32);
++    for c in s.trim().chars() {
++        if c == '-' || c == ' ' {
++            continue;
++        }
++        let c = c.to_ascii_uppercase();
++        // Nachsicht beim Abtippen: O -> 0, I/L -> 1
++        let c = match c {
++            'O' => '0',
++            'I' | 'L' => '1',
++            c => c,
++        };
++        let v = B32.iter().position(|&b| b as char == c)? as u32;
++        acc = (acc << 5) | v;
++        bits += 5;
++        if bits >= 8 {
++            bits -= 8;
++            out.push(((acc >> bits) & 0xff) as u8);
++        }
++    }
++    Some(out)
++}
++
++// ------------------------------------------------------------- signatur ---
++
++/// Nachricht bauen: "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8.
++fn message(name: &str, expires: u32, edition: u8) -> Option<Vec<u8>> {
++    let n = name.trim();
++    if n.is_empty() || n.len() > 60 {
++        return None;
++    }
++    let mut m = Vec::with_capacity(4 + 1 + n.len() + 4 + 1);
++    m.extend_from_slice(b"XRL1");
++    m.push(n.len() as u8);
++    m.extend_from_slice(n.as_bytes());
++    m.extend_from_slice(&expires.to_le_bytes());
++    m.push(edition);
++    Some(m)
++}
++
++fn verify(msg: &[u8], sig: &[u8]) -> bool {
++    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
++    let Ok(pk) = hex::decode(PUBKEY_HEX) else {
++        return false;
++    };
++    if pk.len() != 32 {
++        return false;
++    }
++    let mut pkb = [0u8; 32];
++    pkb.copy_from_slice(&pk);
++    let Ok(key) = VerifyingKey::from_bytes(&pkb) else {
++        return false;
++    };
++    let Ok(signature) = Signature::try_from(sig) else {
++        return false;
++    };
++    key.verify(msg, &signature).is_ok()
++}
++
++/// Schluessel-Text (wie ihn der Kunde eintippt) pruefen und auswerten.
++pub fn parse(text: &str) -> Result<License, String> {
++    let raw = b32_decode(text).ok_or_else(|| "kein gueltiges Format".to_string())?;
++    if raw.len() < 64 + 11 {
++        return Err("Schluessel zu kurz".to_string());
++    }
++    let (msg, sig) = raw.split_at(raw.len() - 64);
++    if msg.len() < 11 || &msg[..4] != b"XRL1" {
++        return Err("falsche Marke/Version".to_string());
++    }
++    let nlen = msg[4] as usize;
++    if msg.len() != 5 + nlen + 5 {
++        return Err("beschaedigter Schluessel".to_string());
++    }
++    let name = String::from_utf8_lossy(&msg[5..5 + nlen]).to_string();
++    let o = 5 + nlen;
++    let expires = u32::from_le_bytes([msg[o], msg[o + 1], msg[o + 2], msg[o + 3]]);
++    let edition = msg[o + 4];
++    if !verify(msg, sig) {
++        return Err("Signatur ungueltig".to_string());
++    }
++    let lic = License {
++        name,
++        expires,
++        edition,
++    };
++    if lic.expired() {
++        return Err(format!("abgelaufen am {}", lic.expiry_text()));
++    }
++    Ok(lic)
++}
++
++/// Gespeicherten Schluessel laden und pruefen.
++pub fn status() -> Status {
++    let Ok(text) = fs::read_to_string(key_file()) else {
++        return Status::Missing;
++    };
++    match parse(&text) {
++        Ok(lic) => Status::Active(lic),
++        Err(e) => Status::Invalid(e),
++    }
++}
++
++/// Schluessel aktivieren: pruefen, dann auf diesem Rechner ablegen.
++pub fn activate(text: &str) -> Result<License, String> {
++    let lic = parse(text)?;
++    let dir = crate::ident::config_dir();
++    let _ = fs::create_dir_all(&dir);
++    fs::write(key_file(), text.trim()).map_err(|e| format!("speichern: {}", e))?;
++    Ok(lic)
++}
++
++/// Lizenz entfernen (z. B. bei Geraetewechsel).
++pub fn revoke() {
++    let _ = fs::remove_file(key_file());
++}
++
++/// Einen Schluessel erzeugen - geht nur mit dem privaten Schluessel.
++/// Wird vom Schluessel-Werkzeug (bin keygen) benutzt, nie vom Client.
++pub fn make(priv_hex: &str, name: &str, expires: u32, edition: u8) -> Result<String, String> {
++    use ed25519_dalek::{Signer, SigningKey};
++    let raw = hex::decode(priv_hex).map_err(|_| "privater Schluessel: kein hex")?;
++    if raw.len() != 32 {
++        return Err("privater Schluessel: 32 Bytes erwartet".to_string());
++    }
++    let mut b = [0u8; 32];
++    b.copy_from_slice(&raw);
++    let sk = SigningKey::from_bytes(&b);
++    let msg = message(name, expires, edition).ok_or("Name: 1-60 Zeichen")?;
++    let sig = sk.sign(&msg);
++    let mut full = msg;
++    full.extend_from_slice(&sig.to_bytes());
++    Ok(b32_encode(&full))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn base32_roundtrip() {
++        let data = b"XRL1\x05justin\x00\x00\x00\x00\x00";
++        let enc = b32_encode(data);
++        assert_eq!(b32_decode(&enc).unwrap(), data);
++        // Bindestriche, Kleinschreibung und O/I-Verwechslungen verzeihen
++        assert_eq!(b32_decode(&enc.to_lowercase().replace('0', "o")).unwrap(), data);
++    }
++
++    #[test]
++    fn make_and_parse_roundtrip() {
++        use ed25519_dalek::SigningKey;
++        let sk = SigningKey::from_bytes(&[7u8; 32]);
++        let key = make(&hex::encode(sk.to_bytes()), "Max Mustermann", 0, 0).unwrap();
++        let raw = b32_decode(&key).unwrap();
++        let (msg, sig) = raw.split_at(raw.len() - 64);
++        // Signatur gegen den frischen Schluessel pruefen (statt dem eingebauten)
++        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
++        let vk = VerifyingKey::from_bytes(&sk.verifying_key().to_bytes()).unwrap();
++        assert!(vk.verify(msg, &Signature::try_from(sig).unwrap()).is_ok());
++        // Nachricht korrekt zerlegt?
++        assert_eq!(&msg[..4], b"XRL1");
++        assert_eq!(msg[4], 14);
++        assert_eq!(&msg[5..19], b"Max Mustermann");
++    }
++
++    /// End-to-End: einen echten, mit keygen erzeugten Schluessel gegen den
++    /// eingebauten oeffentlichen Schluessel pruefen. Laueft nur, wenn die
++    /// Umgebungsvariable XR_TEST_KEY gesetzt ist (CI/Handtest).
++    #[test]
++    fn real_key_parses() {
++        let Ok(k) = std::env::var("XR_TEST_KEY") else { return };
++        let lic = parse(&k).expect("echter Schluessel muss gelten");
++        assert!(!lic.name.is_empty());
++    }
++
++    #[test]
++    fn expiry_text_works() {
++        let lic = License { name: "x".into(), expires: 0, edition: 0 };
++        assert_eq!(lic.expiry_text(), "unbegrenzt");
++        let lic = License { name: "x".into(), expires: 365 + 31, edition: 0 };
++        assert_eq!(lic.expiry_text(), "01.02.2027");
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 3c6877f..39022e2 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -23,6 +23,8 @@ mod i18n;
+ mod account;
+ mod icons;
+ mod ident;
++#[cfg(feature = "license")]
++mod license;
+ mod link;
+ mod meet;
+ mod input;
+@@ -1078,6 +1080,13 @@ struct App {
+     pw_ask: Option<String>,
+     /// Sicherheits-Frage vor dem Deinstallieren.
+     uninstall_ask: bool,
++    /// Lizenz: Eingabefeld, Meldung und ob das Fenster auf ist (nur X-Remote).
++    #[cfg(feature = "license")]
++    lic_key: String,
++    #[cfg(feature = "license")]
++    lic_msg: String,
++    #[cfg(feature = "license")]
++    lic_show: bool,
+     /// Einrichtungs-Auftrag aus dem Browser-Download (Code, Wunschname) -
+     /// wartet auf die eigene ID, dann geht alles von selbst.
+     auto_setup: Option<(String, String)>,
+@@ -1178,6 +1187,13 @@ impl App {
+             setup_dlg: None,
+             pw_ask: None,
+             uninstall_ask: false,
++            // Ohne gueltige Lizenz beim Start einmal danach fragen.
++            #[cfg(feature = "license")]
++            lic_key: String::new(),
++            #[cfg(feature = "license")]
++            lic_msg: String::new(),
++            #[cfg(feature = "license")]
++            lic_show: !matches!(license::status(), license::Status::Active(_)),
+             auto_setup,
+             upd_flag_at: std::time::Instant::now() - Duration::from_secs(9),
+             upd_running: false,
+@@ -4126,6 +4142,71 @@ impl App {
+         }
+     }
+ 
++    /// Lizenz-Fenster (nur X-Remote): Schluessel eingeben, pruefen, ablegen.
++    /// Ohne gueltige Lizenz erscheint es bei jedem Start einmal - wegklicken
++    /// geht, das Programm laeuft vorerst weiter (weiche Einfuehrung).
++    #[cfg(feature = "license")]
++    fn license_modal(&mut self, ctx: &egui::Context) {
++        if !self.lic_show {
++            return;
++        }
++        let mut offen = true;
++        let mut spaeter = false;
++        egui::Window::new(i18n::t("lic.title"))
++            .collapsible(false)
++            .resizable(false)
++            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
++            .open(&mut offen)
++            .frame(
++                egui::Frame::group(&ctx.style())
++                    .fill(theme::card())
++                    .stroke(egui::Stroke::new(1.0, theme::accent()))
++                    .corner_radius(14)
++                    .inner_margin(egui::Margin::same(10)),
++            )
++            .show(ctx, |ui| {
++                ui.set_min_width(380.0);
++                ui.label(egui::RichText::new(i18n::t("lic.intro")).size(12.5));
++                ui.add_space(8.0);
++                ui.add(
++                    egui::TextEdit::singleline(&mut self.lic_key)
++                        .hint_text(i18n::t("lic.key_ph"))
++                        .desired_width(360.0)
++                        .font(egui::TextStyle::Monospace),
++                );
++                if !self.lic_msg.is_empty() {
++                    ui.add_space(6.0);
++                    ui.label(
++                        egui::RichText::new(&self.lic_msg)
++                            .size(11.5)
++                            .color(theme::accent()),
++                    );
++                }
++                ui.add_space(10.0);
++                ui.horizontal(|ui| {
++                    if accent_button(ui, i18n::t("lic.activate"), true).clicked() {
++                        match license::activate(&self.lic_key) {
++                            Ok(lic) => {
++                                self.lic_msg = String::new();
++                                self.lic_show = false;
++                                self.hint =
++                                    i18n::tf("lic.ok_msg", &lic.name);
++                            }
++                            Err(e) => {
++                                self.lic_msg = i18n::tf("lic.invalid", &e);
++                            }
++                        }
++                    }
++                    if ghost_button(ui, i18n::t("lic.later")).clicked() {
++                        spaeter = true;
++                    }
++                });
++            });
++        if spaeter || !offen {
++            self.lic_show = false;
++        }
++    }
++
+     /// Lade-Fenster waehrend der Dienst ein Update einspielt. Danach werden
+     /// alle Teile beendet und der Dienst startet mit dem frischen Stand neu.
+     fn update_modal(&mut self, ctx: &egui::Context) {
+@@ -4695,6 +4776,50 @@ impl App {
+             ui.add_space(6.0);
+             self.update_ui(ui);
+         });
++        #[cfg(feature = "license")]
++        self.license_card(ui);
++    }
++
++    /// Lizenz-Karte in den Einstellungen: Stand anzeigen, Schluessel
++    /// eingeben oder entfernen (nur X-Remote).
++    #[cfg(feature = "license")]
++    fn license_card(&mut self, ui: &mut egui::Ui) {
++        ui.add_space(10.0);
++        card(ui, |ui| {
++            ui.label(egui::RichText::new(i18n::t("lic.title")).size(13.5).color(theme::text()));
++            ui.add_space(4.0);
++            match license::status() {
++                license::Status::Active(lic) => {
++                    info_row(ui, i18n::t("lic.holder"), &lic.name);
++                    info_row(ui, i18n::t("lic.expires"), &lic.expiry_text());
++                    ui.add_space(4.0);
++                    if ghost_button(ui, i18n::t("lic.remove")).clicked() {
++                        license::revoke();
++                        self.lic_show = true;
++                    }
++                }
++                license::Status::Missing => {
++                    ui.label(
++                        egui::RichText::new(i18n::t("lic.none"))
++                            .size(11.5)
++                            .color(theme::muted()),
++                    );
++                }
++                license::Status::Invalid(e) => {
++                    ui.label(
++                        egui::RichText::new(i18n::tf("lic.invalid", &e))
++                            .size(11.5)
++                            .color(theme::muted()),
++                    );
++                }
++            }
++            if !matches!(license::status(), license::Status::Active(_)) {
++                ui.add_space(6.0);
++                if accent_button(ui, i18n::t("lic.activate"), false).clicked() {
++                    self.lic_show = true;
++                }
++            }
++        });
+     }
+ 
+     /// Aussehen übernehmen: speichern, Stil neu bauen, Titelleiste nachziehen.
+@@ -5461,6 +5586,8 @@ impl eframe::App for App {
+         }
+         self.update_modal(ctx);
+         self.uninstall_modal(ctx);
++        #[cfg(feature = "license")]
++        self.license_modal(ctx);
+         self.knock_ui(ctx);
+         self.pw_ask_ui(ctx);
+         self.setup_dialog_ui(ctx);
+-- 
+2.39.5

@@ -1,0 +1,70 @@
+From 29377adaa50cb7a57a41a15cdd6edca94d98ec97 Mon Sep 17 00:00:00 2001
+From: Justin <justin@fleitec.com>
+Date: Tue, 4 Aug 2026 11:09:43 +0000
+Subject: [PATCH] v0.25.0: Marke heisst jetzt X-Remote (x-remote.exe, Ordner
+ X-Remote) - Slug bleibt xoffi
+
+---
+ Cargo.toml     | 2 +-
+ src/account.rs | 2 +-
+ src/brand.rs   | 6 +++---
+ src/i18n.rs    | 2 +-
+ 4 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index ed845dc..3faa8c1 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ ﻿[package]
+ name = "freeviewer"
+-version = "0.24.9"
++version = "0.25.0"
+ edition = "2021"
+ description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
+ license = "GPL-3.0"
+diff --git a/src/account.rs b/src/account.rs
+index 463566a..eca43c7 100644
+--- a/src/account.rs
++++ b/src/account.rs
+@@ -315,7 +315,7 @@ fn one() -> u32 {
+ /// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
+ pub fn setup_web_link(code: &str) -> String {
+     // Die Einrichtungs-Seite der eigenen Marke (FreeViewer -> freeviewer.
+-    // fleitec.com, Xoffi Remote -> remote.fleitec.com). Die Seite fragt die
++    // fleitec.com, X-Remote -> remote.fleitec.com). Die Seite fragt die
+     // Marke des Codes beim Relay ab und laedt automatisch die richtige Datei.
+     format!("{}/setup/{}", crate::brand::WEB, code)
+ }
+diff --git a/src/brand.rs b/src/brand.rs
+index 8822fe5..070ad66 100644
+--- a/src/brand.rs
++++ b/src/brand.rs
+@@ -1,9 +1,9 @@
+-//! Marke an EINEM Ort. Wer ein zweites Produkt will (z. B. "Xoffi Remote"
++//! Marke an EINEM Ort. Wer ein zweites Produkt will (z. B. "X-Remote"
+ //! fuer eine andere Firma), baut mit gesetzten Umgebungsvariablen:
+ //!
+ //! ```sh
+-//! FV_BRAND_NAME="Xoffi Remote" FV_BRAND_EXE=xoffi-remote.exe \
+-//! FV_BRAND_DIR="Xoffi Remote" cargo build --release
++//! FV_BRAND_NAME="X-Remote" FV_BRAND_EXE=x-remote.exe \
++//! FV_BRAND_DIR="X-Remote" cargo build --release
+ //! ```
+ //!
+ //! Ohne diese Variablen bleibt alles FreeViewer. Protokoll, Relay und IDs
+diff --git a/src/i18n.rs b/src/i18n.rs
+index c20dc19..6002024 100644
+--- a/src/i18n.rs
++++ b/src/i18n.rs
+@@ -530,7 +530,7 @@ pub fn t(key: &str) -> &'static str {
+     Box::leak(key.to_string().into_boxed_str())
+ }
+ 
+-/// Andere Marke (z. B. "Xoffi Remote"): Texte mit dem Standard-Namen folgen
++/// Andere Marke (z. B. "X-Remote"): Texte mit dem Standard-Namen folgen
+ /// der Marke. Der Ersatz passiert einmal und bleibt fuer die Laufzeit
+ /// bestehen - beim FreeViewer-Stand wird exakt der Tabellen-Text geliefert.
+ fn marke(s: &'static str) -> &'static str {
+-- 
+2.39.5

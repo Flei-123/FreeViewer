@@ -1267,7 +1267,7 @@ impl App {
             .collect();
         if id.len() < 9 {
             self.shared
-                .set_viewer_status("Bitte 9-stellige Partner-ID eingeben");
+                .set_viewer_status(i18n::t("start.bad_id"));
             return;
         }
         let sh = self.shared.clone();
@@ -1297,7 +1297,7 @@ impl App {
             .collect();
         if id.len() < 9 {
             self.shared
-                .set_viewer_status("Bitte 9-stellige Partner-ID eingeben");
+                .set_viewer_status(i18n::t("start.bad_id"));
             return;
         }
         let sh = self.shared.clone();
@@ -1701,7 +1701,7 @@ impl App {
             card(ui, |ui| {
                 label_small(ui, i18n::t("start.your_id"));
                 ui.horizontal(|ui| {
-                    let id_text = if my_id.len() == 9 {
+                    let id_text = if my_id.len() >= 9 {
                         partners::pretty_id(&my_id)
                     } else {
                         "– – –".to_string()
@@ -3238,7 +3238,7 @@ impl App {
             return;
         }
         let id: String = e.id.chars().filter(|c| c.is_ascii_digit()).collect();
-        if id.len() != 9 {
+        if !(9..=10).contains(&id.len()) {
             e.err = i18n::t("dev.add_bad_id").to_string();
         } else if self.is_me(&id) {
             e.err = i18n::t("dev.add_self").to_string();
