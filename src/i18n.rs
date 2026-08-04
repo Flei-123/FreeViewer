@@ -530,7 +530,7 @@ pub fn t(key: &str) -> &'static str {
     Box::leak(key.to_string().into_boxed_str())
 }
 
-/// Andere Marke (z. B. "Xoffi Remote"): Texte mit dem Standard-Namen folgen
+/// Andere Marke (z. B. "X-Remote"): Texte mit dem Standard-Namen folgen
 /// der Marke. Der Ersatz passiert einmal und bleibt fuer die Laufzeit
 /// bestehen - beim FreeViewer-Stand wird exakt der Tabellen-Text geliefert.
 fn marke(s: &'static str) -> &'static str {

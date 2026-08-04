@@ -1,9 +1,9 @@
-//! Marke an EINEM Ort. Wer ein zweites Produkt will (z. B. "Xoffi Remote"
+//! Marke an EINEM Ort. Wer ein zweites Produkt will (z. B. "X-Remote"
 //! fuer eine andere Firma), baut mit gesetzten Umgebungsvariablen:
 //!
 //! ```sh
-//! FV_BRAND_NAME="Xoffi Remote" FV_BRAND_EXE=xoffi-remote.exe \
-//! FV_BRAND_DIR="Xoffi Remote" cargo build --release
+//! FV_BRAND_NAME="X-Remote" FV_BRAND_EXE=x-remote.exe \
+//! FV_BRAND_DIR="X-Remote" cargo build --release
 //! ```
 //!
 //! Ohne diese Variablen bleibt alles FreeViewer. Protokoll, Relay und IDs
