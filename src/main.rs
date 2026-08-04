@@ -184,7 +184,7 @@ fn main() -> eframe::Result<()> {
         std::env::set_var("FV_CONFIG", &tmp);
         let ctx = egui::Context::default();
         install_theme(&ctx);
-        let mut app = App::new(shared.clone(), false);
+        let mut app = App::new(shared.clone(), false, None);
         app.book.started("123456789", "geheim", true);
         app.book.rename("123456789", "Test-PC");
         app.book.started("987654321", "", false);
@@ -797,7 +797,7 @@ fn main() -> eframe::Result<()> {
             options,
             Box::new(move |cc| {
                 install_theme(&cc.egui_ctx);
-                let mut app = App::new(shot_shared.clone(), false);
+                let mut app = App::new(shot_shared.clone(), false, None);
                 if demo {
                     app.book.started("123456789", "geheim", true);
                     app.book.rename("123456789", "Buero-PC");
@@ -861,10 +861,22 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // Frisch aus dem Browser geladen? Dann steckt der Einrichtungs-Auftrag
+    // (Code + Wunschname) am Ende der Datei - das Geraet richtet sich selbst
+    // ein, sobald die Oberflaeche ihre ID kennt.
+    let embedded = if setup::running_installed() {
+        None
+    } else {
+        link::embedded_setup()
+    };
+
     // A second window of the same user is pointless - bring the first one to
-    // the front instead.
-    if !tray::claim_single_instance() {
-        println!("FreeViewer laeuft bereits - Fenster nach vorne geholt.");
+    // the front instead. Der Dienst-Agent zaehlt nicht als zweites Fenster,
+    // er laeuft bewusst neben der Oberflaeche.
+    if !tray::claim_single_instance(is_agent) {
+        if !is_agent {
+            println!("FreeViewer laeuft bereits - Fenster nach vorne geholt.");
+        }
         return Ok(());
     }
     // Das Schema fuer diesen Nutzer eintragen (portabel, ohne Adminrechte).
@@ -891,7 +903,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             install_theme(&cc.egui_ctx);
-            Ok(Box::new(App::new(shared, start_hidden)))
+            Ok(Box::new(App::new(shared, start_hidden, embedded.clone())))
         }),
     )
 }
@@ -1025,6 +1037,13 @@ struct App {
     setup_dlg: Option<SetupDlg>,
     /// Passwort-Nachfrage vor dem Verbinden (Partner-ID).
     pw_ask: Option<String>,
+    /// Einrichtungs-Auftrag aus dem Browser-Download (Code, Wunschname) -
+    /// wartet auf die eigene ID, dann geht alles von selbst.
+    auto_setup: Option<(String, String)>,
+    /// Wann zuletzt nach dem Update-Laeuft-Merker gesehen wurde.
+    upd_flag_at: std::time::Instant,
+    /// Steht der Merker gerade? (fuer das Lade-Fenster)
+    upd_running: bool,
     /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
@@ -1032,7 +1051,7 @@ struct App {
 }
 
 impl App {
-    fn new(shared: Arc<Shared>, start_hidden: bool) -> Self {
+    fn new(shared: Arc<Shared>, start_hidden: bool, auto_setup: Option<(String, String)>) -> Self {
         let watch = presence::Watch::new(shared.relay_url.clone());
         watch.start();
         Self {
@@ -1117,6 +1136,9 @@ impl App {
             dep_next: std::time::Instant::now(),
             setup_dlg: None,
             pw_ask: None,
+            auto_setup,
+            upd_flag_at: std::time::Instant::now() - Duration::from_secs(9),
+            upd_running: false,
             snd_in: Vec::new(),
             snd_out: Vec::new(),
             snd_default: (String::new(), String::new()),
@@ -1468,14 +1490,46 @@ impl App {
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let pending = self.shared.update.lock().unwrap().clone();
         let status = self.shared.update_status.lock().unwrap().clone();
+        let dienst = service::installed();
         ui.horizontal(|ui| {
+            if icons::text_button(ui, "refresh", i18n::t("upd.check"), false).clicked() {
+                let sh = self.shared.clone();
+                sh.set_update_status(i18n::t("upd.checking"));
+                std::thread::spawn(move || match update::check() {
+                    Ok(rel) => {
+                        if update::newer(&rel.version, update::VERSION) {
+                            sh.set_update_status(format!(
+                                "{} {}",
+                                i18n::t("upd.found"),
+                                rel.version
+                            ));
+                            *sh.update.lock().unwrap() = Some(rel);
+                        } else {
+                            sh.set_update_status(format!(
+                                "{} (v{})",
+                                i18n::t("upd.current"),
+                                update::VERSION
+                            ));
+                        }
+                    }
+                    Err(e) => sh.set_update_status(format!("{}: {}", i18n::t("upd.failed"), e)),
+                });
+            }
             let mut auto = self.shared.auto_update.load(Ordering::Relaxed);
-            if check(ui, &mut auto, "Automatisch aktualisieren").changed() {
+            if check(ui, &mut auto, i18n::t("upd.auto")).changed() {
                 self.shared.auto_update.store(auto, Ordering::Relaxed);
                 ident::set_auto_update(auto);
             }
-            if let Some(rel) = pending {
-                if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
+        });
+        if let Some(rel) = pending {
+            ui.add_space(4.0);
+            if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
+                if dienst {
+                    // der Dienst spielt ein - als SYSTEM, ohne Nachfrage
+                    update::bitte_dienst();
+                    self.shared
+                        .set_update_status(i18n::t("upd.by_service"));
+                } else {
                     self.shared
                         .set_update_status(format!("Installiere {} ...", rel.version));
                     let sh = self.shared.clone();
@@ -1486,7 +1540,7 @@ impl App {
                     });
                 }
             }
-        });
+        }
         if !status.is_empty() {
             ui.add_space(2.0);
             ui.label(egui::RichText::new(status).color(theme::muted()).size(11.5));
@@ -3879,24 +3933,23 @@ impl App {
                     ui.label(
                         egui::RichText::new(zeile).size(12.0).color(p.muted),
                     );
-                    if icon_ghost(ui, "trash", i18n::t("dep.revoke_tip")).clicked() {
-                        revoke = Some(pend.code.clone());
-                    }
-                });
-                // Der Link gehoert direkt zum Eintrag - sonst ist er nach dem
-                // naechsten "Link erzeugen" nicht mehr auffindbar.
-                let web = account::setup_web_link(&pend.code);
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new(&web)
-                            .size(11.5)
-                            .color(p.accent),
-                    );
-                    if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
-                        ui.ctx().copy_text(web.clone());
-                        kopiert = true;
-                    }
+                    // Der Link steht daneben (nicht darunter) - mit Kopieren
+                    // und Widerrufen direkt in derselben Zeile.
+                    let web = account::setup_web_link(&pend.code);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_ghost(ui, "trash", i18n::t("dep.revoke_tip")).clicked() {
+                            revoke = Some(pend.code.clone());
+                        }
+                        if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
+                            ui.ctx().copy_text(web.clone());
+                            kopiert = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(&web)
+                                .size(11.5)
+                                .color(p.accent),
+                        );
+                    });
                 });
                 ui.add_space(6.0);
             }
@@ -3973,6 +4026,41 @@ impl App {
                 self.dep_msg = msg;
             }
         }
+    }
+
+    /// Lade-Fenster waehrend der Dienst ein Update einspielt. Danach werden
+    /// alle Teile beendet und der Dienst startet mit dem frischen Stand neu.
+    fn update_modal(&mut self, ctx: &egui::Context) {
+        if self.upd_flag_at.elapsed() > Duration::from_millis(500) {
+            self.upd_flag_at = std::time::Instant::now();
+            self.upd_running = update::updating_flag()
+                .map(|p| p.exists())
+                .unwrap_or(false);
+        }
+        if !self.upd_running {
+            return;
+        }
+        egui::Window::new(i18n::t("upd.working"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(theme::card())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(i18n::t("upd.restart_soon")).size(13.0),
+                    );
+                });
+            });
     }
 
     /// Passwort-Nachfrage: "Verbinden" heisst direkt verbinden. Ohne
@@ -4082,6 +4170,10 @@ impl App {
         let mut offen = true;
         let mut los = false;
         let mut weg = false;
+        // Aus dem Browser-Download: kein weiterer Klick noetig.
+        if dlg.auto && !dlg.done && dlg.err.is_empty() && !dlg.busy.load(Ordering::Relaxed) {
+            los = true;
+        }
         egui::Window::new(i18n::t("setup.title"))
             .collapsible(false)
             .resizable(false)
@@ -4096,6 +4188,24 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
+                if dlg.auto && !dlg.done {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(i18n::t("setup.auto")).size(13.0),
+                        );
+                    });
+                    if !dlg.err.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(&dlg.err)
+                                .size(12.0)
+                                .color(theme::muted()),
+                        );
+                    }
+                    return;
+                }
                 if dlg.done {
                     ui.label(
                         egui::RichText::new(i18n::tf("setup.done", &dlg.owner))
@@ -5213,6 +5323,25 @@ impl eframe::App for App {
             chrome::paint_from_theme();
         }
         self.tray_ui(ctx);
+        // Einrichtungs-Auftrag aus dem Browser-Download: sobald der Host
+        // seine ID vom Relay hat, geht alles von selbst (kein Koppeln).
+        if let Some((code, name)) = self.auto_setup.clone() {
+            let fertige_id = !self.shared.my_id.lock().unwrap().is_empty();
+            if fertige_id {
+                self.auto_setup = None;
+                self.setup_dlg = Some(SetupDlg {
+                    code,
+                    name: if name.trim().is_empty() {
+                        presence::machine_name()
+                    } else {
+                        name
+                    },
+                    auto: true,
+                    ..Default::default()
+                });
+            }
+        }
+        self.update_modal(ctx);
         self.knock_ui(ctx);
         self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);
@@ -5523,6 +5652,8 @@ struct DevEdit {
 struct SetupDlg {
     code: String,
     name: String,
+    /// Aus dem Browser-Download: sofort einrichten, ohne noch einmal zu fragen.
+    auto: bool,
     busy: Arc<std::sync::atomic::AtomicBool>,
     out: Arc<std::sync::Mutex<Option<Result<account::SetupClaimReply, String>>>>,
     err: String,

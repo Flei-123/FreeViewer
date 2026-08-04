@@ -97,6 +97,34 @@ fn urldec(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Merkmal am Ende einer heruntergeladenen Exe: die Einrichtungs-Seite haengt
+/// Code und Wunschname an das Programm, damit ein frisches Geraet sich beim
+/// ersten Start von selbst einrichtet - ohne dass jemand etwas abtippen muss.
+const EMBED_MARK: &str = "FVSETUP1:";
+
+/// Liest das angehaengte Einrichtungs-Paket aus der eigenen Datei (falls da).
+/// Rueckgabe: (Code, Wunschname).
+pub fn embedded_setup() -> Option<(String, String)> {
+    let exe = std::env::current_exe().ok()?;
+    let bytes = std::fs::read(exe).ok()?;
+    // das Paket ist klein und steht ganz hinten
+    let start = bytes.len().saturating_sub(4096);
+    let tail = String::from_utf8_lossy(&bytes[start..]);
+    let pos = tail.rfind(EMBED_MARK)?;
+    let rest = &tail[pos + EMBED_MARK.len()..];
+    let json: serde_json::Value = serde_json::from_str(rest.trim()).ok()?;
+    let code = json.get("code")?.as_str()?.to_string();
+    let name = json
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    if parse(&format!("freeviewer://setup/{}", code)).is_none() {
+        return None;
+    }
+    Some((code, name))
+}
+
 /// Briefkasten fuer eine bereits laufende Fassung.
 pub fn inbox() -> PathBuf {
     crate::ident::config_dir().join("inbox.txt")

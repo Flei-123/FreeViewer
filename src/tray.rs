@@ -125,16 +125,24 @@ mod imp {
     /// Are we the first instance of this user? A second one asks the running
     /// one to come to the front and then leaves - two hosts with the same
     /// identity would kick each other off the relay.
-    pub fn claim_single_instance() -> bool {
+    pub fn claim_single_instance(agent: bool) -> bool {
         unsafe {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
-            let name = wide(&format!("Local\\FreeViewer-{}", user));
+            // GUI und Dienst-Agent duerfen nebeneinander laufen - der Agent ist
+            // kein "zweites Fenster". Frueher teilten sie sich eine Marke: der
+            // Dienst startete den Agenten, der hielt die GUI fuer ein Duplikat,
+            // riss ihr Fenster nach vorn und beendete sich - alle 4 Sekunden
+            // von neuem. Genau das Dauer-Blinken in der Taskleiste.
+            let rolle = if agent { "agent" } else { "gui" };
+            let name = wide(&format!("Local\\FreeViewer-{}-{}", rolle, user));
             match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
                 Ok(h) => {
                     if GetLastError() == ERROR_ALREADY_EXISTS {
-                        let msg = RegisterWindowMessageW(w!("FreeViewerShowWindow"));
-                        if msg != 0 {
-                            let _ = PostMessageW(HWND_BROADCAST, msg, WPARAM(0), LPARAM(0));
+                        if !agent {
+                            let msg = RegisterWindowMessageW(w!("FreeViewerShowWindow"));
+                            if msg != 0 {
+                                let _ = PostMessageW(HWND_BROADCAST, msg, WPARAM(0), LPARAM(0));
+                            }
                         }
                         false
                     } else {
@@ -574,7 +582,7 @@ pub fn start(shared: Arc<Shared>) {
     let _ = SHARED.set(shared);
 }
 #[cfg(not(windows))]
-pub fn claim_single_instance() -> bool {
+pub fn claim_single_instance(_agent: bool) -> bool {
     true
 }
 #[cfg(not(windows))]

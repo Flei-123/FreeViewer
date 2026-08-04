@@ -393,42 +393,112 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
     });
 }
 
+/// Datei, mit der die Oberflaeche den Dienst bittet, sofort zu aktualisieren
+/// (Knopfdruck statt Warten auf die halbe Stunde).
+#[cfg(windows)]
+fn trigger_pfad() -> Option<std::path::PathBuf> {
+    Some(crate::ident::machine_config_dir()?.join("update-now.flag"))
+}
+
+/// Solange diese Datei steht, laeuft gerade ein Update - die Oberflaeche
+/// zeigt dann das Lade-Fenster.
+#[cfg(windows)]
+pub fn updating_flag() -> Option<std::path::PathBuf> {
+    Some(crate::ident::machine_config_dir()?.join("updating.flag"))
+}
+
+/// Knopf "Update installieren" bei installiertem Dienst: nur die Bitte
+/// hinterlegen, der Dienst macht den Rest (als SYSTEM, ohne Nachfrage).
+#[cfg(windows)]
+pub fn bitte_dienst() {
+    if let Some(p) = trigger_pfad() {
+        let _ = std::fs::write(p, b"1");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn bitte_dienst() {}
+
+#[cfg(not(windows))]
+pub fn updating_flag() -> Option<std::path::PathBuf> {
+    None
+}
+
 /// Der Updater des Dienstes. Laeuft als SYSTEM, darf also direkt nach
 /// "Programme" schreiben - ohne jede Administrator-Nachfrage. Nach dem Tausch
-/// startet der Dienst sich selbst neu; dabei bekommt auch der Agent im
-/// Benutzer-Desktop den frischen Stand.
+/// werden ALLE FreeViewer-Prozesse beendet und der Dienst startet neu; der
+/// Agent im Benutzer-Desktop kommt mit dem frischen Stand wieder.
 #[cfg(windows)]
 pub fn service_watcher() {
     cleanup();
-    std::thread::spawn(move || loop {
-        if let Ok(rel) = check() {
-            if newer(&rel.version, VERSION) && crate::ident::auto_update_enabled() {
-                crate::service::log(&format!("Update {} gefunden", rel.version));
-                match download(&rel).and_then(|fresh| {
-                    let ziel = std::env::current_exe()?;
-                    swap_into(&fresh, &ziel)
-                }) {
-                    Ok(()) => {
-                        crate::service::log("Update eingespielt - Dienst startet neu");
-                        // Der Neustart muss von aussen kommen: ein Dienst kann
-                        // sich nicht selbst stoppen und wieder starten.
-                        let _ = crate::service::kill_agent();
-                        let _ = std::process::Command::new("cmd")
-                            .args([
-                                "/c",
-                                &format!(
-                                    "sc stop {n} & ping -n 3 127.0.0.1 >nul & sc start {n}",
-                                    n = crate::service::SERVICE_NAME
-                                ),
-                            ])
-                            .spawn();
-                        return;
-                    }
-                    Err(e) => crate::service::log(&format!("Update fehlgeschlagen: {}", e)),
+    if let Some(p) = updating_flag() {
+        let _ = std::fs::remove_file(p);
+    }
+    std::thread::spawn(move || {
+        let mut naechste_runde = std::time::Instant::now();
+        loop {
+            // Schneller Wunsch von der Oberflaeche ("Update installieren")?
+            let mut sofort = false;
+            if let Some(p) = trigger_pfad() {
+                if p.exists() {
+                    let _ = std::fs::remove_file(&p);
+                    sofort = true;
                 }
             }
+            if !sofort && std::time::Instant::now() < naechste_runde {
+                std::thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+            naechste_runde = std::time::Instant::now() + EVERY;
+            let einspielen = |rel: &Release| -> bool {
+                // Der Knopf zaehlt als ausdruecklicher Wunsch - auch wenn die
+                // Automatik aus ist.
+                sofort || crate::ident::auto_update_enabled()
+            };
+            if let Ok(rel) = check() {
+                if newer(&rel.version, VERSION) && einspielen(&rel) {
+                    crate::service::log(&format!("Update {} gefunden", rel.version));
+                    if let Some(p) = updating_flag() {
+                        let _ = std::fs::write(&p, b"1");
+                    }
+                    let ergebnis = download(&rel).and_then(|fresh| {
+                        let ziel = std::env::current_exe()?;
+                        swap_into(&fresh, &ziel)
+                    });
+                    match ergebnis {
+                        Ok(()) => {
+                            crate::service::log("Update eingespielt - alle Teile starten neu");
+                            // Neustart-Kette zuerst anwerfen (der cmd-Helfer
+                            // ueberlebt das Beenden der eigenen Exe)...
+                            let _ = std::process::Command::new("cmd")
+                                .args([
+                                    "/c",
+                                    &format!(
+                                        "ping -n 3 127.0.0.1 >nul & sc start {n}",
+                                        n = crate::service::SERVICE_NAME
+                                    ),
+                                ])
+                                .spawn();
+                            // ... dann ALLE FreeViewer-Prozesse beenden:
+                            // Oberflaeche, Agent und der Dienst selbst. Eine
+                            // alte Oberflaeche wuerde sonst mit altem Stand
+                            // weiterlaufen und das Update weiter versuchen.
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/f", "/im", "freeviewer.exe"])
+                                .spawn();
+                            return;
+                        }
+                        Err(e) => {
+                            crate::service::log(&format!("Update fehlgeschlagen: {}", e));
+                            if let Some(p) = updating_flag() {
+                                let _ = std::fs::remove_file(p);
+                            }
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(10));
         }
-        std::thread::sleep(EVERY);
     });
 }
 
