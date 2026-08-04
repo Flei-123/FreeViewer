@@ -211,7 +211,8 @@ mod imp {
         if let Ok(list) = std::fs::read_dir(install_dir()) {
             for e in list.flatten() {
                 let name = e.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("freeviewer.old") {
+                let old_prefix = crate::brand::EXE.replace(".exe", ".old").to_lowercase();
+                if name.starts_with(&old_prefix) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -221,7 +222,7 @@ mod imp {
         shortcut(
             &start_menu_link(),
             &dst,
-            &format!("{} - Fernwartung ohne Konto und ohne Lizenz", crate::brand::NAME),
+            &format!("{} - Fernwartung ohne Konto", crate::brand::NAME),
         )?;
         // Der Desktop-Eintrag ist Kuer, kein Grund zum Abbrechen.
         let _ = shortcut(&desktop_link(), &dst, crate::brand::NAME);
@@ -329,8 +330,8 @@ mod tests {
     #[test]
     fn install_dir_ends_with_the_app_name() {
         let d = install_dir();
-        assert!(d.ends_with("FreeViewer"), "{}", d.display());
-        assert!(installed_exe().ends_with("freeviewer.exe"));
+        assert!(d.ends_with(crate::brand::DIR), "{}", d.display());
+        assert!(installed_exe().ends_with(crate::brand::EXE));
     }
 
     #[test]
@@ -350,6 +351,7 @@ mod tests {
         // Startmenue-Eintrag ist maschinenweit, nicht im Profil eines Nutzers
         let l = start_menu_link().to_string_lossy().to_lowercase();
         assert!(l.contains("start menu"), "{}", l);
-        assert!(l.ends_with("freeviewer.lnk"));
+        let lnk = crate::brand::EXE.replace(".exe", ".lnk").to_lowercase();
+        assert!(l.ends_with(&lnk), "{} endet nicht auf {}", l, lnk);
     }
 }
