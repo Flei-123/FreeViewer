@@ -74,14 +74,37 @@ pub fn check() -> Result<Release> {
             .unwrap_or_default()
             .to_string()
     };
+    // Jede Plattform hat ihr eigenes Paket: "url" ist Windows, "mac_url"
+    // der Mac. Nie wieder die falsche Datei ziehen - eine Windows-Exe wuerde
+    // einen Mac sonst beim Tausch zerstoeren.
+    #[cfg(target_os = "macos")]
+    let (url, hash, size) = (
+        s("mac_url"),
+        s("mac_sha256").to_lowercase(),
+        v.get("mac_size").and_then(|x| x.as_u64()).unwrap_or(0),
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (url, hash, size) = (
+        s("url"),
+        s("sha256").to_lowercase(),
+        v.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+    );
     let rel = Release {
         version: s("version"),
-        sha256: s("sha256").to_lowercase(),
-        url: s("url"),
+        sha256: hash,
+        url,
         notes: s("notes"),
-        size: v.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+        size,
     };
-    if rel.version.is_empty() || rel.url.is_empty() || rel.sha256.len() != 64 {
+    // Fehlt das Paket der eigenen Plattform: kein Update, kein Fehler -
+    // einfach nichts anbieten.
+    if rel.url.is_empty() {
+        return Ok(Release {
+            version: VERSION.to_string(),
+            ..rel
+        });
+    }
+    if rel.version.is_empty() || rel.sha256.len() != 64 {
         return Err(anyhow!("unvollstaendige Release-Info"));
     }
     Ok(rel)
@@ -123,6 +146,16 @@ fn denied(e: &anyhow::Error) -> bool {
 /// Downloads the build and writes it into the staging folder.
 pub fn download(rel: &Release) -> Result<PathBuf> {
     let bytes = fetch(&rel.url)?;
+    // Bauchweh-Pruefung: ein Mac darf nie eine Windows-Exe bekommen (und
+    // umgekehrt) - sonst frisst sich das Update selbst.
+    #[cfg(target_os = "macos")]
+    if bytes.starts_with(b"MZ") {
+        return Err(anyhow!("Windows-Paket auf einem Mac - Update abgebrochen"));
+    }
+    #[cfg(windows)]
+    if !bytes.starts_with(b"MZ") {
+        return Err(anyhow!("kein Windows-Paket - Update abgebrochen"));
+    }
     if rel.size != 0 && bytes.len() as u64 != rel.size {
         return Err(anyhow!(
             "Groesse passt nicht ({} statt {})",

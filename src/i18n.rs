@@ -521,11 +521,24 @@ pub fn t(key: &str) -> &'static str {
     let en = LANG.load(Ordering::Relaxed) == 1;
     for (k, de, e) in TABLE.iter() {
         if *k == key {
-            return if en { e } else { de };
+            return marke(if en { e } else { de });
         }
     }
     // Kein Eintrag: den Schlüssel zeigen, das fällt sofort auf
     Box::leak(key.to_string().into_boxed_str())
+}
+
+/// Andere Marke (z. B. "Xoffi Remote"): Texte mit dem Standard-Namen folgen
+/// der Marke. Der Ersatz passiert einmal und bleibt fuer die Laufzeit
+/// bestehen - beim FreeViewer-Stand wird exakt der Tabellen-Text geliefert.
+fn marke(s: &'static str) -> &'static str {
+    if crate::brand::NAME == "FreeViewer" || !s.contains("FreeViewer") {
+        return s;
+    }
+    Box::leak(
+        s.replace("FreeViewer", crate::brand::NAME)
+            .into_boxed_str(),
+    )
 }
 
 /// Text mit einem Platzhalter `{}`.

@@ -3408,7 +3408,7 @@ impl App {
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if !here {
+                if !installed {
                     if ghost_button(ui, i18n::t("set.install_do")).clicked() {
                         let flags = if self.install_service {
                             "--install --with-service"

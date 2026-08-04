@@ -374,7 +374,7 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.override_text_color = Some(p.text);
         // Platzhalter in Textfeldern ("leer lassen fuer Anfrage") sollen
         // aussehen wie Hinweise, nicht wie eingetragener Text.
-        v.weak_text_color = Some(p.muted.gamma_multiply(0.6));
+        v.weak_text_color = Some(p.muted.gamma_multiply(0.45));
         v.hyperlink_color = p.accent;
         v.selection.bg_fill = p.accent.gamma_multiply(0.30);
         v.selection.stroke = egui::Stroke::new(1.0, p.text);
