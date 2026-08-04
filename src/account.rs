@@ -274,6 +274,7 @@ struct SetupCreateReq<'a> {
     password: &'a str,
     name_hint: &'a str,
     max_uses: u32,
+    brand: &'a str,
 }
 
 #[derive(Deserialize, Default)]
@@ -313,7 +314,10 @@ fn one() -> u32 {
 /// Erzeugen zurueckgibt. Damit steht der Link auch bei jedem wartenden
 /// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
 pub fn setup_web_link(code: &str) -> String {
-    format!("{}/setup/{}", crate::brand::WEB, code)
+    // Immer die Relay-Seite: sie fragt die Marke des Codes beim Relay ab und
+    // laedt dadurch automatisch die richtige Datei (FreeViewer oder z. B.
+    // Xoffi Remote) - die Webseite des Absenders muss nichts koennen.
+    format!("https://freeviewer.fleitec.com/setup/{}", code)
 }
 
 /// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
@@ -388,6 +392,7 @@ pub fn setup_create(
         password,
         name_hint,
         max_uses,
+        brand: crate::brand::SLUG,
     })
     .map_err(|e| anyhow!("{}", e))?;
     let (status, text) = post_json(&target, &body)?;

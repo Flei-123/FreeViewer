@@ -34,6 +34,13 @@ pub const PUBLISHER: &str = match option_env!("FV_BRAND_PUBLISHER") {
     None => "FleiTec",
 };
 
+/// Kurzname der Marke - das Relay weiss so, welche Datei ein
+/// Einrichtungs-Link laden soll ("freeviewer" oder "xoffi").
+pub const SLUG: &str = match option_env!("FV_BRAND_SLUG") {
+    Some(s) => s,
+    None => "freeviewer",
+};
+
 /// Oeffentliche Adresse der Marke - darauf zeigen die Einrichtungs-Links.
 pub const WEB: &str = match option_env!("FV_BRAND_WEB") {
     Some(s) => s,
