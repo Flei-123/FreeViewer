@@ -313,6 +313,7 @@ pub fn uninstall() -> Result<()> {
 }
 
 /// Vollstaendig entfernen - inklusive Konfiguration und Identitaets-Sicherung.
+#[cfg(not(windows))]
 pub fn uninstall_all() -> Result<()> {
     uninstall()
 }
