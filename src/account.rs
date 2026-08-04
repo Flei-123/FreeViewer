@@ -314,10 +314,10 @@ fn one() -> u32 {
 /// Erzeugen zurueckgibt. Damit steht der Link auch bei jedem wartenden
 /// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
 pub fn setup_web_link(code: &str) -> String {
-    // Immer die Relay-Seite: sie fragt die Marke des Codes beim Relay ab und
-    // laedt dadurch automatisch die richtige Datei (FreeViewer oder z. B.
-    // Xoffi Remote) - die Webseite des Absenders muss nichts koennen.
-    format!("https://freeviewer.fleitec.com/setup/{}", code)
+    // Die Einrichtungs-Seite der eigenen Marke (FreeViewer -> freeviewer.
+    // fleitec.com, Xoffi Remote -> remote.fleitec.com). Die Seite fragt die
+    // Marke des Codes beim Relay ab und laedt automatisch die richtige Datei.
+    format!("{}/setup/{}", crate::brand::WEB, code)
 }
 
 /// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
