@@ -68,7 +68,7 @@ fn tip_for(version: &str, id: &str, status: &str, peer: &str, in_session: bool) 
     let third = if in_session {
         peer.to_string()
     } else {
-        "Bereit fuer Verbindungen".to_string()
+        "Bereit für Verbindungen".to_string()
     };
     (state, format!("FreeViewer {}\n{}\n{}", version, line, third))
 }

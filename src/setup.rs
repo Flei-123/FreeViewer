@@ -234,7 +234,7 @@ mod imp {
     }
 
     /// Raeumt alles wieder weg. Die Konfiguration bleibt liegen.
-    pub fn uninstall() -> Result<()> {
+    pub fn uninstall(alles: bool) -> Result<()> {
         let exe = installed_exe();
         // Dienst zuerst - sonst haelt er die Datei fest.
         let _ = std::process::Command::new("sc")
@@ -258,6 +258,18 @@ mod imp {
             }
         }
 
+        if alles {
+            // wirklich alles: Konfiguration (beide Orte) und die
+            // Identitaets-Sicherung in der Registry. Geraete mit abgeleiteter
+            // Identitaet bekommen ihre ID bei der Neuinstallation trotzdem
+            // wieder - sie kommt aus der Maschinen-Kennung.
+            let _ = std::fs::remove_dir_all(crate::ident::real_config_dir());
+            if let Some(m) = crate::ident::machine_config_dir() {
+                let _ = std::fs::remove_dir_all(m);
+            }
+            crate::ident::winid::drop_backup();
+        }
+
         // Laufende Prozesse beenden, dann Ordner loeschen. Eine Exe kann sich
         // nicht selbst loeschen, darum macht das ein kurzer cmd-Aufruf,
         // nachdem wir weg sind.
@@ -276,7 +288,20 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{install, shortcut, uninstall};
+pub use imp::{install, shortcut};
+
+/// Deinstallieren: Programm, Verknuepfungen, Dienst und Protokoll weg -
+/// die Konfiguration bleibt (die ID soll eine Neuinstallation ueberleben).
+#[cfg(windows)]
+pub fn uninstall() -> Result<()> {
+    imp::uninstall(false)
+}
+
+/// Vollstaendig entfernen - inklusive Konfiguration und Identitaets-Sicherung.
+#[cfg(windows)]
+pub fn uninstall_all() -> Result<()> {
+    imp::uninstall(true)
+}
 
 #[cfg(not(windows))]
 pub fn install(_with_service: bool) -> Result<()> {
@@ -285,6 +310,11 @@ pub fn install(_with_service: bool) -> Result<()> {
 #[cfg(not(windows))]
 pub fn uninstall() -> Result<()> {
     Err(anyhow!("nur unter Windows"))
+}
+
+/// Vollstaendig entfernen - inklusive Konfiguration und Identitaets-Sicherung.
+pub fn uninstall_all() -> Result<()> {
+    uninstall()
 }
 
 #[cfg(test)]

@@ -160,7 +160,14 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if std::env::args().any(|a| a == "--uninstall") {
-        match setup::uninstall() {
+        // --all nimmt auch Konfiguration und Identitaets-Sicherung mit
+        let alles = std::env::args().any(|a| a == "--all");
+        let r = if alles {
+            setup::uninstall_all()
+        } else {
+            setup::uninstall()
+        };
+        match r {
             Ok(()) => println!("deinstalliert"),
             Err(e) => {
                 eprintln!("Deinstallation fehlgeschlagen: {}", e);

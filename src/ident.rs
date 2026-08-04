@@ -98,13 +98,85 @@ pub fn load_or_create_secret() -> String {
     if let Ok(s) = fs::read_to_string(&file) {
         let s = s.trim().to_string();
         if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Dauer-Sicherung in der Registry nachziehen, falls noch keine da
+            // ist - dann ueberlebt die ID auch ein geloeschtes Konfig-Verzeichnis.
+            #[cfg(windows)]
+            if winid::load_backup().as_deref() != Some(s.as_str()) {
+                winid::save_backup(&s);
+            }
             return s;
         }
     }
-    let secret = hex::encode(random_bytes(32));
+    // Datei weg oder ungueltig - erst die Dauer-Sicherung fragen.
+    #[cfg(windows)]
+    if let Some(s) = winid::load_backup() {
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(&file, &s);
+        return s;
+    }
+    // Ganz neu: aus Windows' eigener Maschinen-Kennung ableiten. Die bleibt
+    // ueber De- und Neuinstallationen gleich (erst ein neues Windows aendert
+    // sie) - damit aendert sich die FreeViewer-ID nie wieder.
+    #[cfg(windows)]
+    let frisch = winid::machine_guid().map(|g| {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"freeviewer-id:");
+        h.update(g.to_lowercase().as_bytes());
+        hex::encode(h.finalize())
+    });
+    #[cfg(not(windows))]
+    let frisch: Option<String> = None;
+    let secret = frisch.unwrap_or_else(|| hex::encode(random_bytes(32)));
     let _ = fs::create_dir_all(&dir);
     let _ = fs::write(&file, &secret);
+    #[cfg(windows)]
+    winid::save_backup(&secret);
     secret
+}
+
+/// Dauerhafte Identitaets-Sicherung (Windows): Registry-Zweig und die
+/// Maschinen-Kennung aus der Kryptografie-Registrierung.
+#[cfg(windows)]
+pub mod winid {
+    const KEY: &str = r"SOFTWARE\FreeViewer";
+
+    pub fn load_backup() -> Option<String> {
+        let k = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey(KEY)
+            .ok()?;
+        let s: String = k.get_value("identity").ok()?;
+        let s = s.trim().to_string();
+        if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    pub fn save_backup(secret: &str) {
+        if let Ok((k, _)) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .create_subkey(KEY)
+        {
+            let _ = k.set_value("identity", &secret);
+        }
+    }
+
+    /// Nur beim vollstaendigen Entfernen (--uninstall --all).
+    pub fn drop_backup() {
+        if let Ok(k) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(r"SOFTWARE", winreg::enums::KEY_ALL_ACCESS)
+        {
+            let _ = k.delete_subkey_all("FreeViewer");
+        }
+    }
+
+    pub fn machine_guid() -> Option<String> {
+        let k = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+            .open_subkey(r"SOFTWARE\Microsoft\Cryptography")
+            .ok()?;
+        k.get_value("MachineGuid").ok()
+    }
 }
 
 /// Session password in TeamViewer style: short, readable, random.
