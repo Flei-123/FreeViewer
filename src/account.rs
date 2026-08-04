@@ -309,6 +309,13 @@ fn one() -> u32 {
     1
 }
 
+/// Die Web-Adresse eines Einrichtungs-Codes - dieselbe, die das Relay beim
+/// Erzeugen zurueckgibt. Damit steht der Link auch bei jedem wartenden
+/// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
+pub fn setup_web_link(code: &str) -> String {
+    format!("https://freeviewer.fleitec.com/setup/{}", code)
+}
+
 /// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SetupClaimed {

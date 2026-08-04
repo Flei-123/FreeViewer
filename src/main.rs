@@ -3743,11 +3743,32 @@ impl App {
             );
             ui.add_space(6.0);
             label_small(ui, i18n::t("dep.count"));
-            ui.add(
-                egui::DragValue::new(&mut self.dep_count)
-                    .range(1..=25)
-                    .speed(0.2),
-            );
+            ui.horizontal(|ui| {
+                let mut unbegrenzt = self.dep_count == 0;
+                if unbegrenzt {
+                    // eine graue "0" waere verwirrend - lieber das Zeichen
+                    ui.label(
+                        egui::RichText::new("∞")
+                            .size(19.0)
+                            .strong()
+                            .color(p.accent),
+                    );
+                } else {
+                    ui.add(
+                        egui::DragValue::new(&mut self.dep_count)
+                            .range(1..=25)
+                            .speed(0.2),
+                    );
+                }
+                ui.add_space(6.0);
+                if check(ui, &mut unbegrenzt, i18n::t("dep.unlimited"))
+                    .on_hover_text(i18n::t("dep.unlimited_tip"))
+                    .changed()
+                {
+                    // 0 heisst am Relay: so oft wie man will
+                    self.dep_count = if unbegrenzt { 0 } else { 1 };
+                }
+            });
             ui.add_space(8.0);
             let busy = self.acc_busy.load(Ordering::Relaxed);
             let label = if busy {
@@ -3766,6 +3787,7 @@ impl App {
                     self.acc_busy.clone(),
                 );
             }
+            let mut oben_kopiert = false;
             if !self.dep_link.is_empty() {
                 ui.add_space(8.0);
                 label_small(ui, i18n::t("dep.link"));
@@ -3777,6 +3799,7 @@ impl App {
                     );
                     if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
                         ui.ctx().copy_text(self.dep_link.clone());
+                        oben_kopiert = true;
                     }
                 });
                 ui.add_space(2.0);
@@ -3785,6 +3808,9 @@ impl App {
                         .size(11.0)
                         .color(p.muted),
                 );
+            }
+            if oben_kopiert {
+                self.dep_msg = i18n::t("dep.copied").to_string();
             }
             if !self.dep_msg.is_empty() {
                 ui.add_space(6.0);
@@ -3816,6 +3842,7 @@ impl App {
             }
             let pending = self.dep_pending.clone();
             let mut revoke: Option<String> = None;
+            let mut kopiert = false;
             for pend in &pending {
                 ui.horizontal(|ui| {
                     icons::show(ui, "refresh", 14.0, p.muted);
@@ -3824,12 +3851,27 @@ impl App {
                     } else {
                         format!("{} ({})", pend.name_hint, pend.code)
                     };
-                    let zeile = if pend.max_uses > 1 {
+                    let zeile = if pend.max_uses == 0 {
                         format!(
                             "{} - {} ({})",
                             was,
                             i18n::t("dep.waiting"),
-                            i18n::tf("dep.left", &format!("{} ({} von {})", pend.max_uses - pend.uses, pend.uses, pend.max_uses))
+                            i18n::tf("dep.used_unlimited", &pend.uses.to_string())
+                        )
+                    } else if pend.max_uses > 1 {
+                        format!(
+                            "{} - {} ({})",
+                            was,
+                            i18n::t("dep.waiting"),
+                            i18n::tf(
+                                "dep.left",
+                                &format!(
+                                    "{} ({} von {})",
+                                    pend.max_uses.saturating_sub(pend.uses),
+                                    pend.uses,
+                                    pend.max_uses
+                                )
+                            )
                         )
                     } else {
                         format!("{} - {}", was, i18n::t("dep.waiting"))
@@ -3841,7 +3883,25 @@ impl App {
                         revoke = Some(pend.code.clone());
                     }
                 });
-                ui.add_space(2.0);
+                // Der Link gehoert direkt zum Eintrag - sonst ist er nach dem
+                // naechsten "Link erzeugen" nicht mehr auffindbar.
+                let web = account::setup_web_link(&pend.code);
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new(&web)
+                            .size(11.5)
+                            .color(p.accent),
+                    );
+                    if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
+                        ui.ctx().copy_text(web.clone());
+                        kopiert = true;
+                    }
+                });
+                ui.add_space(6.0);
+            }
+            if kopiert {
+                self.dep_msg = i18n::t("dep.copied").to_string();
             }
             if let Some(code) = revoke {
                 account::setup_revoke_async(
