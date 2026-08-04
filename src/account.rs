@@ -313,7 +313,7 @@ fn one() -> u32 {
 /// Erzeugen zurueckgibt. Damit steht der Link auch bei jedem wartenden
 /// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
 pub fn setup_web_link(code: &str) -> String {
-    format!("https://freeviewer.fleitec.com/setup/{}", code)
+    format!("{}/setup/{}", crate::brand::WEB, code)
 }
 
 /// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).

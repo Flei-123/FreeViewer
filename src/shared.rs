@@ -33,6 +33,8 @@ pub struct Knock {
 }
 
 pub struct Shared {
+    /// Was der ferne Bildschirm an Aufloesungen wirklich kann (kommt vom Host).
+    pub remote_resolutions: Mutex<Vec<(u32, u32)>>,
     pub relay_url: String,
     // host side
     pub my_id: Mutex<String>,
@@ -114,6 +116,7 @@ impl Shared {
             viewer_status: Mutex::new(String::new()),
             frame: Mutex::new(None),
             remote_size: Mutex::new((1920, 1080)),
+            remote_resolutions: Mutex::new(Vec::new()),
             remote_cursor: Mutex::new((0, 0, false)),
             input_tx: Mutex::new(None),
             clip_in: Mutex::new(None),

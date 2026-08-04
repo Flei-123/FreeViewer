@@ -34,6 +34,19 @@ pub const PUBLISHER: &str = match option_env!("FV_BRAND_PUBLISHER") {
     None => "FleiTec",
 };
 
+/// Oeffentliche Adresse der Marke - darauf zeigen die Einrichtungs-Links.
+pub const WEB: &str = match option_env!("FV_BRAND_WEB") {
+    Some(s) => s,
+    None => "https://freeviewer.fleitec.com",
+};
+
+/// Eigener Update-Feed pro Marke - ein Xoffi-Build darf sich nie zum
+/// FreeViewer "aktualisieren".
+pub const FEED: &str = match option_env!("FV_BRAND_FEED") {
+    Some(s) => s,
+    None => "https://freeviewer.fleitec.com/fv/version",
+};
+
 /// Registry-Zweig der Marke (Identitaets-Sicherung, Deinstallations-Eintrag
 /// wird darunter abgelegt).
 pub fn reg_key() -> String {

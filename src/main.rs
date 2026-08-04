@@ -1637,16 +1637,16 @@ impl App {
             });
             ui.add_space(10.0);
             for (v, name) in [
-                (View::Start, "Start"),
-                (View::Devices, "Geräte"),
-                (View::Settings, "Einstellungen"),
+                (View::Start, i18n::t("nav.start")),
+                (View::Devices, i18n::t("nav.devices")),
+                (View::Settings, i18n::t("nav.settings")),
             ] {
                 if tab(ui, name, self.view == v).clicked() {
                     self.view = v;
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                status_pill(ui, online, if online { "Bereit" } else { "Verbinde …" });
+                status_pill(ui, online, if online { i18n::t("pill.ready") } else { i18n::t("pill.connecting") });
             });
         });
         ui.add_space(6.0);
@@ -3903,31 +3903,6 @@ impl App {
                     self.acc_busy.clone(),
                 );
             }
-            let mut oben_kopiert = false;
-            if !self.dep_link.is_empty() {
-                ui.add_space(8.0);
-                label_small(ui, i18n::t("dep.link"));
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&self.dep_link)
-                            .size(12.0)
-                            .color(p.accent),
-                    );
-                    if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
-                        ui.ctx().copy_text(self.dep_link.clone());
-                        oben_kopiert = true;
-                    }
-                });
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(i18n::t("dep.link_note"))
-                        .size(11.0)
-                        .color(p.muted),
-                );
-            }
-            if oben_kopiert {
-                self.dep_msg = i18n::t("dep.copied").to_string();
-            }
             if !self.dep_msg.is_empty() {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(&self.dep_msg).size(12.0).color(p.accent));
@@ -4056,8 +4031,12 @@ impl App {
         match res {
             account::SetupOut::Created { link, web, .. } => {
                 self.dep_link = if web.is_empty() { link } else { web };
-                self.dep_msg = String::new();
-                // gleich in den Posteingang sehen
+                // frisch erzeugt = sofort in der Zwischenablage, ohne dass
+                // jemand danach noch einen Knopf sucht
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_text(self.dep_link.clone());
+                }
+                self.dep_msg = i18n::t("dep.copied").to_string();
                 self.dep_next = std::time::Instant::now();
             }
             account::SetupOut::Inbox { pending, claimed } => {
@@ -4869,17 +4848,27 @@ impl App {
         ui.separator();
         {
             let (rw, rh) = *self.shared.remote_size.lock().unwrap();
-            egui::ComboBox::from_id_salt("res_pick")
-                .selected_text(format!("{}x{}", rw, rh))
-                .show_ui(ui, |ui| {
-                    for (w, h) in [
+            // Was der ferne Bildschirm wirklich kann (sagt der Host); solange
+            // nichts da ist, die gaengigen Stufen.
+            let modi = {
+                let l = self.shared.remote_resolutions.lock().unwrap().clone();
+                if l.is_empty() {
+                    vec![
                         (1280u32, 720u32),
                         (1600, 900),
                         (1920, 1080),
                         (2560, 1440),
                         (3440, 1440),
                         (3840, 2160),
-                    ] {
+                    ]
+                } else {
+                    l
+                }
+            };
+            egui::ComboBox::from_id_salt("res_pick")
+                .selected_text(format!("{}x{}", rw, rh))
+                .show_ui(ui, |ui| {
+                    for (w, h) in modi {
                         if ui
                             .selectable_label(w == rw && h == rh, format!("{}x{}", w, h))
                             .clicked()
@@ -5574,6 +5563,10 @@ impl eframe::App for App {
                     .with_inner_size([1280.0, 800.0])
                     .with_min_inner_size([480.0, 320.0]),
                 |vctx, _class| {
+                    // Ablegen muss HIER gelesen werden - das Sitzungsfenster
+                    // hat einen eigenen Eingang, das Hauptfenster bekam die
+                    // Dateien nie zu sehen.
+                    self.handle_drops(vctx);
                     self.session_ui(vctx);
                     if vctx.input(|i| i.viewport().close_requested()) {
                         closed = true;

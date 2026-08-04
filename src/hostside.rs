@@ -38,8 +38,10 @@ pub const ADMIN: Profile = Profile {
     max_w: 1920,
     full_q: 68,
     tile_q: 78,
-    fps: 30,
-    bitrate: 8_000_000,
+    // Der Hardware-Encoder braucht etwa eine Millisekunde pro Bild - die
+    // alte 30er-Bremse war verschenkte Fluessigkeit.
+    fps: 60,
+    bitrate: 12_000_000,
 };
 
 pub const GAME: Profile = Profile {
@@ -409,7 +411,16 @@ impl Session {
                         }
                         Msg::SetResolution { width, height } => {
                             let idx = self.monitor.load(Ordering::Relaxed) as usize;
-                            let _ = crate::res::set_resolution(idx, width, height);
+                            match crate::res::set_resolution(idx, width, height) {
+                                Ok(()) => capture::log_line(&format!(
+                                    "Aufloesung auf {}x{} gestellt",
+                                    width, height
+                                )),
+                                Err(e) => capture::log_line(&format!(
+                                    "Aufloesung {}x{} abgelehnt: {}",
+                                    width, height, e
+                                )),
+                            }
                         }
                         Msg::NeedKeyframe => {
                             self.force_key.store(true, Ordering::Relaxed);
@@ -1039,6 +1050,9 @@ fn capture_loop(
             active: cur_mon as u8,
             list,
         }));
+        let _ = out_grab.send(encode(&Msg::Resolutions {
+            list: crate::res::supported(cur_mon),
+        }));
 
         capture::log_line(&format!(
             "Sitzung startet: backend {} {}x{} bei {},{} (Bildschirm {})",
@@ -1084,6 +1098,9 @@ fn capture_loop(
                         let _ = out_grab.send(encode(&Msg::Monitors {
                             active: cur_mon as u8,
                             list,
+                        }));
+                        let _ = out_grab.send(encode(&Msg::Resolutions {
+                            list: crate::res::supported(cur_mon),
                         }));
                     }
                     None => {

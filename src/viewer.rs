@@ -373,6 +373,9 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             Some(Msg::ScreenInfo { width, height }) => {
                                 *shared.remote_size.lock().unwrap() = (width, height);
                             }
+                            Some(Msg::Resolutions { list }) => {
+                                *shared.remote_resolutions.lock().unwrap() = list;
+                            }
                             Some(Msg::Monitors { active, list }) => {
                                 *shared.monitors.lock().unwrap() = list;
                                 shared.active_monitor.store(active, Ordering::Relaxed);

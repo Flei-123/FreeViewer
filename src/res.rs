@@ -35,6 +35,12 @@ pub fn restore(index: usize) {
     }
 }
 
+/// Was der Monitor wirklich kann (breiteste zuerst, Duplikate raus).
+/// Nur so landen im Auswahlmenue Aufloesungen, die Windows auch annimmt.
+pub fn supported(index: usize) -> Vec<(u32, u32)> {
+    imp::supported(index)
+}
+
 // --------------------------------------------------------------- Windows
 
 #[cfg(windows)]
@@ -46,6 +52,12 @@ mod imp {
         DISPLAY_DEVICEW, CDS_UPDATEREGISTRY, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
         DM_PELSWIDTH, ENUM_CURRENT_SETTINGS,
     };
+    use windows::Win32::Graphics::Gdi::ENUM_DISPLAY_SETTINGS_MODE;
+
+    /// Index fuer EnumDisplaySettingsW: alle Modi durchgehen.
+    const fn ENUM_INDEX(i: u32) -> ENUM_DISPLAY_SETTINGS_MODE {
+        ENUM_DISPLAY_SETTINGS_MODE(i)
+    }
 
     fn devicename(index: usize) -> Result<Vec<u16>> {
         let mut dd = DISPLAY_DEVICEW::default();
@@ -73,6 +85,37 @@ mod imp {
             return Err(anyhow!("aktuelle Aufloesung unlesbar"));
         }
         Ok((dm.dmPelsWidth, dm.dmPelsHeight))
+    }
+
+    pub fn supported(index: usize) -> Vec<(u32, u32)> {
+        let Ok(name) = devicename(index) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        let mut i = 0u32;
+        loop {
+            let mut dm = DEVMODEW::default();
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let ok = unsafe {
+                EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_INDEX(i), &mut dm)
+            };
+            if !ok.as_bool() {
+                break;
+            }
+            i += 1;
+            let paar = (dm.dmPelsWidth, dm.dmPelsHeight);
+            if paar.0 >= 800 && !out.contains(&paar) {
+                out.push(paar);
+            }
+            if i > 512 {
+                break;
+            }
+        }
+        out.sort_by(|a, b| (b.0 * b.1).cmp(&(a.0 * a.1)));
+        while out.len() > 24 {
+            out.pop();
+        }
+        out
     }
 
     pub fn set(index: usize, w: u32, h: u32) -> Result<()> {
@@ -113,6 +156,10 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::*;
+
+    pub fn supported(_index: usize) -> Vec<(u32, u32)> {
+        Vec::new()
+    }
 
     pub fn set(_index: usize, _w: u32, _h: u32) -> Result<()> {
         Err(anyhow!("Aufloesung aendern geht nur unter Windows"))

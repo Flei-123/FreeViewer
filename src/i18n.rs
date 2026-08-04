@@ -270,6 +270,8 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     // Meet
     ("nav.meet", "Meet", "Meet"),
+    ("pill.ready", "Bereit", "Ready"),
+    ("pill.connecting", "Verbinde …", "Connecting …"),
     ("meet.new", "Neues Meeting", "New meeting"),
     ("meet.title_hint", "Titel (freiwillig)", "Title (optional)"),
     ("meet.start", "Meeting starten", "Start meeting"),
