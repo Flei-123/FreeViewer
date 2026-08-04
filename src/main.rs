@@ -9,6 +9,7 @@
 //! the session password with FV_PASSWORD.
 
 mod audio;
+mod brand;
 mod autostart;
 mod capture;
 mod chrome;
@@ -179,7 +180,7 @@ fn main() -> eframe::Result<()> {
 
     // print the version:  freeviewer --version
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("FreeViewer {}", update::VERSION);
+        println!("{} {}", crate::brand::NAME, update::VERSION);
         return Ok(());
     }
 
@@ -577,7 +578,7 @@ fn main() -> eframe::Result<()> {
 
     // headless host mode (no window) - handy for servers and for testing
     if std::env::args().any(|a| a == "--headless") {
-        println!("FreeViewer headless host, relay = {}", shared.relay_url);
+        println!("{} headless host, relay = {}", crate::brand::NAME, shared.relay_url);
         println!("password = {}", shared.password.lock().unwrap());
         loop {
             std::thread::sleep(Duration::from_secs(2));
@@ -811,11 +812,11 @@ fn main() -> eframe::Result<()> {
                 .with_inner_size([1180.0, 800.0])
                 .with_visible(true)
                 .with_icon(app_icon())
-                .with_title("FreeViewer"),
+                .with_title(crate::brand::NAME),
             ..Default::default()
         };
         return eframe::run_native(
-            "FreeViewer",
+            crate::brand::NAME,
             options,
             Box::new(move |cc| {
                 install_theme(&cc.egui_ctx);
@@ -897,7 +898,7 @@ fn main() -> eframe::Result<()> {
     // er laeuft bewusst neben der Oberflaeche.
     if !tray::claim_single_instance(is_agent) {
         if !is_agent {
-            println!("FreeViewer laeuft bereits - Fenster nach vorne geholt.");
+            println!("{} laeuft bereits - Fenster nach vorne geholt.", crate::brand::NAME);
         }
         return Ok(());
     }
@@ -932,12 +933,12 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([700.0, 470.0])
             .with_visible(!start_hidden)
             .with_icon(app_icon())
-            .with_title("FreeViewer"),
+            .with_title(crate::brand::NAME),
         ..Default::default()
     };
 
     eframe::run_native(
-        "FreeViewer",
+        crate::brand::NAME,
         options,
         Box::new(move |cc| {
             install_theme(&cc.egui_ctx);
@@ -1075,6 +1076,8 @@ struct App {
     setup_dlg: Option<SetupDlg>,
     /// Passwort-Nachfrage vor dem Verbinden (Partner-ID).
     pw_ask: Option<String>,
+    /// Sicherheits-Frage vor dem Deinstallieren.
+    uninstall_ask: bool,
     /// Einrichtungs-Auftrag aus dem Browser-Download (Code, Wunschname) -
     /// wartet auf die eigene ID, dann geht alles von selbst.
     auto_setup: Option<(String, String)>,
@@ -1174,6 +1177,7 @@ impl App {
             dep_next: std::time::Instant::now(),
             setup_dlg: None,
             pw_ask: None,
+            uninstall_ask: false,
             auto_setup,
             upd_flag_at: std::time::Instant::now() - Duration::from_secs(9),
             upd_running: false,
@@ -1224,7 +1228,7 @@ impl App {
             if !self.told_about_tray {
                 self.told_about_tray = true;
                 tray::balloon(
-                    "FreeViewer laeuft weiter",
+                    &format!("{} laeuft weiter", crate::brand::NAME),
                     "Das Fenster ist nur zugeklappt. Ueber das Symbol im Infobereich kommst du zurueck - oder beendest FreeViewer ganz.",
                 );
             }
@@ -1624,7 +1628,7 @@ impl App {
             ui.add_space(2.0);
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("FreeViewer").size(17.0).strong());
+                ui.label(egui::RichText::new(crate::brand::NAME).size(17.0).strong());
                 ui.label(
                     egui::RichText::new(format!("Version {}", update::VERSION))
                         .size(11.0)
@@ -3423,10 +3427,23 @@ impl App {
                         i18n::t("set.install_with_service"),
                     )
                     .on_hover_text(i18n::t("set.service_tip"));
-                } else if ghost_button(ui, i18n::t("set.uninstall_do")).clicked() {
-                    match service::elevate("--uninstall") {
-                        Ok(()) => self.hint = i18n::t("set.uninstall_running").to_string(),
-                        Err(e) => self.hint = format!("{}", e),
+                } else {
+                    // Reparieren: Dateien frisch drueber (bleibt ohne
+                    // zusaetzliche Frage, die Rechte hat man schon gegeben)
+                    if ghost_button(ui, i18n::t("set.repair")).clicked() {
+                        let flags = if self.service_on {
+                            "--install --with-service"
+                        } else {
+                            "--install"
+                        };
+                        match service::elevate(flags) {
+                            Ok(()) => self.hint = i18n::t("set.repair_running").to_string(),
+                            Err(e) => self.hint = format!("{}", e),
+                        }
+                    }
+                    ui.add_space(8.0);
+                    if ghost_button(ui, i18n::t("set.uninstall_do")).clicked() {
+                        self.uninstall_ask = true;
                     }
                 }
             });
@@ -4070,6 +4087,63 @@ impl App {
             account::SetupOut::Failed(msg) => {
                 self.dep_msg = msg;
             }
+        }
+    }
+
+    /// Sicherheits-Frage vor dem Deinstallieren - direkt in der App, ohne
+    /// den Umweg ueber "Apps & Features".
+    fn uninstall_modal(&mut self, ctx: &egui::Context) {
+        if !self.uninstall_ask {
+            return;
+        }
+        let mut offen = true;
+        let mut sicher = false;
+        let mut weg = false;
+        egui::Window::new(i18n::t("set.uninstall_title"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut offen)
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(theme::card())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(340.0);
+                ui.label(
+                    egui::RichText::new(i18n::t("set.uninstall_sure"))
+                        .size(13.0),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(i18n::t("set.uninstall_keep"))
+                        .size(11.5)
+                        .color(theme::muted()),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, i18n::t("set.uninstall_yes"), true).clicked() {
+                        sicher = true;
+                    }
+                    if ghost_button(ui, i18n::t("setup.cancel")).clicked() {
+                        weg = true;
+                    }
+                });
+            });
+        if weg {
+            offen = false;
+        }
+        if sicher {
+            self.uninstall_ask = false;
+            match service::elevate("--uninstall") {
+                Ok(()) => self.hint = i18n::t("set.uninstall_running").to_string(),
+                Err(e) => self.hint = format!("{}", e),
+            }
+        } else if !offen {
+            self.uninstall_ask = false;
         }
     }
 
@@ -5397,6 +5471,7 @@ impl eframe::App for App {
             }
         }
         self.update_modal(ctx);
+        self.uninstall_modal(ctx);
         self.knock_ui(ctx);
         self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);

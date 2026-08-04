@@ -53,7 +53,8 @@ pub const HELL: Palette = Palette {
     green: rgb(0x14, 0x9d, 0x52),
     muted: rgb(0x67, 0x70, 0x85),
     text: rgb(0x18, 0x20, 0x30),
-    dark: false,
+    dark: false,
+
     orbs: false,
 };
 
@@ -71,7 +72,8 @@ pub const DUNKEL: Palette = Palette {
     green: rgb(0x22, 0xc5, 0x5e),
     muted: rgb(0x9a, 0xa3, 0xb5),
     text: rgb(0xe8, 0xeb, 0xf3),
-    dark: true,
+    dark: true,
+
     orbs: false,
 };
 
@@ -89,7 +91,8 @@ pub const NAVY: Palette = Palette {
     green: rgb(0x22, 0xc5, 0x5e),
     muted: rgb(0x8b, 0x95, 0xab),
     text: rgb(0xe7, 0xeb, 0xf3),
-    dark: true,
+    dark: true,
+
     orbs: true,
 };
 
@@ -107,7 +110,8 @@ pub const GRUEN: Palette = Palette {
     green: rgb(0x1b, 0xd9, 0x6a),
     muted: rgb(0x8b, 0x95, 0x9f),
     text: rgb(0xe7, 0xeb, 0xf0),
-    dark: true,
+    dark: true,
+
     orbs: false,
 };
 
@@ -368,6 +372,9 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.extreme_bg_color = p.field;
         v.faint_bg_color = p.card_hi;
         v.override_text_color = Some(p.text);
+        // Platzhalter in Textfeldern ("leer lassen fuer Anfrage") sollen
+        // aussehen wie Hinweise, nicht wie eingetragener Text.
+        v.weak_text_color = Some(p.muted.gamma_multiply(0.6));
         v.hyperlink_color = p.accent;
         v.selection.bg_fill = p.accent.gamma_multiply(0.30);
         v.selection.stroke = egui::Stroke::new(1.0, p.text);

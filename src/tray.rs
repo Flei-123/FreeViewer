@@ -70,7 +70,7 @@ fn tip_for(version: &str, id: &str, status: &str, peer: &str, in_session: bool) 
     } else {
         "Bereit für Verbindungen".to_string()
     };
-    (state, format!("FreeViewer {}\n{}\n{}", version, line, third))
+    (state, format!("{} {}\n{}\n{}", crate::brand::NAME, version, line, third))
 }
 
 #[cfg(windows)]
@@ -262,7 +262,7 @@ mod imp {
     fn tip_now() -> (u8, String) {
         let sh = match SHARED.get() {
             Some(s) => s,
-            None => return (0, "FreeViewer".to_string()),
+            None => return (0, crate::brand::NAME.to_string()),
         };
         let id = sh.my_id.lock().unwrap().clone();
         let peer = sh.host_peer.lock().unwrap().clone();
@@ -331,7 +331,7 @@ mod imp {
             return true.into();
         }
         let title = String::from_utf16_lossy(&buf[..n as usize]);
-        if !title.starts_with("FreeViewer") || title.contains("Tray") {
+        if !title.starts_with(crate::brand::NAME) || title.contains("Tray") {
             return true.into();
         }
         let out = lparam.0 as *mut isize;
@@ -388,10 +388,10 @@ mod imp {
             Ok(m) => m,
             Err(_) => return,
         };
-        let open = wide("FreeViewer oeffnen");
+        let open = wide(&format!("{} oeffnen", crate::brand::NAME));
         let copy = wide("Meine ID kopieren");
         let auto = wide("Mit Windows starten");
-        let quit = wide("FreeViewer beenden");
+        let quit = wide(&format!("{} beenden", crate::brand::NAME));
         let _ = AppendMenuW(hmenu, MF_STRING, ID_OPEN, PCWSTR(open.as_ptr()));
         let _ = AppendMenuW(hmenu, MF_STRING, ID_COPY, PCWSTR(copy.as_ptr()));
         let flags = if crate::autostart::enabled() {
@@ -428,7 +428,7 @@ mod imp {
                 let on = !crate::autostart::enabled();
                 match crate::autostart::set(on) {
                     Ok(()) => balloon(
-                        "FreeViewer",
+                        crate::brand::NAME,
                         if on {
                             "Startet ab jetzt automatisch mit Windows."
                         } else {

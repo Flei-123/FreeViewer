@@ -10,7 +10,7 @@ use crate::crypto::random_bytes;
 /// Per user configuration - the normal case without a service.
 pub fn user_config_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
-        return PathBuf::from(appdata).join("FreeViewer");
+        return PathBuf::from(appdata).join(crate::brand::DIR);
     }
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home).join(".config").join("freeviewer");
@@ -23,7 +23,7 @@ pub fn user_config_dir() -> PathBuf {
 /// profile - otherwise the FreeViewer ID would change with the account.
 pub fn machine_config_dir() -> Option<PathBuf> {
     let pd = std::env::var("ProgramData").ok()?;
-    Some(PathBuf::from(pd).join("FreeViewer"))
+    Some(PathBuf::from(pd).join(crate::brand::DIR))
 }
 
 /// Where this installation keeps its files. As soon as a machine wide
@@ -139,11 +139,13 @@ pub fn load_or_create_secret() -> String {
 /// Maschinen-Kennung aus der Kryptografie-Registrierung.
 #[cfg(windows)]
 pub mod winid {
-    const KEY: &str = r"SOFTWARE\FreeViewer";
+    fn key_path() -> String {
+        crate::brand::reg_key()
+    }
 
     pub fn load_backup() -> Option<String> {
         let k = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .open_subkey(KEY)
+            .open_subkey(key_path())
             .ok()?;
         let s: String = k.get_value("identity").ok()?;
         let s = s.trim().to_string();
@@ -156,7 +158,7 @@ pub mod winid {
 
     pub fn save_backup(secret: &str) {
         if let Ok((k, _)) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .create_subkey(KEY)
+            .create_subkey(key_path())
         {
             let _ = k.set_value("identity", &secret);
         }
@@ -167,7 +169,7 @@ pub mod winid {
         if let Ok(k) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
             .open_subkey_with_flags(r"SOFTWARE", winreg::enums::KEY_ALL_ACCESS)
         {
-            let _ = k.delete_subkey_all("FreeViewer");
+            let _ = k.delete_subkey_all(crate::brand::DIR);
         }
     }
 

@@ -377,7 +377,7 @@ impl Session {
                 // make sure the question is actually visible
                 crate::tray::show_window();
                 crate::tray::balloon(
-                    "FreeViewer",
+                    crate::brand::NAME,
                     "Jemand moechte sich mit diesem Computer verbinden.",
                 );
                 self.stage = Stage::WaitConfirm {

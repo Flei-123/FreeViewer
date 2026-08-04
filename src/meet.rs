@@ -122,7 +122,7 @@ pub fn join_url_with_id(id: &str, pass: &str, fvid: &str) -> String {
 /// Text zum Weitergeben - Telefon, Chat, E-Mail.
 pub fn invite(m: &Meeting) -> String {
     let titel = if m.titel.trim().is_empty() {
-        "FreeViewer Meet".to_string()
+        format!("{} Meet", crate::brand::NAME)
     } else {
         m.titel.trim().to_string()
     };

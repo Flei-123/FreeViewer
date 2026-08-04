@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 
 /// Name of the value under the Run key.
-pub const VALUE: &str = "FreeViewer";
+/// Registry-Eintrag unter dem Markennamen.
+pub const VALUE: &str = crate::brand::NAME;
 
 #[cfg(windows)]
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";

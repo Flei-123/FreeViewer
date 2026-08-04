@@ -53,7 +53,7 @@ pub fn default_dir() -> PathBuf {
         .or_else(|| std::env::var("HOME").ok())
         .map(PathBuf::from);
     let dir = match home {
-        Some(h) => h.join("Downloads").join("FreeViewer"),
+        Some(h) => h.join("Downloads").join(crate::brand::DIR),
         None => crate::ident::config_dir().join("files"),
     };
     let _ = fs::create_dir_all(&dir);

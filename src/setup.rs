@@ -21,22 +21,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-pub const APP: &str = "FreeViewer";
-pub const PUBLISHER: &str = "FleiTec";
+pub use crate::brand::NAME as APP;
+pub use crate::brand::PUBLISHER;
 #[cfg(windows)]
-const UNINSTALL_KEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FreeViewer";
+fn uninstall_key() -> String {
+    format!(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{}",
+        crate::brand::DIR
+    )
+}
 
 /// `C:\Program Files\FreeViewer`
 pub fn install_dir() -> PathBuf {
     let pf = std::env::var("ProgramW6432")
         .or_else(|_| std::env::var("ProgramFiles"))
         .unwrap_or_else(|_| r"C:\Program Files".to_string());
-    PathBuf::from(pf).join(APP)
+    PathBuf::from(pf).join(crate::brand::DIR)
 }
 
 pub fn installed_exe() -> PathBuf {
-    install_dir().join("freeviewer.exe")
+    install_dir().join(crate::brand::EXE)
 }
 
 /// Liegt dort schon eine Installation?
@@ -118,7 +122,7 @@ mod imp {
     /// Eintrag in "Apps & Features".
     fn write_uninstall_entry(exe: &Path, size_kb: u32) -> Result<()> {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let (key, _) = hklm.create_subkey(UNINSTALL_KEY)?;
+        let (key, _) = hklm.create_subkey(uninstall_key())?;
         key.set_value("DisplayName", &format!("{} Fernwartung", APP))?;
         key.set_value("DisplayVersion", &crate::update::VERSION.to_string())?;
         key.set_value("Publisher", &PUBLISHER.to_string())?;
@@ -217,10 +221,10 @@ mod imp {
         shortcut(
             &start_menu_link(),
             &dst,
-            "FreeViewer - Fernwartung ohne Konto und ohne Lizenz",
+            &format!("{} - Fernwartung ohne Konto und ohne Lizenz", crate::brand::NAME),
         )?;
         // Der Desktop-Eintrag ist Kuer, kein Grund zum Abbrechen.
-        let _ = shortcut(&desktop_link(), &dst, "FreeViewer");
+        let _ = shortcut(&desktop_link(), &dst, crate::brand::NAME);
         write_uninstall_entry(&dst, size_kb)?;
         // freeviewer://-Adressen sollen fuer alle Nutzer dieses Rechners gehen
         let _ = crate::link::register_for(&dst, true);

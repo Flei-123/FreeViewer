@@ -23,8 +23,11 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-pub const SERVICE_NAME: &str = "FreeViewer";
-pub const DISPLAY_NAME: &str = "FreeViewer Fernwartung";
+/// Name des Windows-Dienstes (= Markenname).
+pub const SERVICE_NAME: &str = crate::brand::NAME;
+pub fn display_name() -> String {
+    format!("{} Fernwartung", crate::brand::NAME)
+}
 pub const DESCRIPTION: &str =
     "Haelt FreeViewer erreichbar - auch am Anmeldebildschirm und wenn niemand angemeldet ist.";
 
@@ -196,7 +199,7 @@ mod imp {
     /// service agent (which may run as SYSTEM) keeps the same FreeViewer ID.
     pub fn prepare_machine_config() -> Result<PathBuf> {
         let pd = std::env::var("ProgramData").map_err(|_| anyhow!("ProgramData unbekannt"))?;
-        let dir = PathBuf::from(pd).join("FreeViewer");
+        let dir = PathBuf::from(pd).join(crate::brand::DIR);
         std::fs::create_dir_all(&dir)?;
         // let normal users read and write it, otherwise the GUI could not
         // change the password of an installation owned by SYSTEM
@@ -280,7 +283,7 @@ mod imp {
         unsafe {
             let m = scm(SC_MANAGER_ALL_ACCESS)?;
             let name = wide(SERVICE_NAME);
-            let disp = wide(DISPLAY_NAME);
+            let disp = wide(&display_name());
             let binw = wide(&bin);
             let existing = OpenServiceW(m, PCWSTR(name.as_ptr()), SERVICE_ALL_ACCESS);
             let h = match existing {

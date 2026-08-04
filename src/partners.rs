@@ -105,10 +105,16 @@ pub fn search_norm(s: &str) -> String {
 
 /// 497628420 -> "497 628 420"
 pub fn pretty_id(id: &str) -> String {
-    if id.len() == 9 {
-        format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9])
-    } else {
-        id.to_string()
+    match id.len() {
+        9 => format!("{} {} {}", &id[0..3], &id[3..6], &id[6..9]),
+        10 => format!(
+            "{} {} {} {}",
+            &id[0..1],
+            &id[1..4],
+            &id[4..7],
+            &id[7..10]
+        ),
+        _ => id.to_string(),
     }
 }
 
@@ -626,6 +632,7 @@ mod tests {
     #[test]
     fn ids_are_grouped_for_reading() {
         assert_eq!(pretty_id("497628420"), "497 628 420");
+        assert_eq!(pretty_id("1298814267"), "1 298 814 267");
         assert_eq!(pretty_id("12345"), "12345");
     }
 
