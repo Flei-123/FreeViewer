@@ -136,6 +136,21 @@ fn main() -> eframe::Result<()> {
                 let _ = std::process::Command::new("explorer.exe")
                     .arg(setup::installed_exe().as_os_str())
                     .spawn();
+                // die Quelle (z. B. Downloads\FreeViewer-Einrichtung.exe) wird
+                // nicht mehr gebraucht - kurz nach dem Beenden loeschen
+                if let Ok(cur) = std::env::current_exe() {
+                    if cur != setup::installed_exe() {
+                        let _ = std::process::Command::new("cmd")
+                            .args([
+                                "/c",
+                                &format!(
+                                    "ping -n 6 127.0.0.1 >nul & del /f /q \"{}\"",
+                                    cur.display()
+                                ),
+                            ])
+                            .spawn();
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Installation fehlgeschlagen: {}", e);
@@ -886,7 +901,23 @@ fn main() -> eframe::Result<()> {
         let _ = link::register(false);
     }
     autostart::refresh();
-    tray::start(shared.clone());
+    if is_agent {
+        // Zwei gleiche Tablett-Symbole (Agent + Oberflaeche) taugen nichts:
+        // der Agent zeigt seins nur, solange keine Oberflaeche laeuft.
+        let tray_shared = shared.clone();
+        std::thread::spawn(move || loop {
+            if tray::gui_running() {
+                if tray::showing() {
+                    tray::remove();
+                }
+            } else if !tray::showing() {
+                tray::start(tray_shared.clone());
+            }
+            std::thread::sleep(Duration::from_secs(4));
+        });
+    } else {
+        tray::start(shared.clone());
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -2790,6 +2821,13 @@ impl App {
                                             if x.favorite {
                                                 icons::show(ui, "star", 11.0, p.accent);
                                             }
+                                            if self.is_me(&x.id) {
+                                                ui.label(
+                                                    egui::RichText::new(i18n::t("dev.me"))
+                                                        .size(10.5)
+                                                        .color(p.accent),
+                                                );
+                                            }
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
@@ -4159,8 +4197,18 @@ impl App {
                     dlg.done = true;
                     // Installation mit Dienst - fragt einmal nach Admin-Rechten
                     if !setup::running_installed() {
-                        if let Err(e) = service::elevate("--install --with-service") {
-                            dlg.err = format!("{}", e);
+                        match service::elevate("--install --with-service") {
+                            Ok(()) if dlg.auto => {
+                                // Die heruntergeladene Datei hat ausgespielt:
+                                // die installierte Fassung uebernimmt - diese
+                                // hier darf sich beenden (und wird geloescht).
+                                std::thread::spawn(|| {
+                                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                                    std::process::exit(0);
+                                });
+                            }
+                            Ok(()) => {}
+                            Err(e) => dlg.err = format!("{}", e),
                         }
                     }
                 }

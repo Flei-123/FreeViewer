@@ -125,6 +125,28 @@ mod imp {
     /// Are we the first instance of this user? A second one asks the running
     /// one to come to the front and then leaves - two hosts with the same
     /// identity would kick each other off the relay.
+    /// Laeuft die Oberflaeche dieses Nutzers schon? (Marke der GUI)
+    pub fn gui_running() -> bool {
+        unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::Security::{OpenMutexW, MUTEX_ALL_ACCESS};
+            let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+            let name = wide(&format!("Local\\FreeViewer-gui-{}", user));
+            match OpenMutexW(MUTEX_ALL_ACCESS, false, PCWSTR(name.as_ptr())) {
+                Ok(h) => {
+                    let _ = CloseHandle(h);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    }
+
+    /// Ist das Tablett-Symbol dieses Prozesses gerade zu sehen?
+    pub fn showing() -> bool {
+        RUNNING.load(Ordering::Relaxed)
+    }
+
     pub fn claim_single_instance(agent: bool) -> bool {
         unsafe {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
@@ -549,7 +571,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{claim_single_instance, remove, start};
+pub use imp::{claim_single_instance, gui_running, remove, showing, start};
 
 /// Fenstergriff des Hauptfensters - fuer die Titelleistenfarbe.
 #[cfg(windows)]
@@ -584,6 +606,14 @@ pub fn start(shared: Arc<Shared>) {
 #[cfg(not(windows))]
 pub fn claim_single_instance(_agent: bool) -> bool {
     true
+}
+#[cfg(not(windows))]
+pub fn gui_running() -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn showing() -> bool {
+    false
 }
 #[cfg(not(windows))]
 pub fn remove() {}

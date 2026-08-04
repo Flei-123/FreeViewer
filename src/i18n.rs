@@ -118,6 +118,7 @@ const TABLE: &[(&str, &str, &str)] = &[
         "No devices yet – type an ID above and connect.",
     ),
     ("dev.nohit", "Kein Gerät passt zur Suche.", "No device matches."),
+    ("dev.me", "(dieses Gerät)", "(this device)"),
     (
         "dev.secure",
         "Bereit – jede Sitzung ist Ende zu Ende verschlüsselt",
