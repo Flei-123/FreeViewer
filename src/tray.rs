@@ -127,9 +127,10 @@ mod imp {
     /// identity would kick each other off the relay.
     /// Laeuft die Oberflaeche dieses Nutzers schon? (Marke der GUI)
     pub fn gui_running() -> bool {
+        // OpenMutexW sitzt in Synchronization, nicht in Security
         unsafe {
             use windows::Win32::Foundation::CloseHandle;
-            use windows::Win32::Security::{OpenMutexW, MUTEX_ALL_ACCESS};
+            use windows::Win32::System::Threading::{OpenMutexW, MUTEX_ALL_ACCESS};
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
             let name = wide(&format!("Local\\FreeViewer-gui-{}", user));
             match OpenMutexW(MUTEX_ALL_ACCESS, false, PCWSTR(name.as_ptr())) {
