@@ -23,6 +23,8 @@ mod i18n;
 mod account;
 mod icons;
 mod ident;
+#[cfg(feature = "license")]
+mod license;
 mod link;
 mod meet;
 mod input;
@@ -1078,6 +1080,13 @@ struct App {
     pw_ask: Option<String>,
     /// Sicherheits-Frage vor dem Deinstallieren.
     uninstall_ask: bool,
+    /// Lizenz: Eingabefeld, Meldung und ob das Fenster auf ist (nur X-Remote).
+    #[cfg(feature = "license")]
+    lic_key: String,
+    #[cfg(feature = "license")]
+    lic_msg: String,
+    #[cfg(feature = "license")]
+    lic_show: bool,
     /// Einrichtungs-Auftrag aus dem Browser-Download (Code, Wunschname) -
     /// wartet auf die eigene ID, dann geht alles von selbst.
     auto_setup: Option<(String, String)>,
@@ -1178,6 +1187,13 @@ impl App {
             setup_dlg: None,
             pw_ask: None,
             uninstall_ask: false,
+            // Ohne gueltige Lizenz beim Start einmal danach fragen.
+            #[cfg(feature = "license")]
+            lic_key: String::new(),
+            #[cfg(feature = "license")]
+            lic_msg: String::new(),
+            #[cfg(feature = "license")]
+            lic_show: !matches!(license::status(), license::Status::Active(_)),
             auto_setup,
             upd_flag_at: std::time::Instant::now() - Duration::from_secs(9),
             upd_running: false,
@@ -4126,6 +4142,71 @@ impl App {
         }
     }
 
+    /// Lizenz-Fenster (nur X-Remote): Schluessel eingeben, pruefen, ablegen.
+    /// Ohne gueltige Lizenz erscheint es bei jedem Start einmal - wegklicken
+    /// geht, das Programm laeuft vorerst weiter (weiche Einfuehrung).
+    #[cfg(feature = "license")]
+    fn license_modal(&mut self, ctx: &egui::Context) {
+        if !self.lic_show {
+            return;
+        }
+        let mut offen = true;
+        let mut spaeter = false;
+        egui::Window::new(i18n::t("lic.title"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut offen)
+            .frame(
+                egui::Frame::group(&ctx.style())
+                    .fill(theme::card())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::same(10)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.label(egui::RichText::new(i18n::t("lic.intro")).size(12.5));
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.lic_key)
+                        .hint_text(i18n::t("lic.key_ph"))
+                        .desired_width(360.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if !self.lic_msg.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(&self.lic_msg)
+                            .size(11.5)
+                            .color(theme::accent()),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, i18n::t("lic.activate"), true).clicked() {
+                        match license::activate(&self.lic_key) {
+                            Ok(lic) => {
+                                self.lic_msg = String::new();
+                                self.lic_show = false;
+                                self.hint =
+                                    i18n::tf("lic.ok_msg", &lic.name);
+                            }
+                            Err(e) => {
+                                self.lic_msg = i18n::tf("lic.invalid", &e);
+                            }
+                        }
+                    }
+                    if ghost_button(ui, i18n::t("lic.later")).clicked() {
+                        spaeter = true;
+                    }
+                });
+            });
+        if spaeter || !offen {
+            self.lic_show = false;
+        }
+    }
+
     /// Lade-Fenster waehrend der Dienst ein Update einspielt. Danach werden
     /// alle Teile beendet und der Dienst startet mit dem frischen Stand neu.
     fn update_modal(&mut self, ctx: &egui::Context) {
@@ -4694,6 +4775,50 @@ impl App {
             );
             ui.add_space(6.0);
             self.update_ui(ui);
+        });
+        #[cfg(feature = "license")]
+        self.license_card(ui);
+    }
+
+    /// Lizenz-Karte in den Einstellungen: Stand anzeigen, Schluessel
+    /// eingeben oder entfernen (nur X-Remote).
+    #[cfg(feature = "license")]
+    fn license_card(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            ui.label(egui::RichText::new(i18n::t("lic.title")).size(13.5).color(theme::text()));
+            ui.add_space(4.0);
+            match license::status() {
+                license::Status::Active(lic) => {
+                    info_row(ui, i18n::t("lic.holder"), &lic.name);
+                    info_row(ui, i18n::t("lic.expires"), &lic.expiry_text());
+                    ui.add_space(4.0);
+                    if ghost_button(ui, i18n::t("lic.remove")).clicked() {
+                        license::revoke();
+                        self.lic_show = true;
+                    }
+                }
+                license::Status::Missing => {
+                    ui.label(
+                        egui::RichText::new(i18n::t("lic.none"))
+                            .size(11.5)
+                            .color(theme::muted()),
+                    );
+                }
+                license::Status::Invalid(e) => {
+                    ui.label(
+                        egui::RichText::new(i18n::tf("lic.invalid", &e))
+                            .size(11.5)
+                            .color(theme::muted()),
+                    );
+                }
+            }
+            if !matches!(license::status(), license::Status::Active(_)) {
+                ui.add_space(6.0);
+                if accent_button(ui, i18n::t("lic.activate"), false).clicked() {
+                    self.lic_show = true;
+                }
+            }
         });
     }
 
@@ -5461,6 +5586,8 @@ impl eframe::App for App {
         }
         self.update_modal(ctx);
         self.uninstall_modal(ctx);
+        #[cfg(feature = "license")]
+        self.license_modal(ctx);
         self.knock_ui(ctx);
         self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);

@@ -1,6 +1,6 @@
 ﻿[package]
 name = "freeviewer"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 description = "Open-source remote desktop - free TeamViewer alternative (relay + end-to-end encryption)"
 license = "GPL-3.0"
@@ -44,6 +44,7 @@ hmac = "0.12"
 sha2 = "0.10"
 argon2 = "0.5"
 rand = "0.8"
+ed25519-dalek = { version = "2", optional = true }
 
 # DXGI Desktop Duplication capture + SendInput / low level hooks (Windows only)
 [target.'cfg(windows)'.dependencies.windows]
@@ -77,6 +78,11 @@ features = [
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
 
+[features]
+# Lizenz-Pruefung - NUR fuer Marken-Builds (X-Remote). Der normale
+# FreeViewer-Build bleibt ohne dieses Merkmal komplett frei.
+license = ["dep:ed25519-dalek"]
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -85,3 +91,9 @@ strip = true
 [[bin]]
 name = "freeviewer"
 path = "src/main.rs"
+
+# Schluessel-Werkzeug - wird nur gebaut, wenn das Lizenz-Merkmal an ist.
+[[bin]]
+name = "keygen"
+path = "src/bin/keygen.rs"
+required-features = ["license"]

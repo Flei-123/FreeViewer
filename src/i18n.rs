@@ -517,6 +517,22 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Damit dieser Mac freigegeben werden kann: Systemeinstellungen - Datenschutz & Sicherheit - Bildschirmaufnahme UND Bedienungshilfen fuer FreeViewer einschalten.",
         "To share this Mac: System Settings - Privacy & Security - turn on Screen Recording AND Accessibility for FreeViewer.",
     ),
+    // Lizenz (nur Marken-Builds mit dem Lizenz-Merkmal, z. B. X-Remote)
+    ("lic.title", "Lizenz", "License"),
+    (
+        "lic.intro",
+        "Gib deinen Lizenzschlüssel ein, um diese Installation freizuschalten. Du bekommst ihn beim Kauf per E-Mail.",
+        "Enter your license key to activate this installation. You receive it by e-mail when you buy.",
+    ),
+    ("lic.key_ph", "XXXXX-XXXXX-XXXXX-…", "XXXXX-XXXXX-XXXXX-…"),
+    ("lic.activate", "Aktivieren", "Activate"),
+    ("lic.later", "Später", "Later"),
+    ("lic.holder", "Lizenziert für", "Licensed to"),
+    ("lic.expires", "Gültig bis", "Valid until"),
+    ("lic.none", "Keine Lizenz auf diesem Rechner.", "No license on this machine."),
+    ("lic.invalid", "Schlüssel ungültig: {}", "Invalid key: {}"),
+    ("lic.ok_msg", "Lizenz aktiviert für {}", "License activated for {}"),
+    ("lic.remove", "Lizenz entfernen", "Remove license"),
 ];
 
 pub fn t(key: &str) -> &'static str {
