@@ -51,6 +51,11 @@ str0m = { version = "0.21", default-features = false, features = ["rust-crypto"]
 audiopus = "0.2"   # Opus - wird als C-Quelle mitgebaut (Windows + Mac + Linux)
 rustfft = "6"
 
+# Kamera auf dem Mac (Stufe 5c). AVFoundation ist Objective-C - nokhwa
+# kapselt das; unter Windows bleibt es beim eigenen Media-Foundation-Weg.
+[target.'cfg(target_os="macos")'.dependencies]
+nokhwa = { version = "0.10", features = ["input-avfoundation"] }
+
 # DXGI Desktop Duplication capture + SendInput / low level hooks (Windows only)
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

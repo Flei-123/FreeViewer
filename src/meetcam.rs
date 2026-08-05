@@ -187,7 +187,11 @@ pub fn liste() -> Vec<Geraet> {
     {
         win::liste()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::liste()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Vec::new()
     }
@@ -230,12 +234,202 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
+        let zaehler = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let fehler = Arc::new(Mutex::new(String::new()));
+        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
+        let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+        std::thread::Builder::new()
+            .name("kamera".into())
+            .spawn(move || mac::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2))
+            .map_err(|e| anyhow!("Kamerafaden: {}", e))?;
+        match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+            Ok(Ok(name)) => Ok(Kamera {
+                name,
+                breite,
+                hoehe,
+                neu,
+                zaehler,
+                stop,
+                fehler,
+            }),
+            Ok(Err(e)) => Err(anyhow!(e)),
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                Err(anyhow!("Kamera antwortet nicht"))
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (id, fps);
-        Err(anyhow!(
-            "Kamera auf dieser Plattform noch nicht angebunden (Stufe 5: macOS)"
-        ))
+        Err(anyhow!("Kamera auf dieser Plattform nicht angebunden"))
+    }
+}
+
+/// RGB (3 Bytes je Punkt) auf `zb` x `zh` bringen und nach NV12 wandeln.
+///
+/// Kameras liefern selten genau die gewuenschte Groesse. Statt zu strecken
+/// wird der groesstmoegliche MITTIGE Ausschnitt im Zielverhaeltnis genommen
+/// und dann per Flaechenmittel verkleinert - so bleibt das Gesicht rund und
+/// der Text scharf.
+pub fn rgb_nach_nv12(rgb: &[u8], sb: u32, sh: u32, zb: u32, zh: u32, out: &mut Vec<u8>) -> bool {
+    let (sbu, shu, zbu, zhu) = (sb as usize, sh as usize, zb as usize, zh as usize);
+    if sbu < 2 || shu < 2 || zbu < 2 || zhu < 2 || rgb.len() < sbu * shu * 3 {
+        return false;
+    }
+    // Mittiger Ausschnitt im Zielverhaeltnis.
+    let (mut ab, mut ah) = (sbu, shu);
+    if sbu * zhu > zbu * shu {
+        ab = shu * zbu / zhu;
+    } else {
+        ah = sbu * zhu / zbu;
+    }
+    let ab = ab.max(2).min(sbu);
+    let ah = ah.max(2).min(shu);
+    let (ox, oy) = ((sbu - ab) / 2, (shu - ah) / 2);
+    let mut klein = vec![0u8; zbu * zhu * 3];
+    for ty in 0..zhu {
+        let y0 = oy + ty * ah / zhu;
+        let y1 = (oy + ((ty + 1) * ah / zhu)).max(y0 + 1).min(shu);
+        for tx in 0..zbu {
+            let x0 = ox + tx * ab / zbu;
+            let x1 = (ox + ((tx + 1) * ab / zbu)).max(x0 + 1).min(sbu);
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for y in y0..y1 {
+                let zeile = y * sbu * 3;
+                for x in x0..x1 {
+                    let i = zeile + x * 3;
+                    r += rgb[i] as u32;
+                    g += rgb[i + 1] as u32;
+                    b += rgb[i + 2] as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = (ty * zbu + tx) * 3;
+            klein[o] = (r / n) as u8;
+            klein[o + 1] = (g / n) as u8;
+            klein[o + 2] = (b / n) as u8;
+        }
+    }
+    crate::h264::rgb_to_nv12(&klein, zb, zh, out);
+    true
+}
+
+// ---------------------------------------------------------------- macOS ----
+
+/// Kamera auf dem Mac. AVFoundation ist Objective-C - statt selbst eine
+/// Delegate-Klasse zu bauen, uebernimmt das nokhwa (nur fuer diese
+/// Plattform eingebunden). Der Rest ist derselbe Ablauf wie unter Windows:
+/// eigener Faden, immer nur das NEUESTE Bild, dicht gepacktes NV12.
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{rgb_nach_nv12, Bild, Geraet};
+    use nokhwa::pixel_format::RgbFormat;
+    use nokhwa::utils::{
+        ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+        Resolution,
+    };
+    use nokhwa::{query, Camera};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    pub fn liste() -> Vec<Geraet> {
+        match query(ApiBackend::AVFoundation) {
+            Ok(v) => v
+                .into_iter()
+                .map(|c| Geraet {
+                    name: c.human_name(),
+                    id: c.index().to_string(),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn schleife(
+        id: Option<String>,
+        breite: u32,
+        hoehe: u32,
+        fps: u32,
+        tx: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+        neu: Arc<Mutex<Option<Bild>>>,
+        zaehler: Arc<AtomicU64>,
+        stop: Arc<AtomicBool>,
+        fehler: Arc<Mutex<String>>,
+    ) {
+        // Welche Kamera? Ohne Angabe die erste.
+        let welche = match id.as_deref().and_then(|s| s.trim().parse::<u32>().ok()) {
+            Some(n) => CameraIndex::Index(n),
+            None => CameraIndex::Index(0),
+        };
+        let wunsch = RequestedFormat::new::<RgbFormat>(RequestedFormatType::ClosestToWithFrameRate(
+            CameraFormat::new(Resolution::new(breite, hoehe), FrameFormat::NV12, fps),
+            fps as f32,
+        ));
+        let mut kamera = match Camera::new(welche, wunsch) {
+            Ok(k) => k,
+            Err(e) => {
+                let _ = tx.send(Err(format!("Kamera nicht zu oeffnen: {}", e)));
+                return;
+            }
+        };
+        if let Err(e) = kamera.open_stream() {
+            let _ = tx.send(Err(format!("Kamera startet nicht: {}", e)));
+            return;
+        }
+        let auf = kamera.resolution();
+        let name = format!(
+            "{} ({}x{} -> {}x{})",
+            kamera.info().human_name(),
+            auf.width(),
+            auf.height(),
+            breite,
+            hoehe
+        );
+        if tx.send(Ok(name)).is_err() {
+            return;
+        }
+        let mut nv12: Vec<u8> = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let rahmen = match kamera.frame() {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Ok(mut f) = fehler.lock() {
+                        *f = format!("Kamera liefert nichts: {}", e);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+            };
+            let bild = match rahmen.decode_image::<RgbFormat>() {
+                Ok(b) => b,
+                Err(e) => {
+                    if let Ok(mut f) = fehler.lock() {
+                        *f = format!("Bild nicht lesbar: {}", e);
+                    }
+                    continue;
+                }
+            };
+            let (sb, sh) = (bild.width(), bild.height());
+            if !rgb_nach_nv12(bild.as_raw(), sb, sh, breite, hoehe, &mut nv12) {
+                continue;
+            }
+            zaehler.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut b) = neu.lock() {
+                *b = Some(Bild {
+                    breite,
+                    hoehe,
+                    nv12: nv12.clone(),
+                });
+            }
+        }
+        let _ = kamera.stop_stream();
     }
 }
 
@@ -567,6 +761,101 @@ mod win {
         };
         let _ = buf.Unlock();
         ok
+    }
+}
+
+#[cfg(test)]
+mod tests_stufe5 {
+    use super::*;
+
+    #[test]
+    fn rgb_nach_nv12_haelt_groesse_und_farbe() {
+        // Reines Gruen, 40x30 -> 16x16: Ausschnitt mittig, Farbe bleibt.
+        let (sb, sh) = (40u32, 30u32);
+        let mut rgb = vec![0u8; (sb * sh * 3) as usize];
+        for p in rgb.chunks_mut(3) {
+            p[1] = 255;
+        }
+        let mut nv12 = Vec::new();
+        assert!(rgb_nach_nv12(&rgb, sb, sh, 16, 16, &mut nv12));
+        assert_eq!(nv12.len(), 16 * 16 * 3 / 2);
+        // Y von Gruen liegt bei etwa 145 (BT.601).
+        let y0 = nv12[0];
+        assert!((120..175).contains(&y0), "Y von Gruen ist {}", y0);
+    }
+
+    #[test]
+    fn rgb_nach_nv12_schneidet_mittig_zu() {
+        // Links und rechts ein schwarzer Rand, Mitte weiss: bei 1:1-Ziel
+        // muss die weisse Mitte uebrig bleiben.
+        let (sb, sh) = (60u32, 20u32);
+        let mut rgb = vec![0u8; (sb * sh * 3) as usize];
+        for y in 0..sh as usize {
+            for x in 20..40usize {
+                let i = (y * sb as usize + x) * 3;
+                rgb[i] = 255;
+                rgb[i + 1] = 255;
+                rgb[i + 2] = 255;
+            }
+        }
+        let mut nv12 = Vec::new();
+        assert!(rgb_nach_nv12(&rgb, sb, sh, 8, 8, &mut nv12));
+        let mitte = nv12[8 * 4 + 4];
+        assert!(mitte > 200, "Mitte sollte hell sein, ist {}", mitte);
+    }
+
+    #[test]
+    fn zu_kleine_eingaben_werden_abgelehnt() {
+        let mut out = Vec::new();
+        assert!(!rgb_nach_nv12(&[0u8; 3], 1, 1, 16, 16, &mut out));
+        assert!(!rgb_nach_nv12(&[], 0, 0, 16, 16, &mut out));
+    }
+
+    /// Was findet diese Maschine? Auf einem Bauknecht ohne Kamera ist eine
+    /// leere Liste richtig - abstuerzen darf es nie.
+    #[test]
+    fn kameraliste_und_oeffnen_melden_ehrlich() {
+        let l = liste();
+        println!("Kameras: {}", l.len());
+        for g in &l {
+            println!("  {} [{}]", g.name, g.id);
+        }
+        if l.is_empty() {
+            match oeffnen(None, 640, 360, 15) {
+                Ok(_) => println!("ohne Kameraliste trotzdem eine bekommen"),
+                Err(e) => println!("keine Kamera: {}", e),
+            }
+            return;
+        }
+        // Es gibt eine: dann muss der ganze Weg bis NV12 laufen.
+        match oeffnen(None, 640, 360, 15) {
+            Ok(k) => {
+                let start = std::time::Instant::now();
+                let mut bild = None;
+                while start.elapsed() < std::time::Duration::from_secs(6) && bild.is_none() {
+                    bild = k.neuestes();
+                    if bild.is_none() {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                match bild {
+                    Some(b) => {
+                        assert_eq!(b.nv12.len(), 640 * 360 * 3 / 2, "NV12-Laenge");
+                        let hell: u64 = b.nv12[..640 * 360].iter().map(|v| *v as u64).sum();
+                        println!(
+                            "Kamera {} liefert {}x{}, Helligkeit {:.1}",
+                            k.name,
+                            b.breite,
+                            b.hoehe,
+                            hell as f64 / (640.0 * 360.0)
+                        );
+                    }
+                    None => println!("kein Bild binnen 6 s ({})", k.fehler()),
+                }
+                k.stoppen();
+            }
+            Err(e) => println!("Kamera trotz Liste nicht zu oeffnen: {}", e),
+        }
     }
 }
 
