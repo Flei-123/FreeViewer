@@ -1626,6 +1626,8 @@ struct App {
     nativ_meet: Option<meetui::NativMeet>,
     /// Bildkacheln des nativen Meetings: Teilnehmer -> (Stand, Textur).
     nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
+    /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
+    nativ_eigen: Option<(u64, egui::TextureHandle)>,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
     /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
     full: bool,
@@ -1748,6 +1750,7 @@ impl App {
             meet_win: MeetWin::default(),
             nativ_meet: None,
             nativ_bilder: std::collections::HashMap::new(),
+            nativ_eigen: None,
             full: false,
             bar_x: 0.5,
             bar_w: 700.0,
@@ -3081,6 +3084,7 @@ impl App {
                         } else {
                             let mut verlassen = false;
                             let mut stumm_um = None;
+                            let mut kamera_um = None;
                             let mut hand_um = None;
                             let mut senden = false;
                             if let Some(n) = self.nativ_meet.as_mut() {
@@ -3138,6 +3142,14 @@ impl App {
                                     {
                                         stumm_um = Some(!n.stumm);
                                     }
+                                    if ghost_button(
+                                        ui,
+                                        if n.kamera_an { "Kamera aus" } else { "Kamera an" },
+                                    )
+                                    .clicked()
+                                    {
+                                        kamera_um = Some(!n.kamera_an);
+                                    }
                                     if ghost_button(ui, if n.hand { "Hand runter" } else { "Hand" })
                                         .clicked()
                                     {
@@ -3147,6 +3159,56 @@ impl App {
                                         verlassen = true;
                                     }
                                 });
+                                if !n.kamera_meldung.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(n.kamera_meldung.clone())
+                                            .size(10.5)
+                                            .color(p.muted),
+                                    );
+                                }
+                                // Eigenes Kamerabild - gespiegelt, wie man sich
+                                // im Spiegel sieht (so macht es jedes Meeting).
+                                if let Some((ew, eh, epx)) = n.eigen.as_ref() {
+                                    let frisch = self
+                                        .nativ_eigen
+                                        .as_ref()
+                                        .map(|(alt, _)| *alt != n.eigen_stand)
+                                        .unwrap_or(true);
+                                    if frisch {
+                                        let bild = egui::ColorImage::from_rgba_unmultiplied(
+                                            [*ew as usize, *eh as usize],
+                                            epx,
+                                        );
+                                        let tex = ui.ctx().load_texture(
+                                            "meeteigen",
+                                            bild,
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        self.nativ_eigen = Some((n.eigen_stand, tex));
+                                    }
+                                } else {
+                                    self.nativ_eigen = None;
+                                }
+                                if let Some((_, tex)) = self.nativ_eigen.as_ref() {
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Du  ·  {} Bilder gesendet",
+                                            n.bild_gesendet
+                                        ))
+                                        .size(10.5)
+                                        .color(p.muted),
+                                    );
+                                    ui.add(
+                                        egui::Image::new(&*tex)
+                                            .uv(egui::Rect::from_min_max(
+                                                egui::pos2(1.0, 0.0),
+                                                egui::pos2(0.0, 1.0),
+                                            ))
+                                            .max_width(260.0)
+                                            .corner_radius(6.0),
+                                    );
+                                }
                                 // Bildkacheln der anderen (Stufe 2)
                                 let neue: Vec<(u64, u64, u32, u32)> = n
                                     .bilder
@@ -3273,6 +3335,11 @@ impl App {
                             if let Some(v) = stumm_um {
                                 if let Some(n) = self.nativ_meet.as_mut() {
                                     n.stumm_schalten(v);
+                                }
+                            }
+                            if let Some(v) = kamera_um {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    n.kamera_schalten(v);
                                 }
                             }
                             if let Some(v) = hand_um {

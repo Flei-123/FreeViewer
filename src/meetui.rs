@@ -32,6 +32,21 @@ pub struct NativMeet {
     pub bild_codec: String,
     /// Dekodierte Bilder der anderen (je Teilnehmer das letzte).
     pub bilder: crate::meetvideo::Dekodierer,
+    /// Eigene Kamera (Stufe 2d) - laeuft nur, wenn sie eingeschaltet ist.
+    kamera: Option<crate::meetcam::Kamera>,
+    koder: Option<crate::meetvideo::Kodierer>,
+    pub kamera_an: bool,
+    pub kamera_meldung: String,
+    /// Eigenes Bild fuer die Vorschau: (Breite, Hoehe, RGBA).
+    pub eigen: Option<(u32, u32, Vec<u8>)>,
+    /// Zaehlt hoch, wenn die Vorschau ein neues Bild hat (Textur-Nachladen).
+    pub eigen_stand: u64,
+    /// Wie viele eigene Bilder schon rausgingen.
+    pub bild_gesendet: u64,
+    /// Wann darf das naechste Bild raus (15 Bilder je Sekunde).
+    naechstes_bild: std::time::Instant,
+    /// Videospur ist beim Server angemeldet.
+    video_gemeldet: bool,
 }
 
 impl NativMeet {
@@ -71,6 +86,15 @@ impl NativMeet {
             bild_zaehler: 0,
             bild_codec: String::new(),
             bilder: crate::meetvideo::Dekodierer::neu(),
+            kamera: None,
+            koder: None,
+            kamera_an: false,
+            kamera_meldung: String::new(),
+            eigen: None,
+            eigen_stand: 0,
+            bild_gesendet: 0,
+            naechstes_bild: std::time::Instant::now(),
+            video_gemeldet: false,
         })
     }
 
@@ -99,6 +123,15 @@ impl NativMeet {
                         self.sig.roh(
                             serde_json::json!({"t":"publish","mid":self.ton.mid,"screen":false}),
                         );
+                        // Auch die Bildspur anmelden - sonst weiss der Server
+                        // spaeter nicht, wohin mit unserem Kamerabild. Bis die
+                        // Kamera an ist, gilt sie als abgeschaltet (die anderen
+                        // sehen dann einen Platzhalter statt schwarz).
+                        self.sig.roh(
+                            serde_json::json!({"t":"publish","mid":self.ton.vid,"screen":false}),
+                        );
+                        self.video_gemeldet = true;
+                        self.sig.stumm("video", !self.kamera_an);
                     } else {
                         self.ton.server_angebot(&sdp);
                     }
@@ -199,6 +232,104 @@ impl NativMeet {
                 }
             }
         }
+        self.kamera_pumpe();
+    }
+
+    /// Kamera -> H.264 -> Meeting. Laeuft mit 15 Bildern je Sekunde; das
+    /// Bild wird beim Abholen genommen, nicht gestaut.
+    fn kamera_pumpe(&mut self) {
+        let jetzt = std::time::Instant::now();
+        if jetzt < self.naechstes_bild {
+            return;
+        }
+        let (kam, kod) = match (self.kamera.as_ref(), self.koder.as_mut()) {
+            (Some(k), Some(c)) => (k, c),
+            _ => return,
+        };
+        let bild = match kam.neuestes() {
+            Some(b) => b,
+            None => return,
+        };
+        self.naechstes_bild = jetzt + std::time::Duration::from_millis(66);
+        match kod.nv12_rahmen(&bild.nv12) {
+            Ok(teile) => {
+                for t in teile {
+                    self.ton.bild_senden(t.data);
+                }
+                self.bild_gesendet += 1;
+            }
+            Err(e) => self.kamera_meldung = format!("Kodierer: {}", e),
+        }
+        // Eigene Vorschau (nur 5-mal je Sekunde - mehr braucht kein Mensch
+        // und es spart Rechenzeit).
+        if self.bild_gesendet % 3 == 0 {
+            let mut rgba = Vec::new();
+            if crate::h264::nv12_to_rgba(
+                &bild.nv12,
+                bild.breite,
+                bild.hoehe,
+                bild.breite as usize,
+                bild.hoehe,
+                &mut rgba,
+            ) {
+                self.eigen = Some((bild.breite, bild.hoehe, rgba));
+                self.eigen_stand += 1;
+            }
+        }
+        let f = kam.fehler();
+        if !f.is_empty() {
+            self.kamera_meldung = f;
+        }
+    }
+
+    /// Kamera an- oder ausschalten.
+    pub fn kamera_schalten(&mut self, an: bool) {
+        if an {
+            if self.kamera.is_some() {
+                return;
+            }
+            match crate::meetcam::oeffnen(
+                None,
+                crate::meetvideo::BREITE,
+                crate::meetvideo::HOEHE,
+                30,
+            ) {
+                Ok(k) => {
+                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 15, 1_500_000) {
+                        Ok(c) => {
+                            self.kamera_meldung = format!("Kamera: {}", k.name);
+                            self.kamera = Some(k);
+                            self.koder = Some(c);
+                            self.kamera_an = true;
+                        }
+                        Err(e) => {
+                            self.kamera_meldung = format!("Kein Kodierer: {}", e);
+                            self.kamera_an = false;
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.kamera_meldung = format!("Keine Kamera: {}", e);
+                    self.kamera_an = false;
+                }
+            }
+        } else {
+            if let Some(k) = self.kamera.take() {
+                k.stoppen();
+            }
+            self.koder = None;
+            self.eigen = None;
+            self.eigen_stand += 1;
+            self.kamera_an = false;
+        }
+        if self.video_gemeldet {
+            self.sig.stumm("video", !self.kamera_an);
+        }
+    }
+
+    /// Name der laufenden Kamera (leer = aus).
+    pub fn kamera_name(&self) -> String {
+        self.kamera.as_ref().map(|k| k.name.clone()).unwrap_or_default()
     }
 
     pub fn stumm_schalten(&mut self, an: bool) {
@@ -240,6 +371,9 @@ impl NativMeet {
     }
 
     pub fn verlassen(&self) {
+        if let Some(k) = self.kamera.as_ref() {
+            k.stoppen();
+        }
         self.sig.verlassen();
         self.ton.beenden();
     }
@@ -273,6 +407,24 @@ mod tests {
         // und nicht knallen.
         let (ein, aus) = meetaudio::geraete_liste();
         println!("Mikrofone {:?} Lautsprecher {:?}", ein.len(), aus.len());
+    }
+
+    #[test]
+    fn kamera_schalten_ohne_kamera_meldet_sauber() {
+        // Server ohne Kamera: der Schalter muss eine Meldung setzen und
+        // aus bleiben - kein Absturz, kein haengender Faden.
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", None, None);
+        if let Ok(mut m) = r {
+            m.kamera_schalten(true);
+            #[cfg(not(windows))]
+            {
+                assert!(!m.kamera_an, "ohne Kamera darf sie nicht an sein");
+                assert!(!m.kamera_meldung.is_empty(), "keine Meldung");
+            }
+            m.kamera_schalten(false);
+            assert!(!m.kamera_an);
+            m.verlassen();
+        }
     }
 
     #[test]
