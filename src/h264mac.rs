@@ -41,8 +41,8 @@ const kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: OSType = 0x3432_3076; // 
 const kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: OSType = 0x3432_3066; // '420f'
 const kCFNumberSInt32Type: c_int = 3;
 const kCFNumberFloat64Type: c_int = 6;
-/// Der Dekodierer soll das Bild sofort liefern, nicht in einer Warteschlange.
-const kVTDecodeFrame_EnableTemporalProcessing: u32 = 1 << 1;
+/// Speicher fuer den Blockpuffer sofort belegen (kCMBlockBufferAssureMemoryNowFlag).
+const kCMBlockBufferAssureMemoryNowFlag: u32 = 1 << 0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -848,7 +848,7 @@ impl Decoder {
                 std::ptr::null(),
                 0,
                 avcc.len(),
-                0,
+                kCMBlockBufferAssureMemoryNowFlag,
                 &mut bb,
             );
             if st != 0 || bb.is_null() {
@@ -887,10 +887,13 @@ impl Decoder {
                 return Err(anyhow!("Probenpuffer: {}", st));
             }
             let mut info = 0u32;
+            // Flags = 0: synchron dekodieren und das Bild AUSGEBEN. (1<<1
+            // waere kVTDecodeFrame_DoNotOutputFrame - damit kam im ersten
+            // Versuch nie ein Bild heraus.)
             let st = VTDecompressionSessionDecodeFrame(
                 self.session,
                 sb,
-                kVTDecodeFrame_EnableTemporalProcessing,
+                0,
                 std::ptr::null_mut(),
                 &mut info,
             );
