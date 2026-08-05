@@ -45,6 +45,11 @@ sha2 = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 ed25519-dalek = { version = "2", optional = true }
+# WebRTC-Kern fuer das native Meeting. Krypto bewusst als reines Rust
+# (rust-crypto): so bauen Windows und Mac ohne cmake/NASM/OpenSSL.
+str0m = { version = "0.21", default-features = false, features = ["rust-crypto"] }
+audiopus = "0.2"   # Opus - wird als C-Quelle mitgebaut (Windows + Mac + Linux)
+rustfft = "6"
 
 # DXGI Desktop Duplication capture + SendInput / low level hooks (Windows only)
 [target.'cfg(windows)'.dependencies.windows]

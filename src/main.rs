@@ -27,6 +27,9 @@ mod ident;
 mod license;
 mod link;
 mod meet;
+mod meetsig;
+mod meetrtc;
+mod meetaudio;
 mod input;
 mod net;
 mod p2p;
@@ -203,6 +206,241 @@ fn main() -> eframe::Result<()> {
     // Draws every page once without a window:  freeviewer --uitest
     // egui can run headless, so a broken layout or a panic in the GUI shows
     // up in a build step instead of in front of the user.
+    // Praxistest mit ECHTEN Geraeten (Stufe 1c):
+    //   freeviewer --meetmik <raum> <passwort> [name] [sekunden]
+    // Nimmt das Standardmikrofon, spielt die anderen ueber den Lautsprecher
+    // und schaltet die Echo-Unterdrueckung dazwischen.
+    if let Some(i) = std::env::args().position(|a| a == "--meetmik") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativMikro".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
+        let (ein_liste, aus_liste) = meetaudio::geraete_liste();
+        println!("MIKROFONE {:?}", ein_liste);
+        println!("LAUTSPRECHER {:?}", aus_liste);
+        let geraete = match meetaudio::geraete_starten(None, None) {
+            Ok(g) => g,
+            Err(e) => {
+                println!("MIKROTEST FEHLER Geraete: {}", e);
+                return Ok(());
+            }
+        };
+        println!("EINGANG {} / AUSGANG {}", geraete.eingang, geraete.ausgang);
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("MIKROTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("MIKROTEST FEHLER Ton: {}", e);
+                return Ok(());
+            }
+        };
+        let mut angeboten = false;
+        let start = std::time::Instant::now();
+        let mut mikro_rahmen: u64 = 0;
+        let mut mikro_pegel = 0.0f32;
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    _ => println!("EREIGNIS {:?}", e),
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+            }
+            // Mikrofon -> Netz
+            while let Ok(rahmen) = geraete.mikro.try_recv() {
+                let spitze = rahmen
+                    .iter()
+                    .map(|v| (*v as f32 / 32768.0).abs())
+                    .fold(0.0f32, f32::max);
+                mikro_pegel = mikro_pegel.max(spitze);
+                mikro_rahmen += 1;
+                ton.senden(rahmen);
+            }
+            // Netz -> Lautsprecher
+            for te in ton.abholen() {
+                match te {
+                    meetrtc::TonEreignis::Rahmen { quelle, pcm } => {
+                        if let Ok(mut m) = geraete.lautsprecher.lock() {
+                            m.dazu(quelle, &pcm);
+                        }
+                    }
+                    meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
+                    meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                    meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let z = ton.zahlen();
+        println!(
+            "ZAHLEN verbunden={} gesendet={} empfangen={} mikro_rahmen={} mikro_pegel={:.3} pegel_rein={:.3}",
+            z.verbunden, z.gesendet, z.empfangen, mikro_rahmen, mikro_pegel, z.pegel_rein
+        );
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        println!("MIKROTEST FERTIG");
+        return Ok(());
+    }
+
+    // Nativer TON-Test (Stufe 1b): beitreten, echte WebRTC-Verbindung zum
+    // Medienserver aufbauen und einen Testton senden bzw. den Ton der
+    // anderen messen.
+    //   freeviewer --meetton <raum> <passwort> [name] [sekunden]
+    if let Some(i) = std::env::args().position(|a| a == "--meetton") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativTon".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(20);
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("TONTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("TONTEST FEHLER Ton: {}", e);
+                return Ok(());
+            }
+        };
+        println!("ANGEBOT {} Zeichen, mid {}", ton.angebot.len(), ton.mid);
+        let mut angeboten = false;
+        let mut phase = 0.0f32;
+        let start = std::time::Instant::now();
+        let mut naechster = std::time::Instant::now();
+        let mut pegel_max = 0.0f32;
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                            println!("EREIGNIS Angebot verschickt");
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                        println!("EREIGNIS Antwort eingespielt ({} Zeichen)", sdp.len());
+                    }
+                    meetsig::Ereignis::Spur { mid, peer, .. } => {
+                        ton.spur(mid, *peer);
+                        println!("EREIGNIS Spur {} gehoert zu {}", mid, peer);
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => {
+                        ton.server_angebot(sdp);
+                        println!("EREIGNIS Server-Angebot bekommen");
+                    }
+                    _ => println!("EREIGNIS {:?}", e),
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+                println!("EREIGNIS eigene Antwort verschickt");
+            }
+            for te in ton.abholen() {
+                match te {
+                    meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
+                    meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                    meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
+                    meetrtc::TonEreignis::Rahmen { .. } => {}
+                }
+            }
+            // alle 20 ms ein Rahmen Testton (440 Hz)
+            while std::time::Instant::now() >= naechster {
+                naechster += std::time::Duration::from_millis(20);
+                ton.senden(meetrtc::testton(&mut phase, 440.0));
+            }
+            let z = ton.zahlen();
+            pegel_max = pegel_max.max(z.pegel_rein);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let z = ton.zahlen();
+        println!(
+            "ZAHLEN verbunden={} gesendet={} empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3}",
+            z.verbunden, z.gesendet, z.empfangen, z.bytes_raus, z.bytes_rein, pegel_max
+        );
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        println!("TONTEST FERTIG");
+        return Ok(());
+    }
+
+    // Nativer Meeting-Test (Stufe 1, ohne Oberflaeche):
+    //   freeviewer --meettest <raum> <passwort> [name] [sekunden]
+    // Tritt bei, meldet jedes Ereignis, schickt einen Chat und geht wieder.
+    if let Some(i) = std::env::args().position(|a| a == "--meettest") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args.get(i + 3).cloned().unwrap_or_else(|| "Nativ".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(12);
+        match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => {
+                let start = std::time::Instant::now();
+                let mut chat_geschickt = false;
+                while start.elapsed().as_secs() < dauer {
+                    for e in s.abholen() {
+                        println!("EREIGNIS {:?}", e);
+                        // Im Test lassen wir Wartende sofort herein, damit sich
+                        // der Weg Browser -> Warteraum -> nativer Gastgeber
+                        // wirklich pruefen laesst.
+                        if let meetsig::Ereignis::WarteDazu { peer, .. } = e {
+                            s.warteraum("admit", Some(peer));
+                        }
+                        // Kommt jemand herein, begruessen wir ihn - so laesst
+                        // sich pruefen, dass Chat auch WIRKLICH bei den
+                        // anderen ankommt (frueher Gesagtes wird nicht
+                        // nachgereicht, das ist Absicht des Servers).
+                        if let meetsig::Ereignis::Dazu(_) = e {
+                            s.chat("Willkommen im nativen Meeting");
+                        }
+                    }
+                    if !chat_geschickt && s.zustand().ich != 0 {
+                        s.chat("Hallo aus dem nativen Client");
+                        s.hand(true);
+                        chat_geschickt = true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                println!("ZUSTAND {:?}", s.zustand());
+                s.verlassen();
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                println!("MEETTEST FERTIG");
+            }
+            Err(e) => println!("MEETTEST FEHLER {}", e),
+        }
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--uitest") {
         let tmp = std::env::temp_dir().join("fv-uitest");
         let _ = std::fs::create_dir_all(&tmp);

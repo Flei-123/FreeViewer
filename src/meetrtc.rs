@@ -1,0 +1,495 @@
+//! Natives Meeting - Stufe 1b: Ton ohne Browser.
+//!
+//! Hier passiert das, was bisher der Browser gemacht hat: eine echte
+//! WebRTC-Verbindung zum Medienserver aufbauen (ICE, DTLS, SRTP) und Ton in
+//! Opus hin- und herschicken. Wir benutzen dieselbe Bibliothek wie der
+//! Server selbst (str0m) - was auf der einen Seite laeuft, versteht die
+//! andere garantiert.
+//!
+//! Aufteilung:
+//!   meetsig.rs  - die Steuerleitung (wer ist da, Chat, Hand, Warteraum)
+//!   meetrtc.rs  - dieses Modul: Ton (spaeter auch Bild und Bildschirm)
+//!
+//! Bewusst ohne Geraete-Zugriff: dieses Modul bekommt Bild/Ton als
+//! Zahlenreihen herein und gibt sie so wieder heraus. Mikrofon und
+//! Lautsprecher (cpal) und die Echo-Unterdrueckung haengen eine Ebene
+//! darueber - so laesst sich der ganze Netzweg auf einem Server ohne
+//! Soundkarte messen und nicht nur behaupten.
+
+use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::media::{Direction, MediaKind, MediaTime, Mid};
+use str0m::net::{Protocol, Receive};
+use str0m::{Candidate, Event, Input, Output, Rtc};
+
+/// Abtastrate und Rahmenlaenge wie im Browser: 48 kHz, 20 ms, Mono.
+pub const RATE: u32 = 48_000;
+pub const RAHMEN: usize = 960; // 20 ms bei 48 kHz
+
+/// Was der Ton-Teil nach oben meldet.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TonEreignis {
+    /// ICE und DTLS stehen - ab jetzt fliesst Ton.
+    Verbunden,
+    /// Ein entschluesselter, dekodierter Tonrahmen eines anderen Teilnehmers.
+    Rahmen { quelle: u64, pcm: Vec<i16> },
+    Fehler(String),
+    Ende(String),
+}
+
+/// Laufende Zahlen - damit man Behauptungen nachrechnen kann.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Zahlen {
+    pub gesendet: u64,
+    pub empfangen: u64,
+    pub bytes_raus: u64,
+    pub bytes_rein: u64,
+    /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
+    pub pegel_rein: f32,
+    pub verbunden: bool,
+}
+
+/// Steuerung des Ton-Teils von aussen.
+pub struct Ton {
+    /// PCM-Rahmen, die raus sollen (20 ms, Mono, 48 kHz).
+    raus: std::sync::mpsc::Sender<Vec<i16>>,
+    ereignisse: std::sync::mpsc::Receiver<TonEreignis>,
+    zahlen: Arc<Mutex<Zahlen>>,
+    stumm: Arc<AtomicBool>,
+    ende: Arc<AtomicBool>,
+    /// Das SDP-Angebot, das an den Server geschickt werden muss.
+    pub angebot: String,
+    /// m-line unseres eigenen Tons (der Server will sie im "publish" wissen).
+    pub mid: String,
+    /// Welche m-line gehoert zu welchem Teilnehmer (aus den "track"-Meldungen).
+    spuren: Arc<Mutex<HashMap<String, u64>>>,
+    antwort: std::sync::mpsc::Sender<Sdp>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Sdp {
+    /// Antwort auf UNSER Angebot.
+    Antwort(String),
+    /// Der Server bietet selbst etwas an (neue Teilnehmer) - wir antworten.
+    Angebot(String),
+}
+
+impl Ton {
+    pub fn senden(&self, pcm: Vec<i16>) {
+        let _ = self.raus.send(pcm);
+    }
+    pub fn abholen(&self) -> Vec<TonEreignis> {
+        let mut v = Vec::new();
+        while let Ok(e) = self.ereignisse.try_recv() {
+            v.push(e);
+        }
+        v
+    }
+    pub fn zahlen(&self) -> Zahlen {
+        self.zahlen.lock().map(|z| *z).unwrap_or_default()
+    }
+    pub fn stumm(&self, an: bool) {
+        self.stumm.store(an, Ordering::Relaxed);
+    }
+    /// Antwort des Servers auf unser Angebot einspielen.
+    pub fn antwort(&self, sdp: &str) {
+        let _ = self.antwort.send(Sdp::Antwort(sdp.to_string()));
+    }
+    /// Ein Angebot des Servers - die Antwort kommt als Ereignis zurueck.
+    pub fn server_angebot(&self, sdp: &str) {
+        let _ = self.antwort.send(Sdp::Angebot(sdp.to_string()));
+    }
+    /// Antwort-SDP abholen, das auf ein Server-Angebot hin entstanden ist.
+    pub fn offene_antwort(&self) -> Option<String> {
+        ANTWORT_RAUS.lock().ok().and_then(|mut a| a.pop())
+    }
+    /// Zuordnung aus der Signalisierung nachtragen.
+    pub fn spur(&self, mid: &str, peer: u64) {
+        if let Ok(mut m) = self.spuren.lock() {
+            m.insert(mid.to_string(), peer);
+        }
+    }
+    pub fn beenden(&self) {
+        self.ende.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Ton {
+    fn drop(&mut self) {
+        self.beenden();
+    }
+}
+
+/// Antworten, die der Ton-Faden fuer die Signalisierung hinterlegt.
+static ANTWORT_RAUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Startet den Ton-Teil: baut das Angebot und laeuft danach im Hintergrund.
+pub fn starten() -> Result<Ton> {
+    // Krypto-Anbieter einmalig setzen (reines Rust, s. Cargo.toml).
+    static EINMAL: std::sync::Once = std::sync::Once::new();
+    EINMAL.call_once(|| {
+        str0m::crypto::from_feature_flags().install_process_default();
+    });
+
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_nonblocking(true)?;
+    let lokal = socket.local_addr()?;
+
+    let mut rtc = Rtc::builder().build(Instant::now());
+    // Kandidaten: jede eigene Adresse, die kein Loopback ist. Der Server ist
+    // oeffentlich erreichbar - wir muessen also nur hinaus telefonieren
+    // koennen, ein STUN-Server ist dafuer nicht noetig.
+    for ip in eigene_adressen() {
+        let addr = SocketAddr::new(ip, lokal.port());
+        if let Ok(k) = Candidate::host(addr, "udp") {
+            let _ = rtc.add_local_candidate(k);
+        }
+    }
+
+    let mut api = rtc.sdp_api();
+    let mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+    let (angebot, offen) = api
+        .apply()
+        .ok_or_else(|| anyhow!("Angebot laesst sich nicht bauen"))?;
+    let angebot_sdp = angebot.to_sdp_string();
+
+    let (raus_tx, raus_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel::<TonEreignis>();
+    let (sdp_tx, sdp_rx) = std::sync::mpsc::channel::<Sdp>();
+    let zahlen = Arc::new(Mutex::new(Zahlen::default()));
+    let spuren: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let stumm = Arc::new(AtomicBool::new(false));
+    let ende = Arc::new(AtomicBool::new(false));
+
+    let z2 = zahlen.clone();
+    let sp2 = spuren.clone();
+    let s2 = stumm.clone();
+    let e2 = ende.clone();
+    std::thread::Builder::new()
+        .name("meetrtc".into())
+        .spawn(move || {
+            let r = lauf(
+                rtc, offen, socket, mid, raus_rx, sdp_rx, &ev_tx, &z2, &s2, &e2, &sp2,
+            );
+            let text = match r {
+                Ok(()) => String::new(),
+                Err(e) => e.to_string(),
+            };
+            let _ = ev_tx.send(TonEreignis::Ende(text));
+        })
+        .map_err(|e| anyhow!("Ton-Faden: {}", e))?;
+
+    Ok(Ton {
+        raus: raus_tx,
+        ereignisse: ev_rx,
+        zahlen,
+        stumm,
+        ende,
+        angebot: angebot_sdp,
+        mid: mid.to_string(),
+        spuren,
+        antwort: sdp_tx,
+    })
+}
+
+/// Alle eigenen IP-Adressen ausser Loopback. Ohne Fremdcode: wir fragen das
+/// Betriebssystem, indem wir eine Verbindung "ins Blaue" oeffnen (es fliesst
+/// dabei kein Paket) und schauen, welche Adresse es dafuer waehlt.
+fn eigene_adressen() -> Vec<std::net::IpAddr> {
+    let mut aus = Vec::new();
+    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("8.8.8.8:53").is_ok() {
+            if let Ok(a) = s.local_addr() {
+                if !a.ip().is_loopback() {
+                    aus.push(a.ip());
+                }
+            }
+        }
+    }
+    aus
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lauf(
+    mut rtc: Rtc,
+    offen: str0m::change::SdpPendingOffer,
+    socket: UdpSocket,
+    mid: Mid,
+    raus: std::sync::mpsc::Receiver<Vec<i16>>,
+    sdp: std::sync::mpsc::Receiver<Sdp>,
+    ev: &std::sync::mpsc::Sender<TonEreignis>,
+    zahlen: &Arc<Mutex<Zahlen>>,
+    stumm: &Arc<AtomicBool>,
+    ende: &Arc<AtomicBool>,
+    spuren: &Arc<Mutex<HashMap<String, u64>>>,
+) -> Result<()> {
+    // Auf die Antwort warten (kommt ueber die Signalisierung herein).
+    let mut offen = Some(offen);
+    let start = Instant::now();
+    let mut kodierer = audiopus::coder::Encoder::new(
+        audiopus::SampleRate::Hz48000,
+        audiopus::Channels::Mono,
+        audiopus::Application::Voip,
+    )
+    .map_err(|e| anyhow!("Opus-Kodierer: {:?}", e))?;
+    let mut dekodierer: HashMap<u64, audiopus::coder::Decoder> = HashMap::new();
+    let mut puffer = vec![0u8; 4000];
+    let mut aus_puffer = vec![0u8; 2000];
+    // Welche m-line gehoert zu wem? Das sagt uns der Server ueber die
+    // Signalisierung ("track"), es wird von aussen hereingereicht.
+    let mut mid_zu_peer: HashMap<String, u64> = HashMap::new();
+    let mut naechster_rahmen = Instant::now();
+    let mut rtp_zeit: u64 = 0;
+    let mut verbunden_gemeldet = false;
+    let mut pt: Option<str0m::media::Pt> = None;
+
+    loop {
+        if ende.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // ---- SDP von der Signalisierung -----------------------------------
+        while let Ok(s) = sdp.try_recv() {
+            match s {
+                Sdp::Antwort(text) => {
+                    let antwort = SdpAnswer::from_sdp_string(&text)
+                        .map_err(|e| anyhow!("Antwort unlesbar: {:?}", e))?;
+                    if let Some(o) = offen.take() {
+                        rtc.sdp_api()
+                            .accept_answer(o, antwort)
+                            .map_err(|e| anyhow!("Antwort abgelehnt: {}", e))?;
+                    }
+                }
+                Sdp::Angebot(text) => {
+                    let angebot = SdpOffer::from_sdp_string(&text)
+                        .map_err(|e| anyhow!("Angebot unlesbar: {:?}", e))?;
+                    match rtc.sdp_api().accept_offer(angebot) {
+                        Ok(a) => {
+                            if let Ok(mut v) = ANTWORT_RAUS.lock() {
+                                v.push(a.to_sdp_string());
+                            }
+                        }
+                        Err(e) => {
+                            let _ = ev.send(TonEreignis::Fehler(format!("Angebot: {}", e)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Nutzlastkennung fuer Opus bestimmen ---------------------------
+        // Sobald die Antwort des Servers eingespielt ist, steht in der
+        // m-line, welche Kennung (PT) fuer Opus ausgehandelt wurde. Frueher
+        // haben wir auf ein Ereignis gewartet - das kommt aber nur fuer
+        // FREMDE Spuren, deshalb wurde nie etwas gesendet.
+        if pt.is_none() {
+            let pts: Vec<str0m::media::Pt> = rtc
+                .media(mid)
+                .map(|m| m.remote_pts().to_vec())
+                .unwrap_or_default();
+            if !pts.is_empty() {
+                let gefunden = rtc
+                    .codec_config()
+                    .iter()
+                    .find(|c| pts.contains(&c.pt()) && c.spec().codec == str0m::format::Codec::Opus)
+                    .map(|c| c.pt());
+                if let Some(p) = gefunden {
+                    pt = Some(p);
+                }
+            }
+        }
+
+        // ---- eigenen Ton verschicken ---------------------------------------
+        if rtc.is_alive() && Instant::now() >= naechster_rahmen {
+            naechster_rahmen += Duration::from_millis(20);
+            if let Ok(pcm) = raus.try_recv() {
+                if !stumm.load(Ordering::Relaxed) && pt.is_some() {
+                    let n = kodierer
+                        .encode(&pcm, &mut aus_puffer)
+                        .map_err(|e| anyhow!("Opus: {:?}", e))?;
+                    let paket = aus_puffer[..n].to_vec();
+                    let wanduhr = start + start.elapsed();
+                    let zeit = MediaTime::new(rtp_zeit, str0m::media::Frequency::FORTY_EIGHT_KHZ);
+                    if let Some(mut w) = rtc.writer(mid) {
+                        if let Some(p) = pt {
+                            if let Err(e) = w.write(p, wanduhr, zeit, paket.clone()) {
+                                let _ = ev.send(TonEreignis::Fehler(format!("senden: {}", e)));
+                            } else if let Ok(mut z) = zahlen.lock() {
+                                z.gesendet += 1;
+                                z.bytes_raus += paket.len() as u64;
+                            }
+                        }
+                    }
+                    rtp_zeit += RAHMEN as u64;
+                }
+            }
+        }
+
+        // ---- str0m antreiben ------------------------------------------------
+        let bis = match rtc.poll_output() {
+            Ok(Output::Timeout(t)) => t,
+            Ok(Output::Transmit(t)) => {
+                let _ = socket.send_to(&t.contents, t.destination);
+                continue;
+            }
+            Ok(Output::Event(e)) => {
+                match e {
+                    Event::Connected => {
+                        if let Ok(mut z) = zahlen.lock() {
+                            z.verbunden = true;
+                        }
+                        if !verbunden_gemeldet {
+                            verbunden_gemeldet = true;
+                            let _ = ev.send(TonEreignis::Verbunden);
+                        }
+                    }
+                    Event::MediaAdded(_) => {}
+                    Event::MediaData(d) => {
+                        let peer = spuren
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&d.mid.to_string()).copied())
+                            .or_else(|| mid_zu_peer.get(&d.mid.to_string()).copied())
+                            .unwrap_or(0);
+                        let dek = dekodierer.entry(peer).or_insert_with(|| {
+                            audiopus::coder::Decoder::new(
+                                audiopus::SampleRate::Hz48000,
+                                audiopus::Channels::Mono,
+                            )
+                            .expect("Opus-Dekodierer")
+                        });
+                        let mut pcm = vec![0i16; RAHMEN];
+                        {
+                            if let Ok(n) = dek.decode(Some(&d.data[..]), &mut pcm[..], false) {
+                                pcm.truncate(n);
+                                let pegel = pcm
+                                    .iter()
+                                    .map(|s| (*s as f32 / 32768.0).abs())
+                                    .fold(0.0f32, f32::max);
+                                if let Ok(mut z) = zahlen.lock() {
+                                    z.empfangen += 1;
+                                    z.bytes_rein += d.data.len() as u64;
+                                    z.pegel_rein = pegel;
+                                }
+                                let _ = ev.send(TonEreignis::Rahmen { quelle: peer, pcm });
+                            }
+                        }
+                    }
+                    Event::IceConnectionStateChange(s) => {
+                        if s == str0m::IceConnectionState::Disconnected {
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            Err(e) => return Err(anyhow!("str0m: {}", e)),
+        };
+
+        // ---- warten und empfangen -------------------------------------------
+        let jetzt = Instant::now();
+        let warte = bis.saturating_duration_since(jetzt).min(Duration::from_millis(10));
+        socket.set_read_timeout(Some(warte.max(Duration::from_millis(1))))?;
+        socket.set_nonblocking(false)?;
+        match socket.recv_from(&mut puffer) {
+            Ok((n, von)) => {
+                let ziel = socket.local_addr()?;
+                if let Ok(inhalt) = (&puffer[..n]).try_into() {
+                    let _ = rtc.handle_input(Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: von,
+                            destination: ziel,
+                            contents: inhalt,
+                        },
+                    ));
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(anyhow!("UDP: {}", e)),
+        }
+        let _ = rtc.handle_input(Input::Timeout(Instant::now()));
+        if !rtc.is_alive() {
+            return Ok(());
+        }
+        let _ = &mut mid_zu_peer;
+    }
+}
+
+/// Ein Testton (Sinus) - fuer Messungen ohne Mikrofon.
+pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
+    let mut v = Vec::with_capacity(RAHMEN);
+    let schritt = 2.0 * std::f32::consts::PI * hz / RATE as f32;
+    for _ in 0..RAHMEN {
+        v.push((phase.sin() * 12000.0) as i16);
+        *phase += schritt;
+        if *phase > 2.0 * std::f32::consts::PI {
+            *phase -= 2.0 * std::f32::consts::PI;
+        }
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn testton_hat_die_richtige_laenge_und_schwingt() {
+        let mut p = 0.0;
+        let a = testton(&mut p, 440.0);
+        assert_eq!(a.len(), RAHMEN);
+        let spitze = a.iter().map(|s| s.abs()).max().unwrap();
+        assert!(spitze > 8000, "Testton zu leise: {}", spitze);
+        // zweiter Rahmen setzt die Schwingung fort, faengt also nicht bei 0 an
+        let b = testton(&mut p, 440.0);
+        assert_eq!(b.len(), RAHMEN);
+    }
+
+    #[test]
+    fn opus_kann_hin_und_zurueck() {
+        let mut enc = audiopus::coder::Encoder::new(
+            audiopus::SampleRate::Hz48000,
+            audiopus::Channels::Mono,
+            audiopus::Application::Voip,
+        )
+        .unwrap();
+        let mut dec = audiopus::coder::Decoder::new(
+            audiopus::SampleRate::Hz48000,
+            audiopus::Channels::Mono,
+        )
+        .unwrap();
+        let mut p = 0.0;
+        let ton = testton(&mut p, 440.0);
+        let mut aus = vec![0u8; 2000];
+        let n = enc.encode(&ton, &mut aus).unwrap();
+        assert!(n > 10, "Opus-Paket zu klein: {}", n);
+        let mut zurueck = vec![0i16; RAHMEN];
+        let m = dec.decode(Some(&aus[..n]), &mut zurueck[..], false).unwrap();
+        assert_eq!(m, RAHMEN);
+        let spitze = zurueck.iter().map(|s| s.abs()).max().unwrap();
+        assert!(spitze > 4000, "Dekodierter Ton zu leise: {}", spitze);
+    }
+
+    #[test]
+    fn angebot_enthaelt_opus_und_eine_tonspur() {
+        let ton = starten().expect("Ton startet");
+        assert!(ton.angebot.contains("m=audio"), "kein Ton im Angebot");
+        assert!(
+            ton.angebot.to_lowercase().contains("opus"),
+            "kein Opus im Angebot"
+        );
+        assert!(!ton.mid.is_empty());
+        ton.beenden();
+    }
+}
