@@ -116,6 +116,10 @@ pub struct Dekodierer {
     pub bilder: std::collections::HashMap<u64, (u32, u32, Vec<u8>)>,
     pub gezaehlt: u64,
     pub letzter_fehler: String,
+    /// Zaehlt je Teilnehmer hoch, sobald ein NEUES Bild fertig ist. Die
+    /// Oberflaeche laedt die Grafikkarte nur dann neu - sonst wuerde sie
+    /// jedes Bild mehrfach hochschieben.
+    pub stand: std::collections::HashMap<u64, u64>,
 }
 
 impl Default for Dekodierer {
@@ -131,6 +135,7 @@ impl Dekodierer {
             bilder: std::collections::HashMap::new(),
             gezaehlt: 0,
             letzter_fehler: String::new(),
+            stand: std::collections::HashMap::new(),
         }
     }
 
@@ -152,6 +157,7 @@ impl Dekodierer {
         match dec.decode(daten, &mut rgba) {
             Ok(Some((w, h))) => {
                 self.bilder.insert(peer, (w, h, rgba));
+                *self.stand.entry(peer).or_insert(0) += 1;
                 self.gezaehlt += 1;
                 true
             }
@@ -166,6 +172,7 @@ impl Dekodierer {
     pub fn vergessen(&mut self, peer: u64) {
         self.leute.remove(&peer);
         self.bilder.remove(&peer);
+        self.stand.remove(&peer);
     }
 
     /// Wie hell ist das letzte Bild eines Teilnehmers (0..1)? Damit laesst

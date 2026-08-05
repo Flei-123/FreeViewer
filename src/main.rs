@@ -1476,6 +1476,8 @@ struct App {
     meet_win: MeetWin,
     /// Natives Meeting (Stufe 1: Ton, Chat, Warteraum) - laeuft ohne Browser.
     nativ_meet: Option<meetui::NativMeet>,
+    /// Bildkacheln des nativen Meetings: Teilnehmer -> (Stand, Textur).
+    nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
     /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
     full: bool,
@@ -1597,6 +1599,7 @@ impl App {
             meet_offer_control: true,
             meet_win: MeetWin::default(),
             nativ_meet: None,
+            nativ_bilder: std::collections::HashMap::new(),
             full: false,
             bar_x: 0.5,
             bar_w: 700.0,
@@ -2996,6 +2999,55 @@ impl App {
                                         verlassen = true;
                                     }
                                 });
+                                // Bildkacheln der anderen (Stufe 2)
+                                let neue: Vec<(u64, u64, u32, u32)> = n
+                                    .bilder
+                                    .bilder
+                                    .iter()
+                                    .map(|(peer, (w, h, _))| {
+                                        (*peer, *n.bilder.stand.get(peer).unwrap_or(&0), *w, *h)
+                                    })
+                                    .collect();
+                                for (peer, stand, w, h) in neue {
+                                    let frisch = self
+                                        .nativ_bilder
+                                        .get(&peer)
+                                        .map(|(alt, _)| *alt != stand)
+                                        .unwrap_or(true);
+                                    if frisch {
+                                        if let Some((_, _, px)) = n.bilder.bilder.get(&peer) {
+                                            let bild = egui::ColorImage::from_rgba_unmultiplied(
+                                                [w as usize, h as usize],
+                                                px,
+                                            );
+                                            let tex = ui.ctx().load_texture(
+                                                format!("meetcam{}", peer),
+                                                bild,
+                                                egui::TextureOptions::LINEAR,
+                                            );
+                                            self.nativ_bilder.insert(peer, (stand, tex));
+                                        }
+                                    }
+                                }
+                                let leute_da: std::collections::HashSet<u64> =
+                                    n.bilder.bilder.keys().copied().collect();
+                                self.nativ_bilder.retain(|k, _| leute_da.contains(k));
+                                if !self.nativ_bilder.is_empty() {
+                                    ui.add_space(8.0);
+                                    for (peer, (_, tex)) in self.nativ_bilder.iter() {
+                                        ui.label(
+                                            egui::RichText::new(n.name_von(*peer))
+                                                .size(10.5)
+                                                .color(p.muted),
+                                        );
+                                        ui.add(
+                                            egui::Image::new(&*tex)
+                                                .max_width(260.0)
+                                                .corner_radius(6.0),
+                                        );
+                                    }
+                                }
+
                                 // Teilnehmer
                                 ui.add_space(8.0);
                                 ui.label(
