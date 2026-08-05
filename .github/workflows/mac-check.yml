@@ -1,0 +1,33 @@
+name: macOS Schnellpruefung
+
+# Kleine Runde nur fuer die Mac-Arbeit (Stufe 5): baut im Debug-Modus und
+# laesst die H.264-Tests laufen. Absicht: schnelle Schleifen waehrend der
+# Entwicklung, ohne den vollen Release-Bau aus mac.yml abzuwarten.
+on:
+  push:
+    branches: [ mac-vt ]
+  workflow_dispatch:
+
+jobs:
+  pruefen:
+    name: bauen + H.264-Tests auf macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Zwischenspeicher
+        uses: Swatinem/rust-cache@v2
+
+      - name: Werkzeuge fuer Opus (autotools)
+        run: brew install autoconf automake libtool
+
+      - name: H.264-Tests
+        run: cargo test h264 -- --nocapture
+
+      - name: Was kann diese Maschine?
+        if: always()
+        run: |
+          system_profiler SPHardwareDataType | head -12 || true

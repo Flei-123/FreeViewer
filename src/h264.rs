@@ -829,7 +829,16 @@ mod win {
 #[cfg(windows)]
 pub use win::{available, Decoder, Encoder};
 
-#[cfg(not(windows))]
+// Auf dem Mac uebernimmt VideoToolbox (eigene Datei, sonst wird h264.rs
+// unuebersichtlich); alles andere bekommt weiter den ehrlichen Platzhalter.
+#[cfg(target_os = "macos")]
+#[path = "h264mac.rs"]
+mod mac;
+
+#[cfg(target_os = "macos")]
+pub use mac::{available, Decoder, Encoder};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod stub {
     use super::{Chunk, Result};
     use anyhow::anyhow;
@@ -885,7 +894,7 @@ mod stub {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use stub::{available, Decoder, Encoder};
 
 #[cfg(test)]
@@ -930,6 +939,55 @@ mod tests {
         assert!(nv12_to_rgba(&nv12, w, h, w as usize, h, &mut rgba));
         let (mean, max) = rgb_vs_rgba_error(&rgb, &rgba, w, h);
         assert!(mean < 1.5 && max <= 2, "mean {} max {}", mean, max);
+    }
+
+    /// Der ganze Weg einmal durch die Maschine: Bild -> NV12 -> H.264 ->
+    /// zurueck. Laeuft ueberall, wo es einen Kodierer gibt (Windows, Mac);
+    /// auf einem nackten Linux-Server gibt es keinen, dann wird der Test
+    /// ehrlich uebersprungen statt falsch gruen zu melden.
+    #[test]
+    fn h264_hin_und_zurueck() {
+        if !available() {
+            println!("kein H.264-Kodierer auf dieser Maschine - uebersprungen");
+            return;
+        }
+        let (w, h) = (320u32, 240u32);
+        let rgb = testcard(w, h);
+        let mut nv12 = Vec::new();
+        rgb_to_nv12(&rgb, w, h, &mut nv12);
+        let mut enc = Encoder::new(w, h, 30, 1_500_000).expect("Kodierer");
+        let mut dec = Decoder::new_auto(w, h).expect("Dekodierer");
+        let mut rgba = Vec::new();
+        let mut bilder = 0;
+        let mut bytes = 0usize;
+        let mut schluessel = 0;
+        for _ in 0..10 {
+            for c in enc.encode(&nv12).expect("kodieren") {
+                bytes += c.data.len();
+                if c.key {
+                    schluessel += 1;
+                }
+                // Startmarke muss vorne stehen, sonst versteht uns niemand.
+                assert!(
+                    c.data.starts_with(&[0, 0, 0, 1]) || c.data.starts_with(&[0, 0, 1]),
+                    "kein Annex-B"
+                );
+                if let Ok(Some((dw, dh))) = dec.decode(&c.data, &mut rgba) {
+                    assert_eq!((dw, dh), (w, h), "falsche Bildgroesse");
+                    bilder += 1;
+                }
+            }
+        }
+        println!(
+            "kodiert {} Bytes, {} Schluesselbilder, {} Bilder dekodiert",
+            bytes, schluessel, bilder
+        );
+        assert!(bytes > 0, "nichts kodiert");
+        assert!(schluessel > 0, "kein Schluesselbild");
+        assert!(bilder > 0, "nichts dekodiert");
+        // Und das Bild muss auch WIRKLICH dem Original aehneln.
+        let (mean, _max) = rgb_vs_rgba_error(&rgb, &rgba, w, h);
+        assert!(mean < 25.0, "Bild weicht zu stark ab: {}", mean);
     }
 
     #[test]
