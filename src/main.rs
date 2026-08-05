@@ -30,6 +30,7 @@ mod meet;
 mod meetsig;
 mod meetrtc;
 mod meetaudio;
+mod meetui;
 mod input;
 mod net;
 mod p2p;
@@ -1278,6 +1279,8 @@ struct App {
     meet_offer_control: bool,
     /// Das eigene Meet-Fenster (Zoom-Ablauf in einem separaten Viewport).
     meet_win: MeetWin,
+    /// Natives Meeting (Stufe 1: Ton, Chat, Warteraum) - laeuft ohne Browser.
+    nativ_meet: Option<meetui::NativMeet>,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
     /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
     full: bool,
@@ -1398,6 +1401,7 @@ impl App {
             meet_loaded: false,
             meet_offer_control: true,
             meet_win: MeetWin::default(),
+            nativ_meet: None,
             full: false,
             bar_x: 0.5,
             bar_w: 700.0,
@@ -2686,6 +2690,211 @@ impl App {
                                     .size(11.5)
                                     .color(p.green),
                             );
+                        }
+
+                        // ---- Nativer Weg (Stufe 1: Ton, Chat, Warteraum) ----
+                        // Kein Browser im Hintergrund. Video kommt in Stufe 2,
+                        // bis dahin steht der Browser-Knopf daneben.
+                        ui.add_space(12.0);
+                        if self.nativ_meet.is_none() {
+                            if ghost_button(ui, "Nativ beitreten (Ton, ohne Browser)").clicked() {
+                                let me = self.shared.my_id.lock().unwrap().clone();
+                                let name = presence::device_name();
+                                let mic = if self.meet_win.mic_sel == 0 {
+                                    None
+                                } else {
+                                    self.meet_win
+                                        .mics
+                                        .get(self.meet_win.mic_sel - 1)
+                                        .cloned()
+                                };
+                                match meetui::NativMeet::beitreten(
+                                    &meet::base(),
+                                    &m.id,
+                                    &m.passwort,
+                                    &name,
+                                    &me,
+                                    mic,
+                                    None,
+                                ) {
+                                    Ok(n) => {
+                                        if self.meet_win.stumm {
+                                            let mut n = n;
+                                            n.stumm_schalten(true);
+                                            self.nativ_meet = Some(n);
+                                        } else {
+                                            self.nativ_meet = Some(n);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.meet_win.toast =
+                                            Some((format!("{}", e), std::time::Instant::now()));
+                                    }
+                                }
+                            }
+                        } else {
+                            let mut verlassen = false;
+                            let mut stumm_um = None;
+                            let mut hand_um = None;
+                            let mut senden = false;
+                            if let Some(n) = self.nativ_meet.as_mut() {
+                                n.pumpe();
+                                let z = n.zustand();
+                                let zahlen = n.zahlen();
+                                ui.horizontal(|ui| {
+                                    let farbe = if zahlen.verbunden { p.green } else { p.muted };
+                                    ui.label(
+                                        egui::RichText::new(if zahlen.verbunden {
+                                            "Nativ verbunden"
+                                        } else {
+                                            "Nativ: verbinde ..."
+                                        })
+                                        .size(11.5)
+                                        .color(farbe),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "gesendet {} / empfangen {}",
+                                            zahlen.gesendet, zahlen.empfangen
+                                        ))
+                                        .size(10.5)
+                                        .color(p.muted),
+                                    );
+                                });
+                                // Pegelbalken des eigenen Mikrofons
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width().min(240.0), 6.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 3.0, p.field);
+                                let breite = rect.width() * n.pegel.clamp(0.0, 1.0);
+                                if breite > 1.0 {
+                                    let voll = egui::Rect::from_min_size(
+                                        rect.min,
+                                        egui::vec2(breite, rect.height()),
+                                    );
+                                    ui.painter().rect_filled(voll, 3.0, p.green);
+                                }
+                                if !n.meldung.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(n.meldung.clone())
+                                            .size(10.5)
+                                            .color(p.muted),
+                                    );
+                                }
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if ghost_button(
+                                        ui,
+                                        if n.stumm { "Stumm aus" } else { "Stumm" },
+                                    )
+                                    .clicked()
+                                    {
+                                        stumm_um = Some(!n.stumm);
+                                    }
+                                    if ghost_button(ui, if n.hand { "Hand runter" } else { "Hand" })
+                                        .clicked()
+                                    {
+                                        hand_um = Some(!n.hand);
+                                    }
+                                    if ghost_button(ui, "Verlassen").clicked() {
+                                        verlassen = true;
+                                    }
+                                });
+                                // Teilnehmer
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new(format!("Im Raum: {}", z.leute.len() + 1))
+                                        .size(11.0)
+                                        .color(p.muted),
+                                );
+                                for t in &z.leute {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{}{}{}",
+                                            t.name,
+                                            if t.ton_aus { "  (stumm)" } else { "" },
+                                            if t.hand { "  (meldet sich)" } else { "" }
+                                        ))
+                                        .size(11.5),
+                                    );
+                                }
+                                // Warteraum (nur der Gastgeber sieht das)
+                                if !z.wartende.is_empty() {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        egui::RichText::new("Wartet vor der Tuer")
+                                            .size(11.0)
+                                            .color(p.muted),
+                                    );
+                                    let wartende = z.wartende.clone();
+                                    for (id, name) in wartende {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(name).size(11.5));
+                                            if ghost_button(ui, "Einlassen").clicked() {
+                                                n.einlassen(id);
+                                            }
+                                            if ghost_button(ui, "Ablehnen").clicked() {
+                                                n.abweisen(id);
+                                            }
+                                        });
+                                    }
+                                }
+                                // Chat
+                                ui.add_space(8.0);
+                                egui::ScrollArea::vertical()
+                                    .max_height(120.0)
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        for (von, text) in n.chat.iter().rev().take(40).rev() {
+                                            let wer = if *von == 0 {
+                                                String::new()
+                                            } else {
+                                                format!("{}: ", n.name_von(*von))
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!("{}{}", wer, text))
+                                                    .size(11.0)
+                                                    .color(if *von == 0 { p.muted } else { p.text }),
+                                            );
+                                        }
+                                    });
+                                ui.horizontal(|ui| {
+                                    let feld = ui.add(
+                                        egui::TextEdit::singleline(&mut n.eingabe)
+                                            .desired_width(180.0)
+                                            .hint_text("Nachricht"),
+                                    );
+                                    if feld.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        senden = true;
+                                    }
+                                    if ghost_button(ui, "Senden").clicked() {
+                                        senden = true;
+                                    }
+                                });
+                            }
+                            if let Some(v) = stumm_um {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    n.stumm_schalten(v);
+                                }
+                            }
+                            if let Some(v) = hand_um {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    n.hand_heben(v);
+                                }
+                            }
+                            if senden {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    n.senden();
+                                }
+                            }
+                            if verlassen {
+                                if let Some(n) = self.nativ_meet.take() {
+                                    n.verlassen();
+                                }
+                            }
                         }
                     });
 
