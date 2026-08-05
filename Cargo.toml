@@ -88,6 +88,10 @@ winreg = "0.52"
 # FreeViewer-Build bleibt ohne dieses Merkmal komplett frei.
 license = ["dep:ed25519-dalek"]
 
+[profile.dev]
+# Auf dem Server ist die Platte klein: Debug-Symbole fressen 5 GB.
+debug = 0
+
 [profile.release]
 opt-level = 3
 lto = true
