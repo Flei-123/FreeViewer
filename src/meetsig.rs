@@ -335,7 +335,7 @@ async fn lauf(
     ev: &Sender<Ereignis>,
     zustand: &Arc<Mutex<Zustand>>,
 ) -> Result<()> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+    let (mut ws, _) = verbinden(url).await?;
     if let Ok(mut z) = zustand.lock() {
         z.verbunden = true;
     }
@@ -597,6 +597,77 @@ fn verarbeiten(
         _ => {}
     }
     false
+}
+
+
+/// Verbindung aufbauen - und zwar zu JEDER Adresse, die der Name liefert.
+///
+/// Warum nicht einfach connect_async? Im Heimnetz zeigt meet.fleitec.com auf
+/// ZWEI Adressen: die oeffentliche und eine interne (Split-DNS). Die interne
+/// beantwortet aber keinen Port 443. Wer nur die erste Adresse probiert,
+/// haengt 20 Sekunden im Zeitueberschreitung-Fehler 10060 fest - genau das
+/// ist auf FLEI-ONE passiert. Also: alle Adressen durchprobieren, oeffentliche
+/// zuerst, je 4 Sekunden Geduld.
+async fn verbinden(
+    url: &str,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+)> {
+    let ohne = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .ok_or_else(|| anyhow!("Adresse ohne Schema: {}", url))?;
+    let sicher = url.starts_with("wss://");
+    let host_teil = ohne.split('/').next().unwrap_or(ohne);
+    let (host, port) = match host_teil.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => {
+            (h.to_string(), p.parse::<u16>().unwrap_or(443))
+        }
+        _ => (host_teil.to_string(), if sicher { 443 } else { 80 }),
+    };
+
+    let mut adressen: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+    if adressen.is_empty() {
+        return Err(anyhow!("Name {} liefert keine Adresse", host));
+    }
+    // Oeffentliche Adressen zuerst - interne sind im Heimnetz oft Sackgassen.
+    adressen.sort_by_key(|a| match a.ip() {
+        std::net::IpAddr::V4(v) => u8::from(v.is_private() || v.is_loopback()),
+        std::net::IpAddr::V6(_) => 1,
+    });
+
+    let mut letzter = String::new();
+    for a in adressen {
+        let versuch = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            tokio::net::TcpStream::connect(a),
+        )
+        .await;
+        let strom = match versuch {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                letzter = format!("{} : {}", a, e);
+                continue;
+            }
+            Err(_) => {
+                letzter = format!("{} : keine Antwort", a);
+                continue;
+            }
+        };
+        let _ = strom.set_nodelay(true);
+        match tokio_tungstenite::client_async_tls(url, strom).await {
+            Ok(p) => return Ok(p),
+            Err(e) => {
+                letzter = format!("{} : {}", a, e);
+                continue;
+            }
+        }
+    }
+    Err(anyhow!("keine Verbindung zu {} ({})", host, letzter))
 }
 
 #[cfg(test)]
