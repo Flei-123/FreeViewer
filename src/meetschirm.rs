@@ -75,7 +75,9 @@ pub fn bild_nach_nv12(
     out: &mut Vec<u8>,
 ) -> bool {
     let (sbu, shu, zbu, zhu) = (sb as usize, sh as usize, zb as usize, zh as usize);
-    if sbu < 1 || shu < 1 || zbu < 2 || zhu < 2 || px.len() < sbu * shu * 4 {
+    // Unter 2x2 ist nichts zu holen - lieber ehrlich ablehnen, als aus
+    // einem einzigen Punkt ein Bild zu erfinden.
+    if sbu < 2 || shu < 2 || zbu < 2 || zhu < 2 || px.len() < sbu * shu * 4 {
         return false;
     }
     // Zwischenschritt RGB, weil rgb_to_nv12 genau das erwartet.

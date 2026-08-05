@@ -379,6 +379,13 @@ fn main() -> eframe::Result<()> {
                         println!("EREIGNIS Antwort eingespielt, Bildschirm angemeldet");
                     }
                     meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    // Fehler NICHT verschlucken - sonst sieht man am Ende nur
+                    // "nichts gesendet" und raet, woran es lag.
+                    meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
+                    meetsig::Ereignis::Fehler { code, text } => {
+                        println!("EREIGNIS Fehler {}: {}", code, text)
+                    }
+                    meetsig::Ereignis::Abgewiesen(m) => println!("EREIGNIS Abgewiesen: {}", m),
                     _ => {}
                 }
             }
@@ -386,8 +393,10 @@ fn main() -> eframe::Result<()> {
                 sig.roh(serde_json::json!({"t":"answer","sdp":a}));
             }
             for te in ton.abholen() {
-                if let meetrtc::TonEreignis::Verbunden = te {
-                    println!("EREIGNIS RTC verbunden");
+                match te {
+                    meetrtc::TonEreignis::Verbunden => println!("EREIGNIS RTC verbunden"),
+                    meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS RTC-Fehler: {}", f),
+                    _ => {}
                 }
             }
             if std::time::Instant::now() >= naechstes {

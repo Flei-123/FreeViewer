@@ -641,30 +641,40 @@ async fn verbinden(
     });
 
     let mut letzter = String::new();
-    for a in adressen {
-        let versuch = tokio::time::timeout(
-            std::time::Duration::from_secs(4),
-            tokio::net::TcpStream::connect(a),
-        )
-        .await;
-        let strom = match versuch {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                letzter = format!("{} : {}", a, e);
-                continue;
+    // Zwei Anlaeufe je Adresse mit grosszuegiger Frist: gemessen an Justins
+    // Rechner braucht der erste Verbindungsaufbau ueber die eigene
+    // oeffentliche Adresse (NAT-Rueckschleife durch die Fritzbox) manchmal
+    // laenger als vier Sekunden. Mit einem einzigen kurzen Versuch stand
+    // dort sporadisch "keine Antwort", obwohl das Netz in Ordnung war.
+    for runde in 0..2u8 {
+        for a in adressen.iter().copied() {
+            let versuch = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::net::TcpStream::connect(a),
+            )
+            .await;
+            let strom = match versuch {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    letzter = format!("{} : {}", a, e);
+                    continue;
+                }
+                Err(_) => {
+                    letzter = format!("{} : keine Antwort", a);
+                    continue;
+                }
+            };
+            let _ = strom.set_nodelay(true);
+            match tokio_tungstenite::client_async_tls(url, strom).await {
+                Ok(p) => return Ok(p),
+                Err(e) => {
+                    letzter = format!("{} : {}", a, e);
+                    continue;
+                }
             }
-            Err(_) => {
-                letzter = format!("{} : keine Antwort", a);
-                continue;
-            }
-        };
-        let _ = strom.set_nodelay(true);
-        match tokio_tungstenite::client_async_tls(url, strom).await {
-            Ok(p) => return Ok(p),
-            Err(e) => {
-                letzter = format!("{} : {}", a, e);
-                continue;
-            }
+        }
+        if runde == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
     }
     Err(anyhow!("keine Verbindung zu {} ({})", host, letzter))
