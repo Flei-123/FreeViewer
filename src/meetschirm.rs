@@ -410,10 +410,18 @@ mod tests {
         let mut enc = crate::h264::Encoder::new(zb, zh, 10, 3_000_000).expect("Kodierer");
         let mut bytes = 0usize;
         let mut schluessel = 0;
-        for c in enc.encode(&b.nv12).expect("kodieren") {
-            bytes += c.data.len();
-            if c.key {
-                schluessel += 1;
+        // Media Foundation gibt den ersten Rahmen NICHT sofort heraus (die
+        // Kette laeuft erst an) - VideoToolbox schon. Deshalb ein paar Bilder
+        // nachschieben, statt aus einem einzigen Bild eine Aussage zu machen.
+        for _ in 0..15 {
+            for c in enc.encode(&b.nv12).expect("kodieren") {
+                bytes += c.data.len();
+                if c.key {
+                    schluessel += 1;
+                }
+            }
+            if bytes > 0 && schluessel > 0 {
+                break;
             }
         }
         println!("H.264: {} Bytes, {} Schluesselbilder", bytes, schluessel);
