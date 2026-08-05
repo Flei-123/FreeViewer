@@ -44,6 +44,9 @@ pub enum TonEreignis {
     /// nicht dieses Modul.
     Bild {
         quelle: u64,
+        /// true = geteilter Bildschirm, false = Kamera. Ohne das laegen
+        /// Kamera und Bildschirm desselben Teilnehmers im selben Topf.
+        bildschirm: bool,
         daten: Vec<u8>,
         schluesselbild: bool,
         /// Welches Bildformat der Server schickt ("H264", "VP8", ...).
@@ -90,8 +93,9 @@ pub struct Ton {
     pub vid: String,
     /// m-line unserer eigenen Bildschirmfreigabe.
     pub vid2: String,
-    /// Welche m-line gehoert zu welchem Teilnehmer (aus den "track"-Meldungen).
-    spuren: Arc<Mutex<HashMap<String, u64>>>,
+    /// Welche m-line gehoert zu wem - und ob sie ein Bildschirm ist
+    /// (aus den "track"-Meldungen der Signalisierung).
+    spuren: Arc<Mutex<HashMap<String, (u64, bool)>>>,
     antwort: std::sync::mpsc::Sender<Sdp>,
 }
 
@@ -142,10 +146,14 @@ impl Ton {
     pub fn offene_antwort(&self) -> Option<String> {
         ANTWORT_RAUS.lock().ok().and_then(|mut a| a.pop())
     }
-    /// Zuordnung aus der Signalisierung nachtragen.
+    /// Zuordnung aus der Signalisierung nachtragen (Kamera).
     pub fn spur(&self, mid: &str, peer: u64) {
+        self.spur_art(mid, peer, false);
+    }
+    /// Zuordnung samt Streamart nachtragen.
+    pub fn spur_art(&self, mid: &str, peer: u64, bildschirm: bool) {
         if let Ok(mut m) = self.spuren.lock() {
-            m.insert(mid.to_string(), peer);
+            m.insert(mid.to_string(), (peer, bildschirm));
         }
     }
     pub fn beenden(&self) {
@@ -208,7 +216,7 @@ pub fn starten() -> Result<Ton> {
     let (ev_tx, ev_rx) = std::sync::mpsc::channel::<TonEreignis>();
     let (sdp_tx, sdp_rx) = std::sync::mpsc::channel::<Sdp>();
     let zahlen = Arc::new(Mutex::new(Zahlen::default()));
-    let spuren: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let spuren: Arc<Mutex<HashMap<String, (u64, bool)>>> = Arc::new(Mutex::new(HashMap::new()));
     let stumm = Arc::new(AtomicBool::new(false));
     let ende = Arc::new(AtomicBool::new(false));
 
@@ -281,7 +289,7 @@ fn lauf(
     zahlen: &Arc<Mutex<Zahlen>>,
     stumm: &Arc<AtomicBool>,
     ende: &Arc<AtomicBool>,
-    spuren: &Arc<Mutex<HashMap<String, u64>>>,
+    spuren: &Arc<Mutex<HashMap<String, (u64, bool)>>>,
 ) -> Result<()> {
     // Auf die Antwort warten (kommt ueber die Signalisierung herein).
     let mut offen = Some(offen);
@@ -476,11 +484,11 @@ fn lauf(
                     }
                     Event::MediaAdded(_) => {}
                     Event::MediaData(d) if d.pt.to_string() != "0" && ist_video(&rtc, d.mid) => {
-                        let peer = spuren
+                        let (peer, bildschirm) = spuren
                             .lock()
                             .ok()
                             .and_then(|m| m.get(&d.mid.to_string()).copied())
-                            .unwrap_or(0);
+                            .unwrap_or((0, false));
                         if let Ok(mut z) = zahlen.lock() {
                             z.bild_empfangen += 1;
                             z.bytes_rein += d.data.len() as u64;
@@ -498,6 +506,7 @@ fn lauf(
                             .unwrap_or_else(|| "?".into());
                         let _ = ev.send(TonEreignis::Bild {
                             quelle: peer,
+                            bildschirm,
                             daten: d.data.to_vec(),
                             schluesselbild: schluessel,
                             codec,
@@ -507,7 +516,7 @@ fn lauf(
                         let peer = spuren
                             .lock()
                             .ok()
-                            .and_then(|m| m.get(&d.mid.to_string()).copied())
+                            .and_then(|m| m.get(&d.mid.to_string()).map(|(p, _)| *p))
                             .or_else(|| mid_zu_peer.get(&d.mid.to_string()).copied())
                             .unwrap_or(0);
                         let dek = dekodierer.entry(peer).or_insert_with(|| {

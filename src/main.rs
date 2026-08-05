@@ -860,12 +860,14 @@ fn main() -> eframe::Result<()> {
                     meetrtc::TonEreignis::Rahmen { .. } => {}
                     meetrtc::TonEreignis::Bild {
                         quelle,
+                        bildschirm,
                         daten,
                         schluesselbild,
                         codec,
                     } => {
                         println!(
-                            "EREIGNIS Bild von {} ({} Bytes, {}{})",
+                            "EREIGNIS {} von {} ({} Bytes, {}{})",
+                            if bildschirm { "Bildschirm" } else { "Bild" },
                             quelle,
                             daten.len(),
                             codec,
@@ -1784,6 +1786,9 @@ struct App {
     nativ_meet: Option<meetui::NativMeet>,
     /// Bildkacheln des nativen Meetings: Teilnehmer -> (Stand, Textur).
     nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
+    /// Geteilte Bildschirme: Teilnehmer -> (Stand, Textur). Eigener Speicher,
+    /// weil ein Teilnehmer Kamera UND Bildschirm gleichzeitig schickt.
+    nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
@@ -1908,6 +1913,7 @@ impl App {
             meet_win: MeetWin::default(),
             nativ_meet: None,
             nativ_bilder: std::collections::HashMap::new(),
+            nativ_schirme: std::collections::HashMap::new(),
             nativ_eigen: None,
             full: false,
             bar_x: 0.5,
@@ -3427,19 +3433,100 @@ impl App {
                                 let leute_da: std::collections::HashSet<u64> =
                                     n.bilder.bilder.keys().copied().collect();
                                 self.nativ_bilder.retain(|k, _| leute_da.contains(k));
-                                if !self.nativ_bilder.is_empty() {
+
+                                // Dasselbe fuer geteilte Bildschirme.
+                                let neue_s: Vec<(u64, u64, u32, u32)> = n
+                                    .schirme
+                                    .bilder
+                                    .iter()
+                                    .map(|(peer, (w, h, _))| {
+                                        (*peer, *n.schirme.stand.get(peer).unwrap_or(&0), *w, *h)
+                                    })
+                                    .collect();
+                                for (peer, stand, w, h) in neue_s {
+                                    let frisch = self
+                                        .nativ_schirme
+                                        .get(&peer)
+                                        .map(|(alt, _)| *alt != stand)
+                                        .unwrap_or(true);
+                                    if frisch {
+                                        if let Some((_, _, px)) = n.schirme.bilder.get(&peer) {
+                                            let bild = egui::ColorImage::from_rgba_unmultiplied(
+                                                [w as usize, h as usize],
+                                                px,
+                                            );
+                                            let tex = ui.ctx().load_texture(
+                                                format!("meetschirm{}", peer),
+                                                bild,
+                                                egui::TextureOptions::LINEAR,
+                                            );
+                                            self.nativ_schirme.insert(peer, (stand, tex));
+                                        }
+                                    }
+                                }
+                                let schirme_da: std::collections::HashSet<u64> =
+                                    n.schirme.bilder.keys().copied().collect();
+                                self.nativ_schirme.retain(|k, _| schirme_da.contains(k));
+
+                                // Teilt jemand seinen Bildschirm, gehoert IHM
+                                // die Buehne: gross und vollstaendig (kein
+                                // Zuschnitt - abgeschnittener Text ist
+                                // wertlos), die Gesichter klein darunter.
+                                // Genau das hatte sich Justin gewuenscht.
+                                if !self.nativ_schirme.is_empty() {
                                     ui.add_space(8.0);
-                                    for (peer, (_, tex)) in self.nativ_bilder.iter() {
+                                    let breit = ui.available_width().max(120.0);
+                                    for (peer, (_, tex)) in self.nativ_schirme.iter() {
                                         ui.label(
-                                            egui::RichText::new(n.name_von(*peer))
-                                                .size(10.5)
-                                                .color(p.muted),
+                                            egui::RichText::new(format!(
+                                                "{}  ·  Bildschirm",
+                                                n.name_von(*peer)
+                                            ))
+                                            .size(10.5)
+                                            .color(p.green),
                                         );
                                         ui.add(
                                             egui::Image::new(&*tex)
-                                                .max_width(260.0)
+                                                .fit_to_exact_size(egui::vec2(
+                                                    breit,
+                                                    breit * tex.aspect_ratio().recip(),
+                                                ))
                                                 .corner_radius(6.0),
                                         );
+                                    }
+                                }
+                                if !self.nativ_bilder.is_empty() {
+                                    ui.add_space(8.0);
+                                    // Mit Bildschirm auf der Buehne werden die
+                                    // Kameras zu Miniaturen NEBENEINANDER.
+                                    let klein = !self.nativ_schirme.is_empty();
+                                    let breite = if klein { 130.0 } else { 260.0 };
+                                    let zeichne = |ui: &mut egui::Ui,
+                                                   peer: &u64,
+                                                   tex: &egui::TextureHandle| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(n.name_von(*peer))
+                                                    .size(10.5)
+                                                    .color(p.muted),
+                                            );
+                                            ui.add(
+                                                egui::Image::new(tex)
+                                                    .max_width(breite)
+                                                    .corner_radius(6.0),
+                                            );
+                                        });
+                                    };
+                                    if klein {
+                                        ui.horizontal_wrapped(|ui| {
+                                            for (peer, (_, tex)) in self.nativ_bilder.iter() {
+                                                zeichne(ui, peer, tex);
+                                            }
+                                        });
+                                    } else {
+                                        for (peer, (_, tex)) in self.nativ_bilder.iter() {
+                                            zeichne(ui, peer, tex);
+                                        }
                                     }
                                 }
 

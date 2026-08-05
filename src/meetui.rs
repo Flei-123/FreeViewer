@@ -30,8 +30,11 @@ pub struct NativMeet {
     pub bild_zaehler: u64,
     /// Format der ankommenden Bilder ("H264"/"Vp8") - fuer die Anzeige.
     pub bild_codec: String,
-    /// Dekodierte Bilder der anderen (je Teilnehmer das letzte).
+    /// Dekodierte KAMERA-Bilder der anderen (je Teilnehmer das letzte).
     pub bilder: crate::meetvideo::Dekodierer,
+    /// Dekodierte BILDSCHIRM-Bilder der anderen. Eigener Topf, sonst wuerde
+    /// die Freigabe das Gesicht desselben Teilnehmers ueberschreiben.
+    pub schirme: crate::meetvideo::Dekodierer,
     /// Eigene Kamera (Stufe 2d) - laeuft nur, wenn sie eingeschaltet ist.
     kamera: Option<crate::meetcam::Kamera>,
     koder: Option<crate::meetvideo::Kodierer>,
@@ -95,6 +98,7 @@ impl NativMeet {
             bild_zaehler: 0,
             bild_codec: String::new(),
             bilder: crate::meetvideo::Dekodierer::neu(),
+            schirme: crate::meetvideo::Dekodierer::neu(),
             kamera: None,
             koder: None,
             kamera_an: false,
@@ -159,13 +163,19 @@ impl NativMeet {
                         self.ton.server_angebot(&sdp);
                     }
                 }
-                meetsig::Ereignis::Spur { mid, peer, .. } => self.ton.spur(&mid, peer),
+                meetsig::Ereignis::Spur {
+                    mid,
+                    peer,
+                    bildschirm,
+                    ..
+                } => self.ton.spur_art(&mid, peer, bildschirm),
                 meetsig::Ereignis::Chat { von, text, .. } => self.chat.push((von, text)),
                 meetsig::Ereignis::Dazu(t) => {
                     self.chat.push((0, format!("{} ist dazugekommen", t.name)))
                 }
                 meetsig::Ereignis::Weg(id) => {
                     self.bilder.vergessen(id);
+                    self.schirme.vergessen(id);
                     let name = self
                         .sig
                         .zustand()
@@ -232,6 +242,7 @@ impl NativMeet {
                 }
                 meetrtc::TonEreignis::Bild {
                     quelle,
+                    bildschirm,
                     daten,
                     schluesselbild,
                     codec,
@@ -242,7 +253,11 @@ impl NativMeet {
                     // wirklich Bild ankommt.
                     self.bild_zaehler += 1;
                     let _ = schluesselbild;
-                    self.bilder.rahmen(quelle, &daten);
+                    if bildschirm {
+                        self.schirme.rahmen(quelle, &daten);
+                    } else {
+                        self.bilder.rahmen(quelle, &daten);
+                    }
                 }
                 meetrtc::TonEreignis::Fehler(f) => self.meldung = f,
                 meetrtc::TonEreignis::Ende(f) => {
@@ -296,7 +311,7 @@ impl NativMeet {
     }
 
     /// Wie viele Bildschirme gibt es hier?
-    pub fn schirme() -> Vec<crate::meetschirm::Schirm> {
+    pub fn monitore() -> Vec<crate::meetschirm::Schirm> {
         crate::meetschirm::liste()
     }
 
