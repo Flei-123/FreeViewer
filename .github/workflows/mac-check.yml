@@ -27,6 +27,12 @@ jobs:
       - name: H.264-Tests
         run: cargo test h264 -- --nocapture
 
+      - name: Bildschirm-Tests
+        run: cargo test meetschirm -- --nocapture
+
+      - name: Kamera-Tests
+        run: cargo test meetcam -- --nocapture
+
       - name: Was kann diese Maschine?
         if: always()
         run: |

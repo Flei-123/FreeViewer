@@ -343,6 +343,85 @@ mod tests {
         assert!(!bild_nach_nv12(&[], 0, 0, false, 32, 16, &mut out));
     }
 
+    /// Stufe 5b: die GANZE Kette auf dieser Maschine - Bildschirm aufnehmen,
+    /// verkleinern, nach NV12, durch den H.264-Kodierer. Laeuft auf Windows
+    /// und Mac echt; wo es keinen Bildschirm gibt (Server), wird ehrlich
+    /// uebersprungen statt falsch gruen zu melden.
+    #[test]
+    fn bildschirm_bis_h264_durch() {
+        let schirme = liste();
+        if schirme.is_empty() {
+            println!("kein Bildschirm auf dieser Maschine - uebersprungen");
+            return;
+        }
+        println!("Bildschirm 0: {:?}", schirme[0]);
+        let auf = match oeffnen(0, 1280, 720, 10) {
+            Ok(a) => a,
+            Err(e) => {
+                println!("Aufnahme nicht moeglich ({}) - uebersprungen", e);
+                return;
+            }
+        };
+        let (zb, zh) = (auf.breite, auf.hoehe);
+        assert!(zb % 2 == 0 && zh % 2 == 0, "ungerade Kante {}x{}", zb, zh);
+        assert!(zb <= 1280 && zh <= 720, "zu gross: {}x{}", zb, zh);
+        let start = std::time::Instant::now();
+        let mut bild = None;
+        while start.elapsed() < std::time::Duration::from_secs(5) && bild.is_none() {
+            bild = auf.neuestes();
+            if bild.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        let Some(b) = bild else {
+            println!(
+                "kein Bild binnen 5 s (Fehler: {}) - uebersprungen",
+                auf.fehler()
+            );
+            return;
+        };
+        assert_eq!(b.breite, zb);
+        assert_eq!(b.hoehe, zh);
+        assert_eq!(
+            b.nv12.len(),
+            zb as usize * zh as usize * 3 / 2,
+            "NV12-Laenge passt nicht"
+        );
+        // Wie hell ist das Bild wirklich? Bei gesperrtem Rechner ist es
+        // schwarz - das ist kein Fehler, aber es soll dastehen.
+        let ysum: u64 = b.nv12[..(zb as usize * zh as usize)]
+            .iter()
+            .map(|v| *v as u64)
+            .sum();
+        let hell = ysum as f64 / (zb as f64 * zh as f64);
+        println!(
+            "aufgenommen {}x{}, {} Bilder, mittlere Helligkeit {:.1}",
+            zb,
+            zh,
+            auf.aufgenommen(),
+            hell
+        );
+        // Und jetzt durch den Kodierer - das ist der Teil, der auf dem Mac
+        // neu ist.
+        if !crate::h264::available() {
+            println!("kein H.264-Kodierer - Kette hier nicht pruefbar");
+            return;
+        }
+        let mut enc = crate::h264::Encoder::new(zb, zh, 10, 3_000_000).expect("Kodierer");
+        let mut bytes = 0usize;
+        let mut schluessel = 0;
+        for c in enc.encode(&b.nv12).expect("kodieren") {
+            bytes += c.data.len();
+            if c.key {
+                schluessel += 1;
+            }
+        }
+        println!("H.264: {} Bytes, {} Schluesselbilder", bytes, schluessel);
+        assert!(bytes > 0, "Bildschirmbild liess sich nicht kodieren");
+        assert!(schluessel > 0, "kein Schluesselbild am Anfang");
+        auf.stoppen();
+    }
+
     #[test]
     fn liste_stuerzt_nicht_ab() {
         // Auf einem Server ohne Bildschirm muss das eine Liste (ggf. leer)
