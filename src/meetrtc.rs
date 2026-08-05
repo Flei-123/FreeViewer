@@ -61,6 +61,8 @@ pub struct Zahlen {
     pub empfangen: u64,
     pub bild_gesendet: u64,
     pub bild_empfangen: u64,
+    /// Rahmen der eigenen BILDSCHIRM-Spur (Stufe 3).
+    pub schirm_gesendet: u64,
     pub bytes_raus: u64,
     pub bytes_rein: u64,
     /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
@@ -74,6 +76,8 @@ pub struct Ton {
     raus: std::sync::mpsc::Sender<Vec<i16>>,
     /// Kodierte Bildrahmen, die raus sollen.
     bild_raus: std::sync::mpsc::Sender<Vec<u8>>,
+    /// Kodierte Bildschirmrahmen (eigene Spur, Stufe 3).
+    schirm_raus: std::sync::mpsc::Sender<Vec<u8>>,
     ereignisse: std::sync::mpsc::Receiver<TonEreignis>,
     zahlen: Arc<Mutex<Zahlen>>,
     stumm: Arc<AtomicBool>,
@@ -84,6 +88,8 @@ pub struct Ton {
     pub mid: String,
     /// m-line unseres eigenen Bildes.
     pub vid: String,
+    /// m-line unserer eigenen Bildschirmfreigabe.
+    pub vid2: String,
     /// Welche m-line gehoert zu welchem Teilnehmer (aus den "track"-Meldungen).
     spuren: Arc<Mutex<HashMap<String, u64>>>,
     antwort: std::sync::mpsc::Sender<Sdp>,
@@ -105,6 +111,11 @@ impl Ton {
     /// ohne Startcode - str0m packt ihn selbst in RTP).
     pub fn bild_senden(&self, daten: Vec<u8>) {
         let _ = self.bild_raus.send(daten);
+    }
+    /// Einen H.264-Rahmen der BILDSCHIRM-Spur verschicken. Eigene Spur,
+    /// damit die Gegenseite Kamera und Bildschirm trennen kann.
+    pub fn schirm_senden(&self, daten: Vec<u8>) {
+        let _ = self.schirm_raus.send(daten);
     }
     pub fn abholen(&self) -> Vec<TonEreignis> {
         let mut v = Vec::new();
@@ -181,6 +192,11 @@ pub fn starten() -> Result<Ton> {
     // Browser es versteht. VP8 koennten wir nur in Software - das waere auf
     // aelteren Rechnern eine Zumutung.
     let vid = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+    // Dritte Spur: der geteilte Bildschirm. Bewusst getrennt von der
+    // Kamera - sonst verschwindet man selbst aus der Runde, sobald man
+    // etwas zeigt, und die Gegenseite kann nicht "Bildschirm gross,
+    // Kamera klein" anordnen.
+    let vid2 = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
     let (angebot, offen) = api
         .apply()
         .ok_or_else(|| anyhow!("Angebot laesst sich nicht bauen"))?;
@@ -188,6 +204,7 @@ pub fn starten() -> Result<Ton> {
 
     let (raus_tx, raus_rx) = std::sync::mpsc::channel::<Vec<i16>>();
     let (bild_tx, bild_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (schirm_tx, schirm_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel::<TonEreignis>();
     let (sdp_tx, sdp_rx) = std::sync::mpsc::channel::<Sdp>();
     let zahlen = Arc::new(Mutex::new(Zahlen::default()));
@@ -203,8 +220,8 @@ pub fn starten() -> Result<Ton> {
         .name("meetrtc".into())
         .spawn(move || {
             let r = lauf(
-                rtc, offen, socket, mid, vid, raus_rx, bild_rx, sdp_rx, &ev_tx, &z2, &s2, &e2,
-                &sp2,
+                rtc, offen, socket, mid, vid, vid2, raus_rx, bild_rx, schirm_rx, sdp_rx, &ev_tx,
+                &z2, &s2, &e2, &sp2,
             );
             let text = match r {
                 Ok(()) => String::new(),
@@ -217,6 +234,7 @@ pub fn starten() -> Result<Ton> {
     Ok(Ton {
         raus: raus_tx,
         bild_raus: bild_tx,
+        schirm_raus: schirm_tx,
         ereignisse: ev_rx,
         zahlen,
         stumm,
@@ -224,6 +242,7 @@ pub fn starten() -> Result<Ton> {
         angebot: angebot_sdp,
         mid: mid.to_string(),
         vid: vid.to_string(),
+        vid2: vid2.to_string(),
         spuren,
         antwort: sdp_tx,
     })
@@ -253,8 +272,10 @@ fn lauf(
     socket: UdpSocket,
     mid: Mid,
     vid: Mid,
+    vid2: Mid,
     raus: std::sync::mpsc::Receiver<Vec<i16>>,
     bild_raus: std::sync::mpsc::Receiver<Vec<u8>>,
+    schirm_raus: std::sync::mpsc::Receiver<Vec<u8>>,
     sdp: std::sync::mpsc::Receiver<Sdp>,
     ev: &std::sync::mpsc::Sender<TonEreignis>,
     zahlen: &Arc<Mutex<Zahlen>>,
@@ -283,6 +304,8 @@ fn lauf(
     let mut pt: Option<str0m::media::Pt> = None;
     let mut vpt: Option<str0m::media::Pt> = None;
     let mut bild_zeit: u64 = 0;
+    let mut spt: Option<str0m::media::Pt> = None;
+    let mut schirm_zeit: u64 = 0;
 
     loop {
         if ende.load(Ordering::Relaxed) {
@@ -396,6 +419,39 @@ fn lauf(
                     }
                     // 90 kHz: ein Rahmen bei 30 Bildern/s sind 3000 Schritte.
                     bild_zeit += 3000;
+                }
+            }
+        }
+
+        // ---- Bildschirm verschicken ----------------------------------------
+        if rtc.is_alive() {
+            if let Ok(daten) = schirm_raus.try_recv() {
+                if spt.is_none() {
+                    let pts: Vec<str0m::media::Pt> = rtc
+                        .media(vid2)
+                        .map(|m| m.remote_pts().to_vec())
+                        .unwrap_or_default();
+                    if !pts.is_empty() {
+                        spt = rtc
+                            .codec_config()
+                            .iter()
+                            .find(|c| {
+                                pts.contains(&c.pt()) && c.spec().codec == str0m::format::Codec::H264
+                            })
+                            .map(|c| c.pt());
+                    }
+                }
+                if let (Some(p), Some(mut w)) = (spt, rtc.writer(vid2)) {
+                    let wanduhr = start + start.elapsed();
+                    let zeit = MediaTime::new(schirm_zeit, str0m::media::Frequency::NINETY_KHZ);
+                    let laenge = daten.len() as u64;
+                    if let Err(e) = w.write(p, wanduhr, zeit, daten) {
+                        let _ = ev.send(TonEreignis::Fehler(format!("Bildschirm senden: {}", e)));
+                    } else if let Ok(mut z) = zahlen.lock() {
+                        z.schirm_gesendet += 1;
+                        z.bytes_raus += laenge;
+                    }
+                    schirm_zeit += 3000;
                 }
             }
         }
@@ -607,6 +663,20 @@ mod tests {
         );
         assert!(!ton.vid.is_empty(), "keine Kennung fuer die Bildspur");
         assert_ne!(ton.vid, ton.mid, "Bild und Ton auf derselben Spur");
+    }
+
+    #[test]
+    fn angebot_enthaelt_eine_dritte_spur_fuer_den_bildschirm() {
+        let ton = starten().expect("startet");
+        let zeilen = ton.angebot.lines().filter(|l| l.starts_with("m=")).count();
+        assert_eq!(zeilen, 3, "Angebot:\n{}", ton.angebot);
+        assert_ne!(ton.vid2, ton.vid, "Bildschirm und Kamera auf derselben Spur");
+        assert_ne!(ton.vid2, ton.mid, "Bildschirm und Ton auf derselben Spur");
+        assert_eq!(
+            ton.angebot.matches("H264").count() >= 2,
+            true,
+            "beide Bildspuren muessen H.264 anbieten"
+        );
         ton.beenden();
     }
 }

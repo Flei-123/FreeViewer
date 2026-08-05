@@ -33,6 +33,7 @@ mod meetaudio;
 mod meetui;
 mod meetvideo;
 mod meetcam;
+mod meetschirm;
 mod input;
 mod net;
 mod p2p;
@@ -298,6 +299,154 @@ fn main() -> eframe::Result<()> {
         for (i, k) in l.iter().enumerate() {
             println!("KAMERA {} name={} id={}", i, k.name, k.id);
         }
+        return Ok(());
+    }
+
+    // Bildschirmtest (Stufe 3): den ECHTEN Bildschirm als eigene Spur ins
+    // Meeting schicken - ohne Browser.
+    //   freeviewer --meetschirm <raum> <passwort> [name] [sekunden] [schirm-nr]
+    if let Some(i) = std::env::args().position(|a| a == "--meetschirm") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args
+            .get(i + 3)
+            .cloned()
+            .unwrap_or_else(|| "NativSchirm".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+        let nr: usize = args.get(i + 5).and_then(|s| s.parse().ok()).unwrap_or(0);
+        for (n, m) in meetschirm::liste().iter().enumerate() {
+            println!(
+                "SCHIRM {} name={} {}x{} primaer={}",
+                n, m.name, m.breite, m.hoehe, m.primaer
+            );
+        }
+        let auf = match meetschirm::oeffnen(nr, 1920, 1080, 15) {
+            Ok(a) => a,
+            Err(e) => {
+                println!("SCHIRMTEST FEHLER Aufnahme: {}", e);
+                return Ok(());
+            }
+        };
+        println!("SCHIRM OFFEN {} {}x{}", auf.name, auf.breite, auf.hoehe);
+        let mut koder = match meetvideo::Kodierer::neu(auf.breite, auf.hoehe, 15, 3_500_000) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("SCHIRMTEST FEHLER Kodierer: {}", e);
+                return Ok(());
+            }
+        };
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("SCHIRMTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("SCHIRMTEST FEHLER RTC: {}", e);
+                return Ok(());
+            }
+        };
+        let mut angeboten = false;
+        let mut pakete: u64 = 0;
+        let mut gesendet: u64 = 0;
+        let mut hell_summe = 0f64;
+        let mut bewegung = 0f64;
+        let mut vorbild: Vec<u8> = Vec::new();
+        let start = std::time::Instant::now();
+        let mut naechstes = std::time::Instant::now();
+        let mut schluessel = std::time::Instant::now();
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.vid2,"screen":true}));
+                        sig.roh(serde_json::json!({"t":"screen","on":true}));
+                        println!("EREIGNIS Antwort eingespielt, Bildschirm angemeldet");
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    _ => {}
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+            }
+            for te in ton.abholen() {
+                if let meetrtc::TonEreignis::Verbunden = te {
+                    println!("EREIGNIS RTC verbunden");
+                }
+            }
+            if std::time::Instant::now() >= naechstes {
+                naechstes += std::time::Duration::from_millis(66);
+                if let Some(b) = auf.neuestes() {
+                    let y = &b.nv12[..(b.breite * b.hoehe) as usize];
+                    hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
+                    if vorbild.len() == y.len() {
+                        let d: f64 = y
+                            .iter()
+                            .zip(vorbild.iter())
+                            .map(|(a, c)| (*a as i32 - *c as i32).unsigned_abs() as f64)
+                            .sum::<f64>()
+                            / y.len() as f64;
+                        bewegung += d;
+                    }
+                    vorbild = y.to_vec();
+                    if schluessel.elapsed() >= std::time::Duration::from_secs(4) {
+                        schluessel = std::time::Instant::now();
+                        koder.schluesselbild();
+                    }
+                    gesendet += 1;
+                    match koder.nv12_rahmen(&b.nv12) {
+                        Ok(teile) => {
+                            for t in teile {
+                                pakete += 1;
+                                ton.schirm_senden(t.data);
+                            }
+                        }
+                        Err(e) => println!("KODIER-FEHLER {}", e),
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let z = ton.zahlen();
+        println!(
+            "ZAHLEN schirm={} groesse={}x{} aufgenommen={} verwendet={} kodiert={} pakete={} schirm_gesendet={} bild_empfangen={} bytes_raus={} helligkeit={:.1} bewegung={:.2} fehler={}",
+            auf.name,
+            auf.breite,
+            auf.hoehe,
+            auf.aufgenommen(),
+            gesendet,
+            koder.bilder,
+            pakete,
+            z.schirm_gesendet,
+            z.bild_empfangen,
+            z.bytes_raus,
+            if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
+            if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
+            auf.fehler()
+        );
+        auf.stoppen();
+        sig.roh(serde_json::json!({"t":"screen","on":false}));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        println!("SCHIRMTEST FERTIG");
         return Ok(());
     }
 
@@ -3085,6 +3234,7 @@ impl App {
                             let mut verlassen = false;
                             let mut stumm_um = None;
                             let mut kamera_um = None;
+                            let mut schirm_um = None;
                             let mut hand_um = None;
                             let mut senden = false;
                             if let Some(n) = self.nativ_meet.as_mut() {
@@ -3150,6 +3300,18 @@ impl App {
                                     {
                                         kamera_um = Some(!n.kamera_an);
                                     }
+                                    if ghost_button(
+                                        ui,
+                                        if n.schirm_an {
+                                            "Freigabe beenden"
+                                        } else {
+                                            "Bildschirm teilen"
+                                        },
+                                    )
+                                    .clicked()
+                                    {
+                                        schirm_um = Some(!n.schirm_an);
+                                    }
                                     if ghost_button(ui, if n.hand { "Hand runter" } else { "Hand" })
                                         .clicked()
                                     {
@@ -3159,6 +3321,20 @@ impl App {
                                         verlassen = true;
                                     }
                                 });
+                                if !n.schirm_meldung.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(if n.schirm_an {
+                                            format!(
+                                                "{}  ·  {} Bilder geteilt",
+                                                n.schirm_meldung, n.schirm_gesendet
+                                            )
+                                        } else {
+                                            n.schirm_meldung.clone()
+                                        })
+                                        .size(10.5)
+                                        .color(p.muted),
+                                    );
+                                }
                                 if !n.kamera_meldung.is_empty() {
                                     ui.label(
                                         egui::RichText::new(n.kamera_meldung.clone())
@@ -3340,6 +3516,12 @@ impl App {
                             if let Some(v) = kamera_um {
                                 if let Some(n) = self.nativ_meet.as_mut() {
                                     n.kamera_schalten(v);
+                                }
+                            }
+                            if let Some(v) = schirm_um {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    // Ohne Auswahl: der Hauptbildschirm.
+                                    n.schirm_schalten(v, 0);
                                 }
                             }
                             if let Some(v) = hand_um {

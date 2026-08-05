@@ -47,6 +47,15 @@ pub struct NativMeet {
     naechstes_bild: std::time::Instant,
     /// Videospur ist beim Server angemeldet.
     video_gemeldet: bool,
+    /// Bildschirmfreigabe (Stufe 3) - eigene Spur neben der Kamera.
+    schirm: Option<crate::meetschirm::Aufnahme>,
+    schirm_koder: Option<crate::meetvideo::Kodierer>,
+    pub schirm_an: bool,
+    pub schirm_meldung: String,
+    pub schirm_gesendet: u64,
+    naechstes_schirmbild: std::time::Instant,
+    /// Wann zuletzt ein Schluesselbild angefordert wurde.
+    letztes_schluesselbild: std::time::Instant,
 }
 
 impl NativMeet {
@@ -95,6 +104,13 @@ impl NativMeet {
             bild_gesendet: 0,
             naechstes_bild: std::time::Instant::now(),
             video_gemeldet: false,
+            schirm: None,
+            schirm_koder: None,
+            schirm_an: false,
+            schirm_meldung: String::new(),
+            schirm_gesendet: 0,
+            naechstes_schirmbild: std::time::Instant::now(),
+            letztes_schluesselbild: std::time::Instant::now(),
         })
     }
 
@@ -129,6 +145,13 @@ impl NativMeet {
                         // sehen dann einen Platzhalter statt schwarz).
                         self.sig.roh(
                             serde_json::json!({"t":"publish","mid":self.ton.vid,"screen":false}),
+                        );
+                        // Die Bildschirmspur GLEICH als solche anmelden -
+                        // sonst haelt die Gegenseite sie fuer eine zweite
+                        // Kamera, sobald spaeter Daten fliessen. Eine Kachel
+                        // entsteht erst, wenn wirklich Bild kommt.
+                        self.sig.roh(
+                            serde_json::json!({"t":"publish","mid":self.ton.vid2,"screen":true}),
                         );
                         self.video_gemeldet = true;
                         self.sig.stumm("video", !self.kamera_an);
@@ -233,6 +256,98 @@ impl NativMeet {
             }
         }
         self.kamera_pumpe();
+        self.schirm_pumpe();
+    }
+
+    /// Bildschirm -> H.264 -> Meeting (eigene Spur). 15 Bilder je Sekunde,
+    /// immer das neueste Bild; alle 4 Sekunden ein Schluesselbild, damit
+    /// spaet Dazugekommene nicht vor einer leeren Flaeche sitzen.
+    fn schirm_pumpe(&mut self) {
+        let jetzt = std::time::Instant::now();
+        if jetzt < self.naechstes_schirmbild {
+            return;
+        }
+        let (auf, kod) = match (self.schirm.as_ref(), self.schirm_koder.as_mut()) {
+            (Some(a), Some(k)) => (a, k),
+            _ => return,
+        };
+        let bild = match auf.neuestes() {
+            Some(b) => b,
+            None => return,
+        };
+        self.naechstes_schirmbild = jetzt + std::time::Duration::from_millis(66);
+        if jetzt.duration_since(self.letztes_schluesselbild) >= std::time::Duration::from_secs(4) {
+            self.letztes_schluesselbild = jetzt;
+            kod.schluesselbild();
+        }
+        match kod.nv12_rahmen(&bild.nv12) {
+            Ok(teile) => {
+                for t in teile {
+                    self.ton.schirm_senden(t.data);
+                }
+                self.schirm_gesendet += 1;
+            }
+            Err(e) => self.schirm_meldung = format!("Kodierer: {}", e),
+        }
+        let f = auf.fehler();
+        if !f.is_empty() {
+            self.schirm_meldung = f;
+        }
+    }
+
+    /// Wie viele Bildschirme gibt es hier?
+    pub fn schirme() -> Vec<crate::meetschirm::Schirm> {
+        crate::meetschirm::liste()
+    }
+
+    /// Bildschirmfreigabe an/aus. `index` waehlt den Bildschirm.
+    pub fn schirm_schalten(&mut self, an: bool, index: usize) {
+        if an {
+            if self.schirm.is_some() {
+                return;
+            }
+            match crate::meetschirm::oeffnen(index, 1920, 1080, 15) {
+                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 15, 3_500_000) {
+                    Ok(k) => {
+                        self.schirm_meldung = format!("Teile {}", a.name);
+                        self.schirm = Some(a);
+                        self.schirm_koder = Some(k);
+                        self.schirm_an = true;
+                        self.schirm_gesendet = 0;
+                        self.letztes_schluesselbild =
+                            std::time::Instant::now() - std::time::Duration::from_secs(9);
+                        // Erst die Spur als Bildschirm melden, dann die
+                        // Freigabe ankuendigen - in der Reihenfolge, sonst
+                        // legt die Gegenseite die Kachel falsch an.
+                        self.sig.roh(
+                            serde_json::json!({"t":"publish","mid":self.ton.vid2,"screen":true}),
+                        );
+                        self.sig.roh(serde_json::json!({"t":"screen","on":true}));
+                    }
+                    Err(e) => {
+                        a.stoppen();
+                        self.schirm_meldung = format!("Kein Kodierer: {}", e);
+                        self.schirm_an = false;
+                    }
+                },
+                Err(e) => {
+                    self.schirm_meldung = format!("Kein Bildschirm: {}", e);
+                    self.schirm_an = false;
+                }
+            }
+        } else {
+            if let Some(a) = self.schirm.take() {
+                a.stoppen();
+            }
+            self.schirm_koder = None;
+            self.schirm_an = false;
+            self.sig.roh(serde_json::json!({"t":"screen","on":false}));
+        }
+    }
+
+    /// Name der laufenden Bildschirmfreigabe (leer = aus).
+    pub fn schirm_name(&self) -> String {
+        self.schirm.as_ref().map(|a| a.name.clone()).unwrap_or_default()
     }
 
     /// Kamera -> H.264 -> Meeting. Laeuft mit 15 Bildern je Sekunde; das
@@ -374,6 +489,10 @@ impl NativMeet {
         if let Some(k) = self.kamera.as_ref() {
             k.stoppen();
         }
+        if let Some(a) = self.schirm.as_ref() {
+            a.stoppen();
+            self.sig.roh(serde_json::json!({"t":"screen","on":false}));
+        }
         self.sig.verlassen();
         self.ton.beenden();
     }
@@ -423,6 +542,21 @@ mod tests {
             }
             m.kamera_schalten(false);
             assert!(!m.kamera_an);
+            m.verlassen();
+        }
+    }
+
+    #[test]
+    fn schirm_schalten_ohne_bildschirm_meldet_sauber() {
+        // Server ohne Bildschirm: sauber melden, nicht abstuerzen.
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", None, None);
+        if let Ok(mut m) = r {
+            m.schirm_schalten(true, 0);
+            if !m.schirm_an {
+                assert!(!m.schirm_meldung.is_empty(), "keine Meldung");
+            }
+            m.schirm_schalten(false, 0);
+            assert!(!m.schirm_an);
             m.verlassen();
         }
     }

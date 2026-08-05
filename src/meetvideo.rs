@@ -114,6 +114,13 @@ impl Kodierer {
         Ok(aus)
     }
 
+    /// Das naechste Bild als Schluesselbild kodieren. Wichtig beim
+    /// Bildschirmteilen: wer spaeter dazukommt, sieht sonst bis zum
+    /// naechsten Schluesselbild nur Matsch oder gar nichts.
+    pub fn schluesselbild(&mut self) {
+        self.enc.request_keyframe();
+    }
+
     /// Ein RGB-Bild hineingeben, fertige H.264-Pakete herausbekommen.
     pub fn rahmen(&mut self, rgb: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
         crate::h264::rgb_to_nv12(rgb, self.breite, self.hoehe, &mut self.nv12);
