@@ -880,7 +880,7 @@ fn main() -> eframe::Result<()> {
     let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--background");
     // Kam eine freeviewer://-Adresse mit? Dann in den Briefkasten legen -
     // egal ob diese Fassung sie selbst abholt oder die schon laufende.
-    if let Some(url) = std::env::args().find(|a| a.starts_with("freeviewer:")) {
+    if let Some(url) = std::env::args().find(|a| link::is_ours(a)) {
         if link::parse(&url).is_some() {
             link::drop_in(&url);
         }
@@ -5928,28 +5928,57 @@ enum SettingsTab {
 /// Breite, ab der der Inhalt nicht weiter auseinandergezogen wird.
 const CONTENT_MAX: f32 = 1180.0;
 
-/// Schriften: die von Windows mitgelieferte Segoe UI sieht auf einem
-/// Windows-Rechner richtig aus - die eingebaute egui-Schrift wirkt fremd.
+/// Schriften. Auf Windows sieht die mitgelieferte Segoe UI richtig aus, auf
+/// dem Mac die System-Schrift, unter Linux DejaVu/Noto. Findet sich nichts,
+/// bleibt die in egui eingebaute Schrift.
+///
+/// WICHTIG: Die Familie "head" MUSS am Ende immer mit mindestens einer
+/// Schrift belegt sein. Bis v0.26.1 wurde sie nur angelegt, wenn eine
+/// Windows-Datei gefunden wurde - auf Mac und Linux war sie leer und egui
+/// brach beim ersten Zeichnen einer Überschrift ab
+/// ("FontFamily::Name(\"head\") is not bound to any fonts").
+/// Genau das war der Absturz "X-Remote quit unexpectedly" auf dem Mac.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    // Kandidaten pro Betriebssystem, in der Reihenfolge der Vorliebe.
+    #[cfg(windows)]
+    let (regular, bold): (&[&str], &[&str]) = (
+        &["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/SegUIVar.ttf"],
+        &["C:/Windows/Fonts/seguisb.ttf", "C:/Windows/Fonts/segoeuib.ttf"],
+    );
+    #[cfg(target_os = "macos")]
+    let (regular, bold): (&[&str], &[&str]) = (
+        &[
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/SFNSText.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
+        ],
+        &[
+            "/System/Library/Fonts/SFNSRounded.ttf",
+            "/System/Library/Fonts/SFNSDisplay.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ],
+    );
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (regular, bold): (&[&str], &[&str]) = (
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ],
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ],
+    );
+
     let mut body: Option<&str> = None;
     let mut head: Option<&str> = None;
-    for (key, files) in [
-        (
-            "ui",
-            [
-                "C:/Windows/Fonts/segoeui.ttf",
-                "C:/Windows/Fonts/SegUIVar.ttf",
-            ],
-        ),
-        (
-            "ui_bold",
-            [
-                "C:/Windows/Fonts/seguisb.ttf",
-                "C:/Windows/Fonts/segoeuib.ttf",
-            ],
-        ),
-    ] {
+    for (key, files) in [("ui", regular), ("ui_bold", bold)] {
         for f in files {
             if let Ok(bytes) = std::fs::read(f) {
                 fonts.font_data.insert(
@@ -5972,12 +6001,28 @@ fn install_fonts(ctx: &egui::Context) {
             .or_default()
             .insert(0, b.to_owned());
     }
+
+    // Die Überschriften-Familie bekommt IMMER einen Inhalt: erst die fette
+    // Schrift (falls gefunden), danach die komplette Liste der normalen
+    // Schriften als Rückfallebene. Damit kann sie nie leer sein.
+    let fallback = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let liste = fonts
+        .families
+        .entry(egui::FontFamily::Name("head".into()))
+        .or_insert_with(|| fallback.clone());
     if let Some(h) = head {
-        fonts
-            .families
-            .entry(egui::FontFamily::Name("head".into()))
-            .or_default()
-            .insert(0, h.to_owned());
+        liste.insert(0, h.to_owned());
+    }
+    if liste.is_empty() {
+        // Letzte Rettung - darf eigentlich nie passieren.
+        liste.extend(fallback.iter().cloned());
+        if liste.is_empty() {
+            liste.push("Ubuntu-Light".to_owned());
+        }
     }
     ctx.set_fonts(fonts);
 }

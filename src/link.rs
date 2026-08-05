@@ -16,7 +16,30 @@
 
 use std::path::PathBuf;
 
-pub const SCHEME: &str = "freeviewer";
+/// Eigenes Schema pro Marke. Zwei Marken auf EINEM Rechner duerfen sich
+/// nicht gegenseitig die Links wegnehmen: bis v0.26.1 hiess das Schema bei
+/// jedem Build "freeviewer", also hat der zuletzt installierte Build alle
+/// Links an sich gerissen (X-Remote oeffnete FreeViewer-Meetings).
+/// Standard bleibt "freeviewer", X-Remote baut mit FV_BRAND_SCHEME=xremote.
+pub const SCHEME: &str = match option_env!("FV_BRAND_SCHEME") {
+    Some(s) => s,
+    None => "freeviewer",
+};
+
+/// Das alte, gemeinsame Schema. Links, die schon im Umlauf sind, sollen
+/// weiter funktionieren - deshalb wird es beim Zerlegen IMMER mitgelesen.
+pub const SCHEME_ALT: &str = "freeviewer";
+
+/// Alle Schemata, die dieser Build versteht.
+pub fn schemes() -> Vec<&'static str> {
+    if SCHEME == SCHEME_ALT { vec![SCHEME] } else { vec![SCHEME, SCHEME_ALT] }
+}
+
+/// Traegt eine Adresse eines unserer Schemata? (Fuer die Kommandozeile.)
+pub fn is_ours(arg: &str) -> bool {
+    let a = arg.trim().to_ascii_lowercase();
+    schemes().iter().any(|s| a.starts_with(&format!("{}:", s)))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -32,9 +55,18 @@ pub enum Action {
 /// `freeviewer://meet/482-913-770?pass=abc`.
 pub fn parse(url: &str) -> Option<Action> {
     let u = url.trim().trim_end_matches('/');
-    let rest = u
-        .strip_prefix("freeviewer://")
-        .or_else(|| u.strip_prefix("freeviewer:"))?;
+    // Beide Schemata annehmen - das eigene der Marke und das alte
+    // gemeinsame "freeviewer://" (Links, die schon verschickt wurden).
+    let mut rest_opt: Option<&str> = None;
+    for sch in schemes() {
+        let lang = format!("{}://", sch);
+        let kurz = format!("{}:", sch);
+        if let Some(r) = u.strip_prefix(&lang).or_else(|| u.strip_prefix(&kurz)) {
+            rest_opt = Some(r);
+            break;
+        }
+    }
+    let rest = rest_opt?;
     let (pfad, frage) = match rest.split_once('?') {
         Some((a, b)) => (a, b),
         None => (rest, ""),
@@ -119,7 +151,7 @@ pub fn embedded_setup() -> Option<(String, String)> {
         .and_then(|n| n.as_str())
         .unwrap_or("")
         .to_string();
-    if parse(&format!("freeviewer://setup/{}", code)).is_none() {
+    if parse(&format!("{}://setup/{}", SCHEME, code)).is_none() {
         return None;
     }
     Some((code, name))
@@ -164,14 +196,54 @@ pub fn register_for(exe: &std::path::Path, machine_wide: bool) -> std::io::Resul
     } else {
         RegKey::predef(HKEY_CURRENT_USER)
     };
-    let (key, _) = root.create_subkey(format!(r"Software\Classes\{}", SCHEME))?;
-    key.set_value("", &"URL:FreeViewer")?;
+    schreibe_schema(&root, SCHEME, exe)?;
+
+    // Das alte gemeinsame Schema NUR uebernehmen, wenn es noch frei ist.
+    // Eine zweite Marke darf einer bereits installierten NIEMALS die Links
+    // wegnehmen - genau daran lag es, dass X-Remote FreeViewer-Meetings
+    // geoeffnet hat.
+    if SCHEME != SCHEME_ALT && !schema_belegt(SCHEME_ALT) {
+        let _ = schreibe_schema(&root, SCHEME_ALT, exe);
+    }
+    Ok(())
+}
+
+/// Einen einzelnen Schema-Eintrag schreiben.
+#[cfg(windows)]
+fn schreibe_schema(
+    root: &winreg::RegKey,
+    schema: &str,
+    exe: &std::path::Path,
+) -> std::io::Result<()> {
+    let (key, _) = root.create_subkey(format!(r"Software\Classes\{}", schema))?;
+    key.set_value("", &format!("URL:{}", crate::brand::NAME))?;
     key.set_value("URL Protocol", &"")?;
     let (icon, _) = key.create_subkey("DefaultIcon")?;
     icon.set_value("", &format!("{},0", exe.display()))?;
     let (cmd, _) = key.create_subkey(r"shell\open\command")?;
     cmd.set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
     Ok(())
+}
+
+/// Haengt an diesem Schema schon ein Programm? (Egal ob HKLM oder HKCU.)
+#[cfg(windows)]
+pub fn schema_belegt(schema: &str) -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+    for r in [
+        RegKey::predef(HKEY_LOCAL_MACHINE),
+        RegKey::predef(HKEY_CURRENT_USER),
+    ] {
+        if let Ok(k) = r.open_subkey(format!(r"Software\Classes\{}\shell\open\command", schema))
+        {
+            if let Ok(v) = k.get_value::<String, _>("") {
+                if !v.trim().is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(not(windows))]

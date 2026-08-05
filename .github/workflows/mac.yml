@@ -65,6 +65,14 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
             <key>NSCameraUsageDescription</key><string>FreeViewer nutzt die Kamera nur, wenn du sie in einem Meeting einschaltest.</string>
             <key>NSMicrophoneUsageDescription</key><string>FreeViewer nutzt das Mikrofon nur, wenn du es in einem Meeting oder einer Sitzung einschaltest.</string>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>com.fleitec.freeviewer.link</string>
+                <key>CFBundleTypeRole</key><string>Viewer</string>
+                <key>CFBundleURLSchemes</key><array><string>freeviewer</string></array>
+              </dict>
+            </array>
           </dict>
           </plist>
           PLIST
@@ -136,6 +144,9 @@ jobs:
       FV_BRAND_DIR: X-Remote
       FV_BRAND_PUBLISHER: Xoffi
       FV_BRAND_SLUG: xoffi
+      # Eigenes Link-Schema: sonst reissen sich beide Marken auf demselben
+      # Rechner die freeviewer://-Links gegenseitig weg.
+      FV_BRAND_SCHEME: xremote
       FV_BRAND_WEB: https://remote.fleitec.com
       FV_BRAND_FEED: https://remote.fleitec.com/fv/dist/version-xoffi.json
     steps:
@@ -174,6 +185,14 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
             <key>NSCameraUsageDescription</key><string>X-Remote nutzt die Kamera nur, wenn du sie in einem Meeting einschaltest.</string>
             <key>NSMicrophoneUsageDescription</key><string>X-Remote nutzt das Mikrofon nur, wenn du es in einem Meeting oder einer Sitzung einschaltest.</string>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>com.xoffi.xremote.link</string>
+                <key>CFBundleTypeRole</key><string>Viewer</string>
+                <key>CFBundleURLSchemes</key><array><string>xremote</string></array>
+              </dict>
+            </array>
           </dict>
           </plist>
           PLIST

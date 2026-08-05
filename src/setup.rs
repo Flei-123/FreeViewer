@@ -259,7 +259,11 @@ mod imp {
             RegKey::predef(HKEY_CURRENT_USER),
         ] {
             if let Ok(k) = root.open_subkey_with_flags(r"Software\Classes", KEY_ALL_ACCESS) {
-                let _ = k.delete_subkey_all(crate::link::SCHEME);
+                // Beide Schemata: das eigene der Marke und - falls dieser
+                // Build es uebernommen hatte - das alte gemeinsame.
+                for schema in crate::link::schemes() {
+                    let _ = k.delete_subkey_all(schema);
+                }
             }
         }
 
