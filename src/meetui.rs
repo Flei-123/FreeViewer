@@ -30,6 +30,8 @@ pub struct NativMeet {
     pub bild_zaehler: u64,
     /// Format der ankommenden Bilder ("H264"/"Vp8") - fuer die Anzeige.
     pub bild_codec: String,
+    /// Dekodierte Bilder der anderen (je Teilnehmer das letzte).
+    pub bilder: crate::meetvideo::Dekodierer,
 }
 
 impl NativMeet {
@@ -68,6 +70,7 @@ impl NativMeet {
             raum: raum.to_string(),
             bild_zaehler: 0,
             bild_codec: String::new(),
+            bilder: crate::meetvideo::Dekodierer::neu(),
         })
     }
 
@@ -106,6 +109,7 @@ impl NativMeet {
                     self.chat.push((0, format!("{} ist dazugekommen", t.name)))
                 }
                 meetsig::Ereignis::Weg(id) => {
+                    self.bilder.vergessen(id);
                     let name = self
                         .sig
                         .zustand()
@@ -181,7 +185,8 @@ impl NativMeet {
                     // Hier wird vorerst nur gezaehlt, damit man sieht, dass
                     // wirklich Bild ankommt.
                     self.bild_zaehler += 1;
-                    let _ = (quelle, daten, schluesselbild);
+                    let _ = schluesselbild;
+                    self.bilder.rahmen(quelle, &daten);
                 }
                 meetrtc::TonEreignis::Fehler(f) => self.meldung = f,
                 meetrtc::TonEreignis::Ende(f) => {

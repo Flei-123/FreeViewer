@@ -107,6 +107,85 @@ impl Kodierer {
     }
 }
 
+
+/// Dekodiert die H.264-Rahmen der anderen - je Teilnehmer ein eigener
+/// Dekodierer, weil jeder eine andere Groesse schicken kann.
+pub struct Dekodierer {
+    leute: std::collections::HashMap<u64, crate::h264::Decoder>,
+    /// Letztes fertiges Bild je Teilnehmer: (Breite, Hoehe, RGBA).
+    pub bilder: std::collections::HashMap<u64, (u32, u32, Vec<u8>)>,
+    pub gezaehlt: u64,
+    pub letzter_fehler: String,
+}
+
+impl Default for Dekodierer {
+    fn default() -> Self {
+        Self::neu()
+    }
+}
+
+impl Dekodierer {
+    pub fn neu() -> Dekodierer {
+        Dekodierer {
+            leute: std::collections::HashMap::new(),
+            bilder: std::collections::HashMap::new(),
+            gezaehlt: 0,
+            letzter_fehler: String::new(),
+        }
+    }
+
+    /// Einen Rahmen hineingeben. Liefert true, wenn daraus ein Bild wurde.
+    pub fn rahmen(&mut self, peer: u64, daten: &[u8]) -> bool {
+        let dec = match self.leute.entry(peer) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                match crate::h264::Decoder::new(BREITE, HOEHE) {
+                    Ok(d) => e.insert(d),
+                    Err(err) => {
+                        self.letzter_fehler = format!("Dekodierer: {}", err);
+                        return false;
+                    }
+                }
+            }
+        };
+        let mut rgba = Vec::new();
+        match dec.decode(daten, &mut rgba) {
+            Ok(Some((w, h))) => {
+                self.bilder.insert(peer, (w, h, rgba));
+                self.gezaehlt += 1;
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                self.letzter_fehler = format!("dekodieren: {}", e);
+                false
+            }
+        }
+    }
+
+    pub fn vergessen(&mut self, peer: u64) {
+        self.leute.remove(&peer);
+        self.bilder.remove(&peer);
+    }
+
+    /// Wie hell ist das letzte Bild eines Teilnehmers (0..1)? Damit laesst
+    /// sich in einem Test ohne Bildschirm pruefen, ob wirklich etwas
+    /// Sichtbares ankommt und nicht nur schwarze Flaechen.
+    pub fn helligkeit(&self, peer: u64) -> f32 {
+        match self.bilder.get(&peer) {
+            None => 0.0,
+            Some((_, _, px)) => {
+                if px.is_empty() {
+                    return 0.0;
+                }
+                let summe: u64 = px.chunks(4).map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64).sum();
+                let n = (px.len() / 4).max(1) as u64;
+                (summe as f32 / n as f32) / (3.0 * 255.0)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
