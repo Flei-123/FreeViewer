@@ -39,6 +39,17 @@ pub enum TonEreignis {
     Verbunden,
     /// Ein entschluesselter, dekodierter Tonrahmen eines anderen Teilnehmers.
     Rahmen { quelle: u64, pcm: Vec<i16> },
+    /// Ein kodierter Bildrahmen (H.264) eines anderen Teilnehmers. Das
+    /// Dekodieren macht die Plattform (Media Foundation / VideoToolbox),
+    /// nicht dieses Modul.
+    Bild {
+        quelle: u64,
+        daten: Vec<u8>,
+        schluesselbild: bool,
+        /// Welches Bildformat der Server schickt ("H264", "VP8", ...).
+        /// Entscheidet, welcher Dekodierer drankommt.
+        codec: String,
+    },
     Fehler(String),
     Ende(String),
 }
@@ -48,6 +59,8 @@ pub enum TonEreignis {
 pub struct Zahlen {
     pub gesendet: u64,
     pub empfangen: u64,
+    pub bild_gesendet: u64,
+    pub bild_empfangen: u64,
     pub bytes_raus: u64,
     pub bytes_rein: u64,
     /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
@@ -59,6 +72,8 @@ pub struct Zahlen {
 pub struct Ton {
     /// PCM-Rahmen, die raus sollen (20 ms, Mono, 48 kHz).
     raus: std::sync::mpsc::Sender<Vec<i16>>,
+    /// Kodierte Bildrahmen, die raus sollen.
+    bild_raus: std::sync::mpsc::Sender<Vec<u8>>,
     ereignisse: std::sync::mpsc::Receiver<TonEreignis>,
     zahlen: Arc<Mutex<Zahlen>>,
     stumm: Arc<AtomicBool>,
@@ -67,6 +82,8 @@ pub struct Ton {
     pub angebot: String,
     /// m-line unseres eigenen Tons (der Server will sie im "publish" wissen).
     pub mid: String,
+    /// m-line unseres eigenen Bildes.
+    pub vid: String,
     /// Welche m-line gehoert zu welchem Teilnehmer (aus den "track"-Meldungen).
     spuren: Arc<Mutex<HashMap<String, u64>>>,
     antwort: std::sync::mpsc::Sender<Sdp>,
@@ -83,6 +100,11 @@ pub enum Sdp {
 impl Ton {
     pub fn senden(&self, pcm: Vec<i16>) {
         let _ = self.raus.send(pcm);
+    }
+    /// Einen fertig kodierten H.264-Rahmen verschicken (Annex-B oder AVCC
+    /// ohne Startcode - str0m packt ihn selbst in RTP).
+    pub fn bild_senden(&self, daten: Vec<u8>) {
+        let _ = self.bild_raus.send(daten);
     }
     pub fn abholen(&self) -> Vec<TonEreignis> {
         let mut v = Vec::new();
@@ -154,12 +176,18 @@ pub fn starten() -> Result<Ton> {
 
     let mut api = rtc.sdp_api();
     let mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+    // Zweite Spur fuer Bild. H.264, weil Windows und Mac dafuer eine
+    // Hardware-Einheit haben (Media Foundation bzw. VideoToolbox) und jeder
+    // Browser es versteht. VP8 koennten wir nur in Software - das waere auf
+    // aelteren Rechnern eine Zumutung.
+    let vid = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
     let (angebot, offen) = api
         .apply()
         .ok_or_else(|| anyhow!("Angebot laesst sich nicht bauen"))?;
     let angebot_sdp = angebot.to_sdp_string();
 
     let (raus_tx, raus_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+    let (bild_tx, bild_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (ev_tx, ev_rx) = std::sync::mpsc::channel::<TonEreignis>();
     let (sdp_tx, sdp_rx) = std::sync::mpsc::channel::<Sdp>();
     let zahlen = Arc::new(Mutex::new(Zahlen::default()));
@@ -175,7 +203,8 @@ pub fn starten() -> Result<Ton> {
         .name("meetrtc".into())
         .spawn(move || {
             let r = lauf(
-                rtc, offen, socket, mid, raus_rx, sdp_rx, &ev_tx, &z2, &s2, &e2, &sp2,
+                rtc, offen, socket, mid, vid, raus_rx, bild_rx, sdp_rx, &ev_tx, &z2, &s2, &e2,
+                &sp2,
             );
             let text = match r {
                 Ok(()) => String::new(),
@@ -187,12 +216,14 @@ pub fn starten() -> Result<Ton> {
 
     Ok(Ton {
         raus: raus_tx,
+        bild_raus: bild_tx,
         ereignisse: ev_rx,
         zahlen,
         stumm,
         ende,
         angebot: angebot_sdp,
         mid: mid.to_string(),
+        vid: vid.to_string(),
         spuren,
         antwort: sdp_tx,
     })
@@ -221,7 +252,9 @@ fn lauf(
     offen: str0m::change::SdpPendingOffer,
     socket: UdpSocket,
     mid: Mid,
+    vid: Mid,
     raus: std::sync::mpsc::Receiver<Vec<i16>>,
+    bild_raus: std::sync::mpsc::Receiver<Vec<u8>>,
     sdp: std::sync::mpsc::Receiver<Sdp>,
     ev: &std::sync::mpsc::Sender<TonEreignis>,
     zahlen: &Arc<Mutex<Zahlen>>,
@@ -248,6 +281,8 @@ fn lauf(
     let mut rtp_zeit: u64 = 0;
     let mut verbunden_gemeldet = false;
     let mut pt: Option<str0m::media::Pt> = None;
+    let mut vpt: Option<str0m::media::Pt> = None;
+    let mut bild_zeit: u64 = 0;
 
     loop {
         if ende.load(Ordering::Relaxed) {
@@ -331,6 +366,40 @@ fn lauf(
             }
         }
 
+        // ---- eigenes Bild verschicken --------------------------------------
+        if rtc.is_alive() {
+            if let Ok(daten) = bild_raus.try_recv() {
+                if vpt.is_none() {
+                    let pts: Vec<str0m::media::Pt> = rtc
+                        .media(vid)
+                        .map(|m| m.remote_pts().to_vec())
+                        .unwrap_or_default();
+                    if !pts.is_empty() {
+                        vpt = rtc
+                            .codec_config()
+                            .iter()
+                            .find(|c| {
+                                pts.contains(&c.pt()) && c.spec().codec == str0m::format::Codec::H264
+                            })
+                            .map(|c| c.pt());
+                    }
+                }
+                if let (Some(p), Some(mut w)) = (vpt, rtc.writer(vid)) {
+                    let wanduhr = start + start.elapsed();
+                    let zeit = MediaTime::new(bild_zeit, str0m::media::Frequency::NINETY_KHZ);
+                    let laenge = daten.len() as u64;
+                    if let Err(e) = w.write(p, wanduhr, zeit, daten) {
+                        let _ = ev.send(TonEreignis::Fehler(format!("Bild senden: {}", e)));
+                    } else if let Ok(mut z) = zahlen.lock() {
+                        z.bild_gesendet += 1;
+                        z.bytes_raus += laenge;
+                    }
+                    // 90 kHz: ein Rahmen bei 30 Bildern/s sind 3000 Schritte.
+                    bild_zeit += 3000;
+                }
+            }
+        }
+
         // ---- str0m antreiben ------------------------------------------------
         let bis = match rtc.poll_output() {
             Ok(Output::Timeout(t)) => t,
@@ -350,6 +419,34 @@ fn lauf(
                         }
                     }
                     Event::MediaAdded(_) => {}
+                    Event::MediaData(d) if d.pt.to_string() != "0" && ist_video(&rtc, d.mid) => {
+                        let peer = spuren
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&d.mid.to_string()).copied())
+                            .unwrap_or(0);
+                        if let Ok(mut z) = zahlen.lock() {
+                            z.bild_empfangen += 1;
+                            z.bytes_rein += d.data.len() as u64;
+                        }
+                        let schluessel = d
+                            .data
+                            .iter()
+                            .take(8)
+                            .any(|b| (*b & 0x1f) == 5 || (*b & 0x1f) == 7);
+                        let codec = rtc
+                            .codec_config()
+                            .iter()
+                            .find(|c| c.pt() == d.pt)
+                            .map(|c| format!("{:?}", c.spec().codec))
+                            .unwrap_or_else(|| "?".into());
+                        let _ = ev.send(TonEreignis::Bild {
+                            quelle: peer,
+                            daten: d.data.to_vec(),
+                            schluesselbild: schluessel,
+                            codec,
+                        });
+                    }
                     Event::MediaData(d) => {
                         let peer = spuren
                             .lock()
@@ -426,6 +523,13 @@ fn lauf(
     }
 }
 
+/// Gehoert diese m-line zum Bild?
+fn ist_video(rtc: &Rtc, mid: Mid) -> bool {
+    rtc.media(mid)
+        .map(|m| m.kind() == MediaKind::Video)
+        .unwrap_or(false)
+}
+
 /// Ein Testton (Sinus) - fuer Messungen ohne Mikrofon.
 pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
     let mut v = Vec::with_capacity(RAHMEN);
@@ -490,6 +594,19 @@ mod tests {
             "kein Opus im Angebot"
         );
         assert!(!ton.mid.is_empty());
+        ton.beenden();
+    }
+
+    #[test]
+    fn angebot_enthaelt_auch_eine_bildspur_mit_h264() {
+        let ton = starten().expect("startet");
+        assert!(ton.angebot.contains("m=video"), "keine Bildspur im Angebot");
+        assert!(
+            ton.angebot.to_uppercase().contains("H264"),
+            "kein H.264 im Angebot"
+        );
+        assert!(!ton.vid.is_empty(), "keine Kennung fuer die Bildspur");
+        assert_ne!(ton.vid, ton.mid, "Bild und Ton auf derselben Spur");
         ton.beenden();
     }
 }

@@ -286,6 +286,7 @@ fn main() -> eframe::Result<()> {
                             m.dazu(quelle, &pcm);
                         }
                     }
+                    meetrtc::TonEreignis::Bild { .. } => {}
                     meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
                     meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
                     meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
@@ -372,6 +373,20 @@ fn main() -> eframe::Result<()> {
                     meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
                     meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
                     meetrtc::TonEreignis::Rahmen { .. } => {}
+                    meetrtc::TonEreignis::Bild {
+                        quelle,
+                        daten,
+                        schluesselbild,
+                        codec,
+                    } => {
+                        println!(
+                            "EREIGNIS Bild von {} ({} Bytes, {}{})",
+                            quelle,
+                            daten.len(),
+                            codec,
+                            if schluesselbild { ", Schluesselbild" } else { "" }
+                        );
+                    }
                 }
             }
             // alle 20 ms ein Rahmen Testton (440 Hz)
@@ -385,8 +400,9 @@ fn main() -> eframe::Result<()> {
         }
         let z = ton.zahlen();
         println!(
-            "ZAHLEN verbunden={} gesendet={} empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3}",
-            z.verbunden, z.gesendet, z.empfangen, z.bytes_raus, z.bytes_rein, pegel_max
+            "ZAHLEN verbunden={} gesendet={} empfangen={} bild_gesendet={} bild_empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3}",
+            z.verbunden, z.gesendet, z.empfangen, z.bild_gesendet, z.bild_empfangen,
+            z.bytes_raus, z.bytes_rein, pegel_max
         );
         ton.beenden();
         sig.verlassen();

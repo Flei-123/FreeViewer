@@ -26,6 +26,10 @@ pub struct NativMeet {
     /// Letzte Meldung (Fehler, Hinweise).
     pub meldung: String,
     pub raum: String,
+    /// Wie viele Bildrahmen kamen schon an (Stufe 2 zeigt sie spaeter an).
+    pub bild_zaehler: u64,
+    /// Format der ankommenden Bilder ("H264"/"Vp8") - fuer die Anzeige.
+    pub bild_codec: String,
 }
 
 impl NativMeet {
@@ -62,6 +66,8 @@ impl NativMeet {
             pegel: 0.0,
             meldung,
             raum: raum.to_string(),
+            bild_zaehler: 0,
+            bild_codec: String::new(),
         })
     }
 
@@ -163,6 +169,19 @@ impl NativMeet {
                             m.dazu(quelle, &pcm);
                         }
                     }
+                }
+                meetrtc::TonEreignis::Bild {
+                    quelle,
+                    daten,
+                    schluesselbild,
+                    codec,
+                } => {
+                    self.bild_codec = codec;
+                    // Stufe 2: das Dekodieren macht spaeter die Plattform.
+                    // Hier wird vorerst nur gezaehlt, damit man sieht, dass
+                    // wirklich Bild ankommt.
+                    self.bild_zaehler += 1;
+                    let _ = (quelle, daten, schluesselbild);
                 }
                 meetrtc::TonEreignis::Fehler(f) => self.meldung = f,
                 meetrtc::TonEreignis::Ende(f) => {
