@@ -59,6 +59,10 @@ pub struct NativMeet {
     naechstes_schirmbild: std::time::Instant,
     /// Wann zuletzt ein Schluesselbild angefordert wurde.
     letztes_schluesselbild: std::time::Instant,
+    /// Eigene FreeViewer-Nummer - die geben wir bei der Freigabe bekannt.
+    ich_fvid: String,
+    /// Stufe 4: Fernsteuerung fuer die anderen freigegeben?
+    pub steuer_frei: bool,
 }
 
 impl NativMeet {
@@ -69,10 +73,14 @@ impl NativMeet {
         pass: &str,
         name: &str,
         fvid: &str,
+        steuerung: bool,
         mikro: Option<String>,
         lautsprecher: Option<String>,
     ) -> Result<NativMeet> {
-        let sig = meetsig::beitreten(basis, raum, pass, name, fvid)?;
+        // Die eigene Nummer merken wir uns IMMER (sonst liesse sich die
+        // Freigabe spaeter nicht mehr einschalten) - bekanntgegeben wird sie
+        // aber nur, wenn "Fernsteuerung anbieten" wirklich an ist.
+        let sig = meetsig::beitreten(basis, raum, pass, name, if steuerung { fvid } else { "" })?;
         let ton = meetrtc::starten()?;
         // Ohne Soundkarte (Server, Testrechner) laeuft das Meeting trotzdem -
         // man hoert dann nur nichts. Ehrlich melden statt abbrechen.
@@ -115,6 +123,8 @@ impl NativMeet {
             schirm_gesendet: 0,
             naechstes_schirmbild: std::time::Instant::now(),
             letztes_schluesselbild: std::time::Instant::now(),
+            ich_fvid: fvid.to_string(),
+            steuer_frei: steuerung && fvid.chars().any(|c| c.is_ascii_digit()),
         })
     }
 
@@ -201,6 +211,21 @@ impl NativMeet {
                 | meetsig::Ereignis::Beendet(m)
                 | meetsig::Ereignis::Abgewiesen(m) => {
                     self.meldung = m;
+                }
+                meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
+                    // Nicht ueber die eigene Freigabe selbst berichten.
+                    let ich = self.sig.zustand().ich;
+                    if peer != ich {
+                        let wer = self.name_von(peer);
+                        self.chat.push((
+                            0,
+                            if fvid.is_empty() {
+                                format!("{} hat die Steuerung zurueckgezogen", wer)
+                            } else {
+                                format!("{} erlaubt Fernsteuerung ({})", wer, fvid)
+                            },
+                        ));
+                    }
                 }
                 meetsig::Ereignis::Fehler { code, text } => {
                     self.meldung = format!("{}: {}", code, text);
@@ -525,6 +550,43 @@ impl NativMeet {
             .unwrap_or_else(|| format!("#{}", id))
     }
 
+    /// Stufe 4: eigene Fernsteuerung freigeben oder zuruecknehmen. Die
+    /// anderen bekommen dadurch einen Knopf, der eine echte FreeViewer-
+    /// Sitzung zu uns aufbaut - zugelassen wird sie trotzdem erst hier im
+    /// Programm, also nie hinter dem Ruecken des Besitzers.
+    pub fn steuerung_freigeben(&mut self, an: bool) {
+        // Ohne eigene Nummer waere die Freigabe wertlos - dann lieber melden.
+        if an && self.ich_fvid.chars().filter(|c| c.is_ascii_digit()).count() == 0 {
+            self.meldung = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
+            return;
+        }
+        self.steuer_frei = an;
+        self.sig.fernsteuerung(an, &self.ich_fvid);
+        self.chat.push((
+            0,
+            if an {
+                "Du erlaubst jetzt Fernsteuerung".into()
+            } else {
+                "Fernsteuerung zurueckgezogen".to_string()
+            },
+        ));
+    }
+
+    /// Wer im Raum laesst sich fernsteuern? (Teilnehmer, Name, FreeViewer-Nr.)
+    pub fn steuerbare(&self) -> Vec<(u64, String, String)> {
+        let z = self.sig.zustand();
+        z.leute
+            .iter()
+            .filter(|t| t.id != z.ich && !t.fvid.is_empty())
+            .map(|t| (t.id, t.name.clone(), t.fvid.clone()))
+            .collect()
+    }
+
+    /// Eigene FreeViewer-Nummer (fuer die Anzeige).
+    pub fn meine_fvid(&self) -> &str {
+        &self.ich_fvid
+    }
+
     pub fn bin_gastgeber(&self) -> bool {
         let z = self.sig.zustand();
         z.gastgeber != 0 && z.gastgeber == z.ich
@@ -547,7 +609,7 @@ mod tests {
     fn kamera_schalten_ohne_kamera_meldet_sauber() {
         // Server ohne Kamera: der Schalter muss eine Meldung setzen und
         // aus bleiben - kein Absturz, kein haengender Faden.
-        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", None, None);
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None);
         if let Ok(mut m) = r {
             m.kamera_schalten(true);
             #[cfg(not(windows))]
@@ -564,7 +626,7 @@ mod tests {
     #[test]
     fn schirm_schalten_ohne_bildschirm_meldet_sauber() {
         // Server ohne Bildschirm: sauber melden, nicht abstuerzen.
-        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", None, None);
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None);
         if let Ok(mut m) = r {
             m.schirm_schalten(true, 0);
             if !m.schirm_an {
@@ -572,6 +634,55 @@ mod tests {
             }
             m.schirm_schalten(false, 0);
             assert!(!m.schirm_an);
+            m.verlassen();
+        }
+    }
+
+    #[test]
+    fn steuerung_ohne_nummer_wird_nicht_freigegeben() {
+        // Ohne eigene FreeViewer-Nummer waere die Freigabe eine Luege:
+        // die anderen bekaemen einen Knopf, der ins Leere fuehrt.
+        let r = NativMeet::beitreten(
+            "http://127.0.0.1:1",
+            "000-000-000",
+            "x",
+            "T",
+            "",
+            true,
+            None,
+            None,
+        );
+        if let Ok(mut m) = r {
+            assert!(!m.steuer_frei, "ohne Nummer darf nichts freigegeben sein");
+            m.steuerung_freigeben(true);
+            assert!(!m.steuer_frei, "ohne Nummer darf die Freigabe nicht greifen");
+            assert!(!m.meldung.is_empty(), "keine Meldung");
+            m.verlassen();
+        }
+    }
+
+    #[test]
+    fn steuerung_mit_nummer_schaltet_um() {
+        let r = NativMeet::beitreten(
+            "http://127.0.0.1:1",
+            "000-000-000",
+            "x",
+            "T",
+            "497628420",
+            false,
+            None,
+            None,
+        );
+        if let Ok(mut m) = r {
+            assert!(!m.steuer_frei, "beim Beitreten war die Freigabe aus");
+            m.steuerung_freigeben(true);
+            assert!(m.steuer_frei, "Freigabe hat nicht gegriffen");
+            m.steuerung_freigeben(false);
+            assert!(!m.steuer_frei, "Zuruecknehmen hat nicht gegriffen");
+            assert_eq!(m.meine_fvid(), "497628420");
+            // Ohne Verbindung kennt der Raum niemanden - trotzdem darf die
+            // Liste nur laufen, nicht knallen.
+            assert!(m.steuerbare().is_empty());
             m.verlassen();
         }
     }
@@ -586,6 +697,7 @@ mod tests {
             "x",
             "Test",
             "",
+            false,
             None,
             None,
         );

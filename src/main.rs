@@ -221,6 +221,97 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Steuertest (Stufe 4): gibt der native Client die Fernsteuerung frei,
+    // und meldet er, wenn ein anderer sie freigibt? Der Browser bekommt
+    // dadurch seinen "Steuern"-Knopf - und wir hier die Gegenprobe.
+    //   freeviewer --meetsteuer <raum> <passwort> [name] [sekunden] [fvid]
+    if let Some(i) = std::env::args().position(|a| a == "--meetsteuer") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args
+            .get(i + 3)
+            .cloned()
+            .unwrap_or_else(|| "NativSteuer".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+        let fvid = args
+            .get(i + 5)
+            .cloned()
+            .unwrap_or_else(|| "497628420".to_string());
+        // Absichtlich OHNE Nummer beitreten: so laesst sich messen, dass der
+        // Knopf beim anderen erst durch die Freigabe entsteht.
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("STEUERTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let start = std::time::Instant::now();
+        let mut freigegeben = false;
+        let mut zurueck = false;
+        let mut angebote = 0u32;
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
+                        angebote += 1;
+                        println!(
+                            "STEUERTEST ANGEBOT peer={} fvid={}",
+                            peer,
+                            if fvid.is_empty() { "-" } else { fvid.as_str() }
+                        );
+                    }
+                    // Im Test sofort einlassen - sonst steht der Browser
+                    // vor der Tuer und nichts laesst sich messen.
+                    meetsig::Ereignis::WarteDazu { peer, .. } => {
+                        sig.warteraum("admit", Some(*peer))
+                    }
+                    meetsig::Ereignis::Dazu(t) => println!("STEUERTEST DAZU {}", t.name),
+                    _ => {}
+                }
+            }
+            if !freigegeben && sig.zustand().ich != 0 && start.elapsed().as_secs() >= 3 {
+                freigegeben = true;
+                sig.fernsteuerung(true, &fvid);
+                println!("STEUERTEST FREIGEGEBEN {}", fvid);
+            }
+            // Mitten im Lauf wieder zuruecknehmen: nur so laesst sich zeigen,
+            // dass der Knopf beim anderen auch WIEDER verschwindet - waeren
+            // wir dafuer rausgegangen, waere es kein Beweis, sondern nur das
+            // uebliche Aufraeumen.
+            if freigegeben
+                && !zurueck
+                && start.elapsed().as_secs() >= dauer.saturating_sub(8).max(9)
+            {
+                zurueck = true;
+                sig.fernsteuerung(false, "");
+                println!("STEUERTEST ZURUECKGENOMMEN");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let z = sig.zustand();
+        for t in z.leute.iter() {
+            if !t.fvid.is_empty() {
+                println!("STEUERTEST STEUERBAR {} {}", t.name, t.fvid);
+            }
+        }
+        println!(
+            "STEUERTEST ZUSTAND ich={} leute={} angebote={}",
+            z.ich,
+            z.leute.len(),
+            angebote
+        );
+        if !zurueck {
+            sig.fernsteuerung(false, "");
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        println!("STEUERTEST FERTIG");
+        return Ok(());
+    }
+
     // Empfangstest (Stufe 3b): was kommt beim nativen Client AN - und wird
     // Kamera sauber von Bildschirm getrennt?
     //   freeviewer --meetempfang <raum> <passwort> [name] [sekunden]
@@ -3255,6 +3346,11 @@ impl App {
                                     &m.passwort,
                                     &name,
                                     &me,
+                                    // Bisher ging die eigene Nummer IMMER mit -
+                                    // die Einstellung "Fernsteuerung anbieten"
+                                    // galt nur fuer den Browser-Weg. Jetzt gilt
+                                    // sie auch nativ.
+                                    self.meet_offer_control,
                                     mic,
                                     None,
                                 ) {
@@ -3279,6 +3375,8 @@ impl App {
                             let mut kamera_um = None;
                             let mut schirm_um = None;
                             let mut hand_um = None;
+                            let mut steuer_um = None;
+                            let mut steuern_zu: Option<(String, String)> = None;
                             let mut senden = false;
                             if let Some(n) = self.nativ_meet.as_mut() {
                                 n.pumpe();
@@ -3359,6 +3457,23 @@ impl App {
                                         .clicked()
                                     {
                                         hand_um = Some(!n.hand);
+                                    }
+                                    // Stufe 4: der Browser kann Bild und Ton,
+                                    // aber niemals fremde Maus und Tastatur.
+                                    // Wer steuern lassen will, gibt hier frei -
+                                    // zugelassen wird die Sitzung trotzdem noch
+                                    // einmal im Programm selbst.
+                                    if ghost_button(
+                                        ui,
+                                        if n.steuer_frei {
+                                            "Steuerung sperren"
+                                        } else {
+                                            "Steuerung freigeben"
+                                        },
+                                    )
+                                    .clicked()
+                                    {
+                                        steuer_um = Some(!n.steuer_frei);
                                     }
                                     if ghost_button(ui, "Verlassen").clicked() {
                                         verlassen = true;
@@ -3566,15 +3681,34 @@ impl App {
                                         .color(p.muted),
                                 );
                                 for t in &z.leute {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}{}{}",
-                                            t.name,
-                                            if t.ton_aus { "  (stumm)" } else { "" },
-                                            if t.hand { "  (meldet sich)" } else { "" }
-                                        ))
-                                        .size(11.5),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{}{}{}",
+                                                t.name,
+                                                if t.ton_aus { "  (stumm)" } else { "" },
+                                                if t.hand { "  (meldet sich)" } else { "" }
+                                            ))
+                                            .size(11.5),
+                                        );
+                                        // Hat der andere die Steuerung
+                                        // freigegeben, steht hier der Knopf -
+                                        // er baut eine echte FreeViewer-
+                                        // Sitzung auf, nicht bloss eine
+                                        // Bildschirmansicht im Meeting.
+                                        if !t.fvid.is_empty() {
+                                            if ghost_button(ui, "Steuern")
+                                                .on_hover_text(format!(
+                                                    "{} mit FreeViewer fernsteuern ({})",
+                                                    t.name, t.fvid
+                                                ))
+                                                .clicked()
+                                            {
+                                                steuern_zu =
+                                                    Some((t.fvid.clone(), t.name.clone()));
+                                            }
+                                        }
+                                    });
                                 }
                                 // Warteraum (nur der Gastgeber sieht das)
                                 if !z.wartende.is_empty() {
@@ -3652,6 +3786,20 @@ impl App {
                                 if let Some(n) = self.nativ_meet.as_mut() {
                                     n.hand_heben(v);
                                 }
+                            }
+                            if let Some(v) = steuer_um {
+                                if let Some(n) = self.nativ_meet.as_mut() {
+                                    n.steuerung_freigeben(v);
+                                }
+                            }
+                            if let Some((fvid, wer)) = steuern_zu {
+                                // Aus dem Meeting heraus direkt in die Sitzung:
+                                // Hauptfenster nach vorn, Start-Seite, verbinden.
+                                self.view = View::Start;
+                                self.hint = i18n::tf("link.control", &partners::pretty_id(&fvid));
+                                self.meet_win.toast =
+                                    Some((format!("Steuere {}", wer), std::time::Instant::now()));
+                                self.connect_to(&fvid);
                             }
                             if senden {
                                 if let Some(n) = self.nativ_meet.as_mut() {

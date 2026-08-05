@@ -157,6 +157,8 @@ enum Befehl {
     Warteraum { aktion: String, peer: Option<u64> },
     Gastgeber { aktion: String, peer: Option<u64> },
     Bildschirm(bool),
+    /// Fernsteuerung anbieten/zurueckziehen. Leere fvid = zurueckgezogen.
+    Fernsteuerung { an: bool, fvid: String },
     /// Rohes JSON - dafuer da, dass Stufe 2 (Angebot/Antwort) nichts umbauen muss.
     Roh(serde_json::Value),
     Verlassen,
@@ -216,6 +218,14 @@ impl Sitzung {
     }
     pub fn bildschirm(&self, an: bool) {
         let _ = self.befehle.send(Befehl::Bildschirm(an));
+    }
+    /// Fernsteuerung ueber FreeViewer anbieten (`an`) oder zuruecknehmen.
+    /// `fvid` ist die eigene FreeViewer-Nummer; beim Zuruecknehmen egal.
+    pub fn fernsteuerung(&self, an: bool, fvid: &str) {
+        let _ = self.befehle.send(Befehl::Fernsteuerung {
+            an,
+            fvid: fvid.to_string(),
+        });
     }
     /// aktion: "admit" | "admit-all" | "deny" | "on" | "off"
     pub fn warteraum(&self, aktion: &str, peer: Option<u64>) {
@@ -385,6 +395,12 @@ async fn lauf(
                     Befehl::Hand(an) => Some(json!({"t":"hand","on":an})),
                     Befehl::Stumm { art, an } => Some(json!({"t":"mute","kind":art,"on":an})),
                     Befehl::Bildschirm(an) => Some(json!({"t":"screen","on":an})),
+                    Befehl::Fernsteuerung { an, fvid } => {
+                        // Nur Ziffern raus - die Nummer kommt aus der eigenen
+                        // Einstellung, aber der Server erwartet sie sauber.
+                        let nr: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
+                        Some(json!({"t":"remote","on":an,"fvid": if an { nr } else { String::new() }}))
+                    }
                     Befehl::Warteraum { aktion, peer } => {
                         Some(json!({"t":"lobby","action":aktion,"peer":peer}))
                     }
