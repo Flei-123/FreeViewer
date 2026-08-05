@@ -1,0 +1,669 @@
+//! Natives Meeting - Stufe 2d: die ECHTE Kamera.
+//!
+//! Bisher ging ein Testmuster ins Meeting (Stufe 2b). Hier kommt das Bild
+//! jetzt von der Kamera - unter Windows ueber Media Foundation, also
+//! genau die Maschine, die der Browser auch benutzt. Der Aufnahmefaden
+//! haelt immer nur das NEUESTE Bild bereit; wer langsamer abholt,
+//! ueberspringt Bilder, statt einen Rueckstau zu bauen.
+//!
+//! Geliefert wird dicht gepacktes NV12 in genau der gewuenschten Groesse.
+//! Kann die Kamera das Format/die Groesse nicht, wird hier zugeschnitten
+//! und verkleinert - so bekommt der H.264-Kodierer immer das, was er
+//! erwartet, egal welche Kamera steckt.
+//!
+//! macOS folgt in Stufe 5 (AVFoundation), Linux hat hier nichts zu tun.
+
+use anyhow::{anyhow, Result};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Eine gefundene Kamera.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Geraet {
+    pub name: String,
+    /// Eindeutiger Pfad des Geraetes (Windows: symbolischer Link).
+    pub id: String,
+}
+
+/// Ein Bild in dicht gepacktem NV12 (Y-Ebene, dann UV verschraenkt).
+#[derive(Clone)]
+pub struct Bild {
+    pub breite: u32,
+    pub hoehe: u32,
+    pub nv12: Vec<u8>,
+}
+
+/// NV12 mit Zeilenabstand in dicht gepacktes NV12 kopieren.
+///
+/// Media Foundation liefert Zeilen oft breiter als das Bild (stride), weil
+/// die Grafikkarte das so mag. Der Kodierer will es dicht gepackt.
+pub fn nv12_packen(src: &[u8], stride: usize, w: u32, h: u32, out: &mut Vec<u8>) -> bool {
+    let (wu, hu) = (w as usize, h as usize);
+    if wu == 0 || hu == 0 || stride < wu {
+        return false;
+    }
+    // Y: h Zeilen, UV: h/2 Zeilen - beides mit demselben Zeilenabstand.
+    let noetig = stride * hu + stride * (hu / 2);
+    if src.len() < noetig {
+        return false;
+    }
+    out.clear();
+    out.reserve(wu * hu * 3 / 2);
+    for y in 0..hu {
+        let a = y * stride;
+        out.extend_from_slice(&src[a..a + wu]);
+    }
+    let uv0 = stride * hu;
+    for y in 0..hu / 2 {
+        let a = uv0 + y * stride;
+        out.extend_from_slice(&src[a..a + wu]);
+    }
+    true
+}
+
+/// Mittigen Ausschnitt im Zielverhaeltnis nehmen und auf die Zielgroesse
+/// verkleinern (Flaechenmittel, damit es nicht flimmert).
+///
+/// Warum zuschneiden statt quetschen: ein 16:9-Bild in ein 4:3-Fenster
+/// gequetscht macht lange Gesichter. Zoom/Teams schneiden ebenfalls zu.
+pub fn nv12_zuschneiden_skalieren(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    zw: u32,
+    zh: u32,
+    out: &mut Vec<u8>,
+) -> bool {
+    if sw < 2 || sh < 2 || zw < 2 || zh < 2 {
+        return false;
+    }
+    let (swu, shu) = (sw as usize, sh as usize);
+    if src.len() < swu * shu * 3 / 2 {
+        return false;
+    }
+    let (zwu, zhu) = (zw as usize, zh as usize);
+    // Ausschnitt im Zielverhaeltnis, immer gerade Kanten (NV12 braucht das).
+    let (mut cw, mut ch) = (swu, shu);
+    if sw as u64 * zh as u64 > zw as u64 * sh as u64 {
+        cw = ((shu * zwu) / zhu) & !1;
+    } else {
+        ch = ((swu * zhu) / zwu) & !1;
+    }
+    let cw = cw.max(2).min(swu) & !1;
+    let ch = ch.max(2).min(shu) & !1;
+    let cx = ((swu - cw) / 2) & !1;
+    let cy = ((shu - ch) / 2) & !1;
+
+    out.clear();
+    out.resize(zwu * zhu * 3 / 2, 0);
+    // --- Y ---
+    for ty in 0..zhu {
+        let y0 = cy + ty * ch / zhu;
+        let y1 = (cy + (ty + 1) * ch / zhu).max(y0 + 1).min(cy + ch);
+        for tx in 0..zwu {
+            let x0 = cx + tx * cw / zwu;
+            let x1 = (cx + (tx + 1) * cw / zwu).max(x0 + 1).min(cx + cw);
+            let mut summe = 0u32;
+            let mut n = 0u32;
+            for y in y0..y1 {
+                let row = y * swu;
+                for x in x0..x1 {
+                    summe += src[row + x] as u32;
+                    n += 1;
+                }
+            }
+            out[ty * zwu + tx] = (summe / n.max(1)) as u8;
+        }
+    }
+    // --- UV (halbe Aufloesung, U und V abwechselnd) ---
+    let uv_src = swu * shu;
+    let uv_dst = zwu * zhu;
+    let (cw2, ch2, cx2, cy2) = (cw / 2, ch / 2, cx / 2, cy / 2);
+    let sw2 = swu / 2;
+    for ty in 0..zhu / 2 {
+        let y0 = cy2 + ty * ch2 / (zhu / 2);
+        let y1 = (cy2 + (ty + 1) * ch2 / (zhu / 2)).max(y0 + 1).min(cy2 + ch2);
+        for tx in 0..zwu / 2 {
+            let x0 = cx2 + tx * cw2 / (zwu / 2);
+            let x1 = (cx2 + (tx + 1) * cw2 / (zwu / 2)).max(x0 + 1).min(cx2 + cw2);
+            let (mut su, mut sv, mut n) = (0u32, 0u32, 0u32);
+            for y in y0..y1 {
+                let row = uv_src + y * sw2 * 2;
+                for x in x0..x1 {
+                    su += src[row + x * 2] as u32;
+                    sv += src[row + x * 2 + 1] as u32;
+                    n += 1;
+                }
+            }
+            let o = uv_dst + ty * zwu + tx * 2;
+            out[o] = (su / n.max(1)) as u8;
+            out[o + 1] = (sv / n.max(1)) as u8;
+        }
+    }
+    true
+}
+
+/// Laeuft im Hintergrund und haelt das neueste Kamerabild bereit.
+pub struct Kamera {
+    pub name: String,
+    pub breite: u32,
+    pub hoehe: u32,
+    neu: Arc<Mutex<Option<Bild>>>,
+    zaehler: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    fehler: Arc<Mutex<String>>,
+}
+
+impl Kamera {
+    /// Das neueste Bild abholen (und aus dem Puffer nehmen). Kommt None,
+    /// gibt es seit dem letzten Abholen kein neues.
+    pub fn neuestes(&self) -> Option<Bild> {
+        self.neu.lock().ok().and_then(|mut b| b.take())
+    }
+
+    /// Wie viele Bilder hat die Kamera bisher geliefert.
+    pub fn aufgenommen(&self) -> u64 {
+        self.zaehler.load(Ordering::Relaxed)
+    }
+
+    pub fn fehler(&self) -> String {
+        self.fehler.lock().map(|f| f.clone()).unwrap_or_default()
+    }
+
+    pub fn stoppen(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Kamera {
+    fn drop(&mut self) {
+        self.stoppen();
+    }
+}
+
+/// Alle Kameras des Rechners.
+pub fn liste() -> Vec<Geraet> {
+    #[cfg(windows)]
+    {
+        win::liste()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Kamera oeffnen. `id` leer = erste Kamera. Geliefert wird immer genau
+/// `breite` x `hoehe` in NV12.
+pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<Kamera> {
+    let breite = breite & !1;
+    let hoehe = hoehe & !1;
+    if breite < 2 || hoehe < 2 {
+        return Err(anyhow!("unsinnige Bildgroesse"));
+    }
+    #[cfg(windows)]
+    {
+        let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
+        let zaehler = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let fehler = Arc::new(Mutex::new(String::new()));
+        let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
+        let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+        std::thread::Builder::new()
+            .name("kamera".into())
+            .spawn(move || win::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2))
+            .map_err(|e| anyhow!("Kamerafaden: {}", e))?;
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(name)) => Ok(Kamera {
+                name,
+                breite,
+                hoehe,
+                neu,
+                zaehler,
+                stop,
+                fehler,
+            }),
+            Ok(Err(e)) => Err(anyhow!(e)),
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                Err(anyhow!("Kamera antwortet nicht"))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, fps);
+        Err(anyhow!(
+            "Kamera auf dieser Plattform noch nicht angebunden (Stufe 5: macOS)"
+        ))
+    }
+}
+
+// ------------------------------------------------------------- windows -----
+
+#[cfg(windows)]
+mod win {
+    use super::{Bild, Geraet};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, Once};
+    use windows::core::{Interface, GUID, PWSTR};
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+    };
+
+    static MF_INIT: Once = Once::new();
+
+    fn mf_startup() {
+        MF_INIT.call_once(|| unsafe {
+            let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        });
+    }
+
+    fn pack(a: u32, b: u32) -> u64 {
+        ((a as u64) << 32) | b as u64
+    }
+
+    unsafe fn text(a: &IMFActivate, schluessel: &GUID) -> String {
+        let mut p = PWSTR::null();
+        let mut len = 0u32;
+        if a.GetAllocatedString(schluessel, &mut p, &mut len).is_err() {
+            return String::new();
+        }
+        let s = p.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    }
+
+    /// Kameras auflisten. Ruft `f` fuer jede auf; liefert `f`s erstes
+    /// Some-Ergebnis (so laesst sich in einem Rutsch suchen ODER listen).
+    unsafe fn mit_kameras<T>(mut f: impl FnMut(&IMFActivate, &str, &str) -> Option<T>) -> Option<T> {
+        mf_startup();
+        let mut attrs: Option<IMFAttributes> = None;
+        if MFCreateAttributes(&mut attrs, 1).is_err() {
+            return None;
+        }
+        let attrs = attrs?;
+        if attrs
+            .SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )
+            .is_err()
+        {
+            return None;
+        }
+        let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        if MFEnumDeviceSources(&attrs, &mut list, &mut count).is_err() || list.is_null() {
+            return None;
+        }
+        let mut gefunden = None;
+        for i in 0..count as usize {
+            if gefunden.is_none() {
+                if let Some(a) = (*list.add(i)).as_ref() {
+                    let name = text(a, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
+                    let id = text(a, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK);
+                    gefunden = f(a, &name, &id);
+                }
+            }
+        }
+        for i in 0..count as usize {
+            std::ptr::drop_in_place(list.add(i));
+        }
+        CoTaskMemFree(Some(list as *const _));
+        gefunden
+    }
+
+    pub fn liste() -> Vec<Geraet> {
+        let mut out: Vec<Geraet> = Vec::new();
+        unsafe {
+            // Nie Some liefern -> laeuft durch alle Geraete.
+            mit_kameras::<()>(|_, name, id| {
+                out.push(Geraet {
+                    name: name.to_string(),
+                    id: id.to_string(),
+                });
+                None
+            });
+        }
+        out
+    }
+
+    /// Der Aufnahmefaden. Lebt so lange, bis `stop` gesetzt wird.
+    #[allow(clippy::too_many_arguments)]
+    pub fn schleife(
+        id: Option<String>,
+        zw: u32,
+        zh: u32,
+        fps: u32,
+        tx: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+        neu: Arc<Mutex<Option<Bild>>>,
+        zaehler: Arc<AtomicU64>,
+        stop: Arc<AtomicBool>,
+        fehler: Arc<Mutex<String>>,
+    ) {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop, &fehler);
+            if let Err(e) = r {
+                // Wenn der Start schon scheiterte, hat der Aufrufer noch
+                // nichts bekommen - die Meldung muss zu ihm.
+                let _ = tx.send(Err(e.clone()));
+                if let Ok(mut f) = fehler.lock() {
+                    *f = e;
+                }
+            }
+            CoUninitialize();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn schleife_inner(
+        id: Option<String>,
+        zw: u32,
+        zh: u32,
+        fps: u32,
+        tx: &std::sync::mpsc::Sender<std::result::Result<String, String>>,
+        neu: &Arc<Mutex<Option<Bild>>>,
+        zaehler: &Arc<AtomicU64>,
+        stop: &Arc<AtomicBool>,
+        fehler: &Arc<Mutex<String>>,
+    ) -> std::result::Result<(), String> {
+        mf_startup();
+        let gesucht = id.unwrap_or_default();
+        let treffer = mit_kameras(|a, name, gid| {
+            if gesucht.is_empty()
+                || gid.eq_ignore_ascii_case(&gesucht)
+                || name.to_lowercase().contains(&gesucht.to_lowercase())
+            {
+                match a.ActivateObject::<IMFMediaSource>() {
+                    Ok(src) => Some(Ok((src, name.to_string()))),
+                    Err(e) => Some(Err(format!("Kamera {} laesst sich nicht oeffnen: {}", name, e))),
+                }
+            } else {
+                None
+            }
+        });
+        let (quelle, name) = match treffer {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => return Err(e),
+            None => return Err("keine Kamera gefunden".to_string()),
+        };
+
+        // Der Leser darf umrechnen (Farbformat, Groesse) - sonst muessten
+        // wir MJPEG selbst dekodieren.
+        let mut attrs: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attrs, 2).map_err(|e| format!("Attribute: {}", e))?;
+        let attrs = attrs.ok_or_else(|| "Attribute leer".to_string())?;
+        let _ = attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1);
+        let _ = attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
+        let leser = MFCreateSourceReaderFromMediaSource(&quelle, &attrs)
+            .map_err(|e| format!("Leser: {}", e))?;
+        let strom = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+
+        // Zuerst genau die gewuenschte Groesse versuchen; klappt das nicht,
+        // nur das Format festlegen und selbst verkleinern.
+        let mut skalieren = false;
+        let mt = MFCreateMediaType().map_err(|e| format!("Medientyp: {}", e))?;
+        mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .map_err(|e| format!("Haupttyp: {}", e))?;
+        mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+            .map_err(|e| format!("Untertyp: {}", e))?;
+        let _ = mt.SetUINT64(&MF_MT_FRAME_SIZE, pack(zw, zh));
+        if fps > 0 {
+            let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1));
+        }
+        if leser.SetCurrentMediaType(strom, None, &mt).is_err() {
+            skalieren = true;
+            let mt2 = MFCreateMediaType().map_err(|e| format!("Medientyp2: {}", e))?;
+            mt2.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(|e| format!("Haupttyp2: {}", e))?;
+            mt2.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+                .map_err(|e| format!("Untertyp2: {}", e))?;
+            leser
+                .SetCurrentMediaType(strom, None, &mt2)
+                .map_err(|e| format!("Kamera kann kein NV12: {}", e))?;
+        }
+        let _ = leser.SetStreamSelection(strom, true);
+
+        // Was liefert die Kamera nun wirklich?
+        let (mut qw, mut qh) = groesse(&leser, strom).unwrap_or((zw, zh));
+        if qw != zw || qh != zh {
+            skalieren = true;
+        }
+        let _ = tx.send(Ok(name));
+
+        let mut roh: Vec<u8> = Vec::new();
+        let mut fertig: Vec<u8> = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let mut flags = 0u32;
+            let mut ts = 0i64;
+            let mut sample: Option<IMFSample> = None;
+            if let Err(e) = leser.ReadSample(
+                strom,
+                0,
+                None,
+                Some(&mut flags),
+                Some(&mut ts),
+                Some(&mut sample),
+            ) {
+                if let Ok(mut f) = fehler.lock() {
+                    *f = format!("lesen: {}", e);
+                }
+                break;
+            }
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                if let Ok(mut f) = fehler.lock() {
+                    *f = "Kamera hat den Strom beendet".into();
+                }
+                break;
+            }
+            if flags
+                & (MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32
+                    | MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED.0 as u32)
+                != 0
+            {
+                if let Some((w, h)) = groesse(&leser, strom) {
+                    qw = w;
+                    qh = h;
+                    skalieren = qw != zw || qh != zh;
+                }
+            }
+            let s = match sample {
+                Some(s) => s,
+                None => continue, // Kamera hat gerade nichts (Pause/Tick)
+            };
+            if !bild_holen(&s, qw, qh, &mut roh) {
+                continue;
+            }
+            let bild = if skalieren {
+                if !super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig) {
+                    continue;
+                }
+                Bild {
+                    breite: zw,
+                    hoehe: zh,
+                    nv12: fertig.clone(),
+                }
+            } else {
+                Bild {
+                    breite: zw,
+                    hoehe: zh,
+                    nv12: roh.clone(),
+                }
+            };
+            zaehler.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut b) = neu.lock() {
+                *b = Some(bild);
+            }
+        }
+        let _ = leser.Flush(strom);
+        let _ = quelle.Shutdown();
+        Ok(())
+    }
+
+    unsafe fn groesse(leser: &IMFSourceReader, strom: u32) -> Option<(u32, u32)> {
+        let cur = leser.GetCurrentMediaType(strom).ok()?;
+        let sz = cur.GetUINT64(&MF_MT_FRAME_SIZE).ok()?;
+        let w = (sz >> 32) as u32;
+        let h = (sz & 0xffff_ffff) as u32;
+        if w < 2 || h < 2 {
+            return None;
+        }
+        Some((w & !1, h & !1))
+    }
+
+    /// Kopiert ein Sample in dicht gepacktes NV12.
+    unsafe fn bild_holen(s: &IMFSample, w: u32, h: u32, out: &mut Vec<u8>) -> bool {
+        let noetig = (w as usize) * (h as usize) * 3 / 2;
+        let buf = match s.ConvertToContiguousBuffer() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        // Der 2D-Weg kennt den Zeilenabstand - der sichere Weg.
+        let vorhanden = buf
+            .GetCurrentLength()
+            .ok()
+            .filter(|v| *v > 0)
+            .or_else(|| buf.GetMaxLength().ok())
+            .unwrap_or(0) as usize;
+        if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
+            let mut zeile0: *mut u8 = std::ptr::null_mut();
+            let mut pitch = 0i32;
+            if b2.Lock2D(&mut zeile0, &mut pitch).is_ok() {
+                let ok = if pitch > 0 && !zeile0.is_null() {
+                    let stride = pitch as usize;
+                    let gebraucht = stride * (h as usize) * 3 / 2;
+                    // Nie mehr lesen, als der Puffer wirklich hergibt.
+                    if vorhanden >= gebraucht {
+                        let quelle = std::slice::from_raw_parts(zeile0, gebraucht);
+                        super::nv12_packen(quelle, stride, w, h, out)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let _ = b2.Unlock2D();
+                if ok {
+                    return true;
+                }
+            }
+        }
+        // Rueckfall: flach sperren. Laut Doku liefert Lock() bei
+        // 2D-Puffern bereits dicht gepackte Daten.
+        let mut p: *mut u8 = std::ptr::null_mut();
+        let mut len = 0u32;
+        if buf.Lock(&mut p, None, Some(&mut len)).is_err() || p.is_null() {
+            return false;
+        }
+        let ok = if len as usize >= noetig {
+            out.clear();
+            out.extend_from_slice(std::slice::from_raw_parts(p, noetig));
+            true
+        } else {
+            false
+        };
+        let _ = buf.Unlock();
+        ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liste_stuerzt_nicht_ab() {
+        // Auf dem Server ohne Kamera muss das eine leere Liste geben.
+        let l = liste();
+        println!("Kameras: {}", l.len());
+    }
+
+    #[test]
+    fn packen_entfernt_den_zeilenabstand() {
+        let (w, h, stride) = (4u32, 4u32, 8usize);
+        // Y-Zeilen 0..3, dann UV-Zeilen 0..1 - je Zeile 8 Bytes, davon 4 Muell.
+        let mut src = vec![0u8; stride * (h as usize) * 3 / 2];
+        for y in 0..6 {
+            for x in 0..8 {
+                src[y * stride + x] = if x < 4 { (y * 10 + x) as u8 } else { 0xEE };
+            }
+        }
+        let mut out = Vec::new();
+        assert!(nv12_packen(&src, stride, w, h, &mut out));
+        assert_eq!(out.len(), 4 * 4 * 3 / 2);
+        assert!(!out.contains(&0xEE), "Muell aus dem Zeilenabstand kopiert");
+        assert_eq!(&out[0..4], &[0, 1, 2, 3]);
+        assert_eq!(&out[16..20], &[40, 41, 42, 43]); // erste UV-Zeile
+    }
+
+    #[test]
+    fn packen_meldet_zu_kleine_puffer() {
+        let src = vec![0u8; 10];
+        let mut out = Vec::new();
+        assert!(!nv12_packen(&src, 8, 4, 4, &mut out));
+    }
+
+    #[test]
+    fn skalieren_haelt_die_farbe() {
+        // Gleichmaessiges Bild: nach dem Verkleinern muss dasselbe rauskommen.
+        let (sw, sh) = (640u32, 480u32);
+        let mut src = vec![0u8; (sw * sh * 3 / 2) as usize];
+        for v in src[..(sw * sh) as usize].iter_mut() {
+            *v = 120;
+        }
+        for v in src[(sw * sh) as usize..].iter_mut() {
+            *v = 90;
+        }
+        let mut out = Vec::new();
+        assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 320, 180, &mut out));
+        assert_eq!(out.len(), 320 * 180 * 3 / 2);
+        assert!(out[..320 * 180].iter().all(|v| *v == 120), "Y verfaelscht");
+        assert!(out[320 * 180..].iter().all(|v| *v == 90), "UV verfaelscht");
+    }
+
+    #[test]
+    fn skalieren_schneidet_mittig_zu() {
+        // 640x480 (4:3) -> 320x180 (16:9): oben/unten muss wegfallen,
+        // die Mitte muss uebrig bleiben.
+        let (sw, sh) = (640u32, 480u32);
+        let mut src = vec![128u8; (sw * sh * 3 / 2) as usize];
+        // obere und untere 60 Zeilen markieren - genau die, die der
+        // Zuschnitt 4:3 -> 16:9 wegnehmen muss.
+        for y in 0..60 {
+            for x in 0..sw as usize {
+                src[y * sw as usize + x] = 0;
+                src[(sh as usize - 1 - y) * sw as usize + x] = 255;
+            }
+        }
+        let mut out = Vec::new();
+        assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 320, 180, &mut out));
+        // Zielverhaeltnis 16:9 -> Ausschnitt 640x360, also 60 Zeilen oben weg.
+        assert!(
+            out[..320 * 180].iter().all(|v| *v > 0 && *v < 255),
+            "Rand nicht abgeschnitten"
+        );
+    }
+
+    #[test]
+    fn skalieren_merkt_unsinn() {
+        let src = vec![0u8; 100];
+        let mut out = Vec::new();
+        assert!(!nv12_zuschneiden_skalieren(&src, 640, 480, 320, 180, &mut out));
+        assert!(!nv12_zuschneiden_skalieren(&src, 0, 0, 320, 180, &mut out));
+    }
+
+    #[test]
+    fn oeffnen_ohne_kamera_meldet_sauber() {
+        // Ohne Kamera (Server) muss ein Fehler kommen, kein Absturz.
+        match oeffnen(None, 640, 360, 15) {
+            Ok(k) => {
+                println!("Kamera da: {}", k.name);
+                k.stoppen();
+            }
+            Err(e) => assert!(!e.to_string().is_empty()),
+        }
+    }
+}

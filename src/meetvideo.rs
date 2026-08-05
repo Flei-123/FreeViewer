@@ -95,6 +95,25 @@ impl Kodierer {
         })
     }
 
+    /// Ein fertiges NV12-Bild hineingeben (so liefert es die Kamera) -
+    /// spart die Umrechnung RGB->NV12 komplett.
+    pub fn nv12_rahmen(&mut self, nv12: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
+        let erwartet = (self.breite as usize) * (self.hoehe as usize) * 3 / 2;
+        if nv12.len() < erwartet {
+            return Err(anyhow!(
+                "NV12 zu klein: {} statt {}",
+                nv12.len(),
+                erwartet
+            ));
+        }
+        let aus = self
+            .enc
+            .encode(&nv12[..erwartet])
+            .map_err(|e| anyhow!("kodieren: {}", e))?;
+        self.bilder += 1;
+        Ok(aus)
+    }
+
     /// Ein RGB-Bild hineingeben, fertige H.264-Pakete herausbekommen.
     pub fn rahmen(&mut self, rgb: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
         crate::h264::rgb_to_nv12(rgb, self.breite, self.hoehe, &mut self.nv12);

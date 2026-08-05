@@ -32,6 +32,7 @@ mod meetrtc;
 mod meetaudio;
 mod meetui;
 mod meetvideo;
+mod meetcam;
 mod input;
 mod net;
 mod p2p;
@@ -286,6 +287,153 @@ fn main() -> eframe::Result<()> {
         sig.verlassen();
         std::thread::sleep(std::time::Duration::from_millis(400));
         println!("EMPFANG FERTIG");
+        return Ok(());
+    }
+
+    // Kameraliste (Stufe 2d): welche Kameras sieht der Rechner?
+    //   freeviewer --kameraliste
+    if std::env::args().any(|a| a == "--kameraliste") {
+        let l = meetcam::liste();
+        println!("KAMERAS {}", l.len());
+        for (i, k) in l.iter().enumerate() {
+            println!("KAMERA {} name={} id={}", i, k.name, k.id);
+        }
+        return Ok(());
+    }
+
+    // Kameratest (Stufe 2d): ECHTES Kamerabild als H.264 ins Meeting.
+    //   freeviewer --meetkamera <raum> <passwort> [name] [sekunden] [kamera]
+    if let Some(i) = std::env::args().position(|a| a == "--meetkamera") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args
+            .get(i + 3)
+            .cloned()
+            .unwrap_or_else(|| "NativKamera".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+        let welche = args.get(i + 5).cloned().filter(|s| !s.is_empty());
+        for (n, k) in meetcam::liste().iter().enumerate() {
+            println!("KAMERA {} name={}", n, k.name);
+        }
+        let kam = match meetcam::oeffnen(welche, meetvideo::BREITE, meetvideo::HOEHE, 30) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("KAMERATEST FEHLER Kamera: {}", e);
+                return Ok(());
+            }
+        };
+        println!("KAMERA OFFEN name={} {}x{}", kam.name, kam.breite, kam.hoehe);
+        let mut koder = match meetvideo::Kodierer::neu(kam.breite, kam.hoehe, 15, 1_500_000) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("KAMERATEST FEHLER Kodierer: {}", e);
+                return Ok(());
+            }
+        };
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("KAMERATEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("KAMERATEST FEHLER Ton: {}", e);
+                return Ok(());
+            }
+        };
+        let mut angeboten = false;
+        let mut pakete: u64 = 0;
+        let mut gesendet: u64 = 0;
+        // Zwei Messwerte, damit "es kam ein Bild" belegbar ist: mittlere
+        // Helligkeit (nicht schwarz) und Unterschied zum Vorbild (bewegt).
+        let mut hell_summe = 0f64;
+        let mut bewegung = 0f64;
+        let mut vorbild: Vec<u8> = Vec::new();
+        let start = std::time::Instant::now();
+        let mut naechstes = std::time::Instant::now();
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
+                        println!("EREIGNIS Antwort eingespielt");
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    _ => {}
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+            }
+            for te in ton.abholen() {
+                if let meetrtc::TonEreignis::Verbunden = te {
+                    println!("EREIGNIS Ton verbunden");
+                }
+            }
+            // 15 Bilder je Sekunde senden - das neueste, das die Kamera hat.
+            if std::time::Instant::now() >= naechstes {
+                naechstes += std::time::Duration::from_millis(66);
+                if let Some(b) = kam.neuestes() {
+                    let y = &b.nv12[..(b.breite * b.hoehe) as usize];
+                    hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
+                    if vorbild.len() == y.len() {
+                        let d: f64 = y
+                            .iter()
+                            .zip(vorbild.iter())
+                            .map(|(a, c)| (*a as i32 - *c as i32).unsigned_abs() as f64)
+                            .sum::<f64>()
+                            / y.len() as f64;
+                        bewegung += d;
+                    }
+                    vorbild = y.to_vec();
+                    gesendet += 1;
+                    match koder.nv12_rahmen(&b.nv12) {
+                        Ok(teile) => {
+                            for t in teile {
+                                pakete += 1;
+                                ton.bild_senden(t.data);
+                            }
+                        }
+                        Err(e) => println!("KODIER-FEHLER {}", e),
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let z = ton.zahlen();
+        println!(
+            "ZAHLEN kamera={} aufgenommen={} verwendet={} kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={} helligkeit={:.1} bewegung={:.2} fehler={}",
+            kam.name,
+            kam.aufgenommen(),
+            gesendet,
+            koder.bilder,
+            pakete,
+            z.bild_gesendet,
+            z.bild_empfangen,
+            z.bytes_raus,
+            if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
+            if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
+            kam.fehler()
+        );
+        kam.stoppen();
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        println!("KAMERATEST FERTIG");
         return Ok(());
     }
 
