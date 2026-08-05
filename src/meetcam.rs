@@ -368,9 +368,10 @@ mod mac {
             Some(n) => CameraIndex::Index(n),
             None => CameraIndex::Index(0),
         };
-        let wunsch = RequestedFormat::new::<RgbFormat>(RequestedFormatType::ClosestToWithFrameRate(
+        // Naechstbeste Einstellung zu Wunschgroesse und -bildrate. NV12 ist
+        // das, was Kameras am haeufigsten koennen; nokhwa rechnet notfalls um.
+        let wunsch = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
             CameraFormat::new(Resolution::new(breite, hoehe), FrameFormat::NV12, fps),
-            fps as f32,
         ));
         let mut kamera = match Camera::new(welche, wunsch) {
             Ok(k) => k,
