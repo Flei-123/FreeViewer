@@ -302,6 +302,115 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Empfangstest (Stufe 3b): was kommt beim nativen Client AN - und wird
+    // Kamera sauber von Bildschirm getrennt?
+    //   freeviewer --meetempfang <raum> <passwort> [name] [sekunden]
+    if let Some(i) = std::env::args().position(|a| a == "--meetempfang") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args
+            .get(i + 3)
+            .cloned()
+            .unwrap_or_else(|| "NativAuge".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("EMPFANGSTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("EMPFANGSTEST FEHLER RTC: {}", e);
+                return Ok(());
+            }
+        };
+        let mut kameras = meetvideo::Dekodierer::neu();
+        let mut schirme = meetvideo::Dekodierer::neu();
+        let mut angeboten = false;
+        let (mut kam_rahmen, mut schirm_rahmen) = (0u64, 0u64);
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Spur {
+                        mid,
+                        peer,
+                        bildschirm,
+                        art,
+                    } => {
+                        ton.spur_art(mid, *peer, *bildschirm);
+                        println!("SPUR mid={} peer={} art={} bildschirm={}", mid, peer, art, bildschirm);
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
+                        println!("EREIGNIS Antwort eingespielt");
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
+                    _ => {}
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+            }
+            for te in ton.abholen() {
+                if let meetrtc::TonEreignis::Bild {
+                    quelle,
+                    bildschirm,
+                    daten,
+                    ..
+                } = te
+                {
+                    if bildschirm {
+                        schirm_rahmen += 1;
+                        schirme.rahmen(quelle, &daten);
+                    } else {
+                        kam_rahmen += 1;
+                        kameras.rahmen(quelle, &daten);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let masse = |d: &meetvideo::Dekodierer| -> String {
+            d.bilder
+                .iter()
+                .map(|(peer, (w, h, _))| {
+                    format!("peer{}={}x{} hell={:.2}", peer, w, h, d.helligkeit(*peer))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!(
+            "ZAHLEN kamera_rahmen={} kamera_bilder={} [{}] schirm_rahmen={} schirm_bilder={} [{}] fehler={}",
+            kam_rahmen,
+            kameras.gezaehlt,
+            masse(&kameras),
+            schirm_rahmen,
+            schirme.gezaehlt,
+            masse(&schirme),
+            if schirme.letzter_fehler.is_empty() { kameras.letzter_fehler.clone() } else { schirme.letzter_fehler.clone() }
+        );
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        println!("EMPFANGSTEST FERTIG");
+        return Ok(());
+    }
+
     // Bildschirmtest (Stufe 3): den ECHTEN Bildschirm als eigene Spur ins
     // Meeting schicken - ohne Browser.
     //   freeviewer --meetschirm <raum> <passwort> [name] [sekunden] [schirm-nr]
