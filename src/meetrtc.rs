@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::media::{Direction, MediaKind, MediaTime, Mid};
+use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
@@ -314,6 +314,11 @@ fn lauf(
     let mut bild_zeit: u64 = 0;
     let mut spt: Option<str0m::media::Pt> = None;
     let mut schirm_zeit: u64 = 0;
+    // Wer mitten in einen laufenden Strom einsteigt, bekommt nur P-Bilder -
+    // ohne Schluesselbild dekodiert kein Decoder der Welt etwas. Also aktiv
+    // eines anfordern (das macht der Browser genauso), bis eines kommt.
+    let mut hat_schluessel: HashMap<String, bool> = HashMap::new();
+    let mut zuletzt_gefragt: HashMap<String, Instant> = HashMap::new();
 
     loop {
         if ende.load(Ordering::Relaxed) {
@@ -493,11 +498,27 @@ fn lauf(
                             z.bild_empfangen += 1;
                             z.bytes_rein += d.data.len() as u64;
                         }
-                        let schluessel = d
-                            .data
-                            .iter()
-                            .take(8)
-                            .any(|b| (*b & 0x1f) == 5 || (*b & 0x1f) == 7);
+                        let schluessel = ist_schluesselbild(&d.data);
+                        // Solange kein Schluesselbild kam: hoeflich, aber
+                        // beharrlich eines anfordern (hoechstens jede Sekunde).
+                        let mid_txt = d.mid.to_string();
+                        let gesehen = *hat_schluessel.get(&mid_txt).unwrap_or(&false);
+                        if schluessel {
+                            hat_schluessel.insert(mid_txt.clone(), true);
+                        } else if !gesehen {
+                            let faellig = zuletzt_gefragt
+                                .get(&mid_txt)
+                                .map(|t| t.elapsed() >= Duration::from_millis(1000))
+                                .unwrap_or(true);
+                            if faellig {
+                                zuletzt_gefragt.insert(mid_txt.clone(), Instant::now());
+                                if let Some(strom) =
+                                    rtc.direct_api().stream_rx_by_mid(d.mid, d.rid)
+                                {
+                                    strom.request_keyframe(KeyframeRequestKind::Pli);
+                                }
+                            }
+                        }
                         let codec = rtc
                             .codec_config()
                             .iter()
@@ -589,6 +610,36 @@ fn lauf(
 }
 
 /// Gehoert diese m-line zum Bild?
+/// Steckt in diesem Zugriffspunkt ein Schluesselbild (IDR) oder wenigstens
+/// ein Parametersatz (SPS)? Annex-B: Startcode, dann NAL-Kopf.
+pub fn ist_schluesselbild(daten: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 4 < daten.len() {
+        // Startcode 00 00 01 oder 00 00 00 01
+        if daten[i] == 0 && daten[i + 1] == 0 {
+            let kopf = if daten[i + 2] == 1 {
+                Some(i + 3)
+            } else if daten[i + 2] == 0 && daten[i + 3] == 1 {
+                Some(i + 4)
+            } else {
+                None
+            };
+            if let Some(k) = kopf {
+                if k < daten.len() {
+                    let typ = daten[k] & 0x1f;
+                    if typ == 5 || typ == 7 {
+                        return true;
+                    }
+                }
+                i = k;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn ist_video(rtc: &Rtc, mid: Mid) -> bool {
     rtc.media(mid)
         .map(|m| m.kind() == MediaKind::Video)
@@ -612,6 +663,24 @@ pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schluesselbild_wird_im_ganzen_zugriffspunkt_gefunden() {
+        // SPS(7) + PPS(8) + IDR(5), jeweils mit Startcode - so kommt es aus
+        // der Entpackung von str0m.
+        let mut au = vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e];
+        au.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce]);
+        au.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84]);
+        assert!(ist_schluesselbild(&au));
+        // Reines P-Bild (Typ 1) - kein Schluesselbild.
+        let p = vec![0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x6c, 0x45, 0xff];
+        assert!(!ist_schluesselbild(&p));
+        // Das IDR steht WEIT hinten - die alte Pruefung sah nur 8 Bytes.
+        let mut spaet = vec![0, 0, 0, 1, 0x41];
+        spaet.extend(std::iter::repeat(0x33).take(60));
+        spaet.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x11]);
+        assert!(ist_schluesselbild(&spaet), "IDR hinter dem 8. Byte uebersehen");
+    }
 
     #[test]
     fn testton_hat_die_richtige_laenge_und_schwingt() {
