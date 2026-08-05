@@ -31,6 +31,7 @@ mod meetsig;
 mod meetrtc;
 mod meetaudio;
 mod meetui;
+mod meetvideo;
 mod input;
 mod net;
 mod p2p;
@@ -207,6 +208,103 @@ fn main() -> eframe::Result<()> {
     // Draws every page once without a window:  freeviewer --uitest
     // egui can run headless, so a broken layout or a panic in the GUI shows
     // up in a build step instead of in front of the user.
+    // Bildtest (Stufe 2b): sendet ein bewegtes Testmuster als H.264 ins
+    // Meeting. Damit laesst sich die ganze Kette messen, ohne Kamera.
+    //   freeviewer --meetbild <raum> <passwort> [name] [sekunden]
+    if let Some(i) = std::env::args().position(|a| a == "--meetbild") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativBild".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+        let mut koder = match meetvideo::Kodierer::neu(
+            meetvideo::BREITE,
+            meetvideo::HOEHE,
+            15,
+            1_500_000,
+        ) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("BILDTEST FEHLER Kodierer: {}", e);
+                return Ok(());
+            }
+        };
+        let mut muster = meetvideo::Muster::neu(meetvideo::BREITE, meetvideo::HOEHE);
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+            Ok(s) => s,
+            Err(e) => {
+                println!("BILDTEST FEHLER Signalisierung: {}", e);
+                return Ok(());
+            }
+        };
+        let ton = match meetrtc::starten() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("BILDTEST FEHLER Ton: {}", e);
+                return Ok(());
+            }
+        };
+        let mut angeboten = false;
+        let mut pakete: u64 = 0;
+        let start = std::time::Instant::now();
+        let mut naechstes = std::time::Instant::now();
+        while start.elapsed().as_secs() < dauer {
+            for e in sig.abholen() {
+                match &e {
+                    meetsig::Ereignis::Willkommen { .. } => {
+                        if !angeboten {
+                            angeboten = true;
+                            sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                        }
+                    }
+                    meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
+                    meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
+                        ton.antwort(sdp);
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
+                        sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
+                        println!("EREIGNIS Antwort eingespielt");
+                    }
+                    meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                    _ => println!("EREIGNIS {:?}", e),
+                }
+            }
+            if let Some(a) = ton.offene_antwort() {
+                sig.roh(serde_json::json!({"t":"answer","sdp":a}));
+            }
+            for te in ton.abholen() {
+                if let meetrtc::TonEreignis::Verbunden = te {
+                    println!("EREIGNIS Ton verbunden");
+                }
+            }
+            // 15 Bilder je Sekunde
+            while std::time::Instant::now() >= naechstes {
+                naechstes += std::time::Duration::from_millis(66);
+                let rgb = muster.naechstes();
+                match koder.rahmen(&rgb) {
+                    Ok(teile) => {
+                        for t in teile {
+                            pakete += 1;
+                            ton.bild_senden(t.data);
+                        }
+                    }
+                    Err(e) => println!("KODIER-FEHLER {}", e),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let z = ton.zahlen();
+        println!(
+            "ZAHLEN verbunden={} bilder_kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={}",
+            z.verbunden, koder.bilder, pakete, z.bild_gesendet, z.bild_empfangen, z.bytes_raus
+        );
+        ton.beenden();
+        sig.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        println!("BILDTEST FERTIG");
+        return Ok(());
+    }
+
     // Praxistest mit ECHTEN Geraeten (Stufe 1c):
     //   freeviewer --meetmik <raum> <passwort> [name] [sekunden]
     // Nimmt das Standardmikrofon, spielt die anderen ueber den Lautsprecher
