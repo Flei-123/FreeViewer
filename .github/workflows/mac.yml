@@ -35,6 +35,12 @@ jobs:
       - name: Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Werkzeuge fuer Opus (autotools)
+        # audiopus_sys baut Opus aus der Quelle und ruft dabei autoreconf -
+        # das gibt es auf dem GitHub-Mac nicht vorinstalliert. Ohne diesen
+        # Schritt bricht JEDER Mac-Bau ab ("Failed to autogen Opus").
+        run: brew install autoconf automake libtool
+
       - name: Bauen
         run: cargo build --release
 
@@ -154,6 +160,12 @@ jobs:
 
       - name: Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Werkzeuge fuer Opus (autotools)
+        # audiopus_sys baut Opus aus der Quelle und ruft dabei autoreconf -
+        # das gibt es auf dem GitHub-Mac nicht vorinstalliert. Ohne diesen
+        # Schritt bricht JEDER Mac-Bau ab ("Failed to autogen Opus").
+        run: brew install autoconf automake libtool
 
       - name: Bauen (mit Lizenz-Merkmal)
         run: cargo build --release --features license
