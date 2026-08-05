@@ -221,6 +221,87 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // GENERALPROBE (vor dem Release): der Client macht ALLES gleichzeitig -
+    // Ton, Kamera, Bildschirm, Fernsteuerungs-Freigabe - und zwar ueber
+    // GENAU die Klasse, die auch das Fenster benutzt (NativMeet). So wird
+    // gemessen, was die App wirklich tut, nicht ein Sonderweg daneben.
+    //   freeviewer --meetalles <raum> <passwort> [name] [sekunden]
+    if let Some(i) = std::env::args().position(|a| a == "--meetalles") {
+        let args: Vec<String> = std::env::args().collect();
+        let raum = args.get(i + 1).cloned().unwrap_or_default();
+        let pass = args.get(i + 2).cloned().unwrap_or_default();
+        let name = args
+            .get(i + 3)
+            .cloned()
+            .unwrap_or_else(|| "NativAlles".to_string());
+        let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(35);
+        let fvid = args
+            .get(i + 5)
+            .cloned()
+            .unwrap_or_else(|| "497628420".to_string());
+        let mut m = match meetui::NativMeet::beitreten(
+            &meet::base(),
+            &raum,
+            &pass,
+            &name,
+            &fvid,
+            false,
+            None,
+            None,
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("ALLES FEHLER Beitritt: {}", e);
+                return Ok(());
+            }
+        };
+        println!("ALLES START {}", m.meldung);
+        let start = std::time::Instant::now();
+        let (mut kamera_an, mut schirm_an, mut frei) = (false, false, false);
+        while start.elapsed().as_secs() < dauer {
+            m.pumpe();
+            // Der Reihe nach zuschalten, damit sich im Browser sehen laesst,
+            // WAS gerade dazukommt.
+            let s = start.elapsed().as_secs();
+            if !kamera_an && s >= 3 {
+                kamera_an = true;
+                m.kamera_schalten(true);
+                println!("ALLES KAMERA {} ({})", m.kamera_an, m.kamera_meldung);
+            }
+            if !schirm_an && s >= 8 {
+                schirm_an = true;
+                m.schirm_schalten(true, 0);
+                println!("ALLES SCHIRM {} ({})", m.schirm_an, m.schirm_meldung);
+            }
+            if !frei && s >= 12 {
+                frei = true;
+                m.steuerung_freigeben(true);
+                println!("ALLES STEUERUNG {}", m.steuer_frei);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let z = m.zustand();
+        let zahlen = m.zahlen();
+        println!(
+            "ALLES ERGEBNIS leute={} ton_gesendet={} ton_empfangen={} kamera_gesendet={} schirm_gesendet={} bild_empfangen={} codec={}",
+            z.leute.len(),
+            zahlen.gesendet,
+            zahlen.empfangen,
+            m.bild_gesendet,
+            m.schirm_gesendet,
+            m.bild_zaehler,
+            m.bild_codec
+        );
+        println!(
+            "ALLES ZUSTAND kamera={} schirm={} steuerung={} meldung={} kamera_meldung={} schirm_meldung={}",
+            m.kamera_an, m.schirm_an, m.steuer_frei, m.meldung, m.kamera_meldung, m.schirm_meldung
+        );
+        m.verlassen();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        println!("ALLES FERTIG");
+        return Ok(());
+    }
+
     // Steuertest (Stufe 4): gibt der native Client die Fernsteuerung frei,
     // und meldet er, wenn ein anderer sie freigibt? Der Browser bekommt
     // dadurch seinen "Steuern"-Knopf - und wir hier die Gegenprobe.
