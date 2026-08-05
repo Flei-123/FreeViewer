@@ -577,12 +577,27 @@ mod win {
         /// visible picture the host announced
         want_w: u32,
         want_h: u32,
+        /// true = die Groesse kommt aus dem Strom, nicht vom Aufrufer.
+        /// Im Meeting weiss niemand vorher, wie gross das Bild der anderen
+        /// ist - mit einer festen Wunschgroesse saehe man nur einen
+        /// Ausschnitt (genau das war beim Bildschirmteilen zu sehen).
+        frei: bool,
         name: String,
         nv12: Vec<u8>,
     }
 
     impl Decoder {
         pub fn new(w: u32, h: u32) -> Result<Self> {
+            Self::mit_groesse(w, h, false)
+        }
+
+        /// Dekodierer, der die Bildgroesse aus dem Strom uebernimmt. `w`/`h`
+        /// sind nur ein erster Anhaltspunkt fuer die Aushandlung.
+        pub fn new_auto(w: u32, h: u32) -> Result<Self> {
+            Self::mit_groesse(w, h, true)
+        }
+
+        fn mit_groesse(w: u32, h: u32, frei: bool) -> Result<Self> {
             mf_startup();
             let input = type_info(MFMediaType_Video, MFVideoFormat_H264);
             let output = type_info(MFMediaType_Video, MFVideoFormat_NV12);
@@ -601,7 +616,7 @@ mod win {
                     flags,
                     input,
                     output,
-                    |a, name| match Self::build(a, name, w, h) {
+                    |a, name| match Self::build(a, name, w, h, frei) {
                         Ok(d) => Some(d),
                         Err(e) => {
                             crate::capture::log_line(&format!("h264 decoder {}: {}", name, e));
@@ -613,7 +628,7 @@ mod win {
             dec.ok_or_else(|| anyhow!("kein H.264 Decoder gefunden"))
         }
 
-        fn build(a: &IMFActivate, name: &str, w: u32, h: u32) -> Result<Self> {
+        fn build(a: &IMFActivate, name: &str, w: u32, h: u32, frei: bool) -> Result<Self> {
             unsafe {
                 let t: IMFTransform = a.ActivateObject()?;
                 if let Ok(attrs) = t.GetAttributes() {
@@ -636,6 +651,7 @@ mod win {
                     stride: w as usize,
                     want_w: w,
                     want_h: h,
+                    frei,
                     name: name.to_string(),
                     nv12: Vec::new(),
                 };
@@ -664,6 +680,38 @@ mod win {
                         if let Ok(size) = t.GetUINT64(&MF_MT_FRAME_SIZE) {
                             self.w = (size >> 32) as u32;
                             self.h = (size & 0xffff_ffff) as u32;
+                        }
+                        if self.frei {
+                            // Sichtbarer Bereich, falls der Dekodierer ihn
+                            // nennt (1080 in 1088 aufgefuellt o. ae.),
+                            // sonst die volle Flaeche.
+                            let mut blob = [0u8; 32];
+                            let mut len = 0u32;
+                            let sicht = t
+                                .GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut blob, Some(&mut len))
+                                .is_ok()
+                                && len >= 16;
+                            if sicht {
+                                let b = |i: usize| {
+                                    i32::from_le_bytes([
+                                        blob[i],
+                                        blob[i + 1],
+                                        blob[i + 2],
+                                        blob[i + 3],
+                                    ]) as u32
+                                };
+                                let (bw, bh) = (b(8), b(12));
+                                if bw >= 16 && bh >= 16 && bw <= self.w && bh <= self.h {
+                                    self.want_w = bw;
+                                    self.want_h = bh;
+                                } else {
+                                    self.want_w = self.w;
+                                    self.want_h = self.h;
+                                }
+                            } else {
+                                self.want_w = self.w;
+                                self.want_h = self.h;
+                            }
                         }
                         self.stride = match t.GetUINT32(&MF_MT_DEFAULT_STRIDE) {
                             Ok(s) if s as usize >= self.w as usize => s as usize,
@@ -812,6 +860,9 @@ mod stub {
     pub struct Decoder;
     impl Decoder {
         pub fn new(_w: u32, _h: u32) -> Result<Self> {
+            Err(anyhow!("H.264 nur unter Windows"))
+        }
+        pub fn new_auto(_w: u32, _h: u32) -> Result<Self> {
             Err(anyhow!("H.264 nur unter Windows"))
         }
         pub fn name(&self) -> &str {

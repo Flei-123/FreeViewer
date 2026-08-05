@@ -170,7 +170,10 @@ impl Dekodierer {
         let dec = match self.leute.entry(peer) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                match crate::h264::Decoder::new(BREITE, HOEHE) {
+                // Die anderen schicken, was sie wollen (Handy hochkant,
+                // Bildschirm in 1920x1080) - der Dekodierer nimmt die
+                // Groesse aus dem Strom, sonst sieht man nur einen Ausschnitt.
+                match crate::h264::Decoder::new_auto(BREITE, HOEHE) {
                     Ok(d) => e.insert(d),
                     Err(err) => {
                         self.letzter_fehler = format!("Dekodierer: {}", err);
