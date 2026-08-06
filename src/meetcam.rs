@@ -320,6 +320,21 @@ pub fn rgb_nach_nv12(rgb: &[u8], sb: u32, sh: u32, zb: u32, zh: u32, out: &mut V
     true
 }
 
+
+/// Kamera-Diagnose (nur Windows). Schreibt cam-roh.png / cam-fertig.png
+/// nach `ordner` und liefert den Messbericht als Text.
+pub fn diagnose(id: Option<String>, breite: u32, hoehe: u32, fps: u32, ordner: &str) -> String {
+    #[cfg(windows)]
+    {
+        win::diagnose(id, breite & !1, hoehe & !1, fps, ordner)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, breite, hoehe, fps, ordner);
+        "Kamera-Diagnose gibt es nur unter Windows".to_string()
+    }
+}
+
 // ---------------------------------------------------------------- macOS ----
 
 /// Kamera auf dem Mac. AVFoundation ist Objective-C - statt selbst eine
@@ -696,6 +711,265 @@ mod win {
         let _ = leser.Flush(strom);
         let _ = quelle.Shutdown();
         Ok(())
+    }
+
+
+    /// Kamera-Diagnose: was bietet das Geraet an, was bekommen wir wirklich,
+    /// und wie sieht das Rohbild aus.
+    ///
+    /// WARUM: Justins Bild kam gruen/magenta und stark hineingezoomt an. Ob
+    /// das am Farbraum, am Zeilenabstand oder am Zuschnitt liegt, laesst
+    /// sich nur am ECHTEN Geraet messen - raten hilft hier nicht.
+    pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, ordner: &str) -> String {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let r = diagnose_inner(id, zw, zh, fps, ordner);
+            CoUninitialize();
+            r
+        }
+    }
+
+    fn fourcc(g: &GUID) -> String {
+        // MF-Videountertypen sind FOURCCs in einer festen GUID-Huelle:
+        // XXXXXXXX-0000-0010-8000-00AA00389B71 - die ersten vier Bytes
+        // ergeben direkt den Namen (NV12, YUY2, MJPG ...).
+        let d1 = g.data1.to_le_bytes();
+        if g.data2 == 0 && g.data3 == 0x10 && g.data4 == [0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71] {
+            let t: String = d1
+                .iter()
+                .map(|b| {
+                    if (32..127).contains(b) {
+                        *b as char
+                    } else {
+                        '?'
+                    }
+                })
+                .collect();
+            if d1[0] == 20 {
+                return "RGB32".into();
+            }
+            if d1[0] == 21 {
+                return "ARGB32".into();
+            }
+            if d1[0] == 22 {
+                return "RGB24".into();
+            }
+            return t;
+        }
+        format!("{:?}", g)
+    }
+
+    unsafe fn typ_text(t: &IMFMediaType) -> String {
+        let sub = t.GetGUID(&MF_MT_SUBTYPE).map(|g| fourcc(&g)).unwrap_or_else(|_| "?".into());
+        let (w, h) = match t.GetUINT64(&MF_MT_FRAME_SIZE) {
+            Ok(v) => ((v >> 32) as u32, (v & 0xffff_ffff) as u32),
+            Err(_) => (0, 0),
+        };
+        let fr = match t.GetUINT64(&MF_MT_FRAME_RATE) {
+            Ok(v) => {
+                let (n, d) = ((v >> 32) as u32, (v & 0xffff_ffff) as u32);
+                if d > 0 {
+                    format!("{:.1}", n as f64 / d as f64)
+                } else {
+                    "?".into()
+                }
+            }
+            Err(_) => "?".into(),
+        };
+        let stride = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|v| v as i32).unwrap_or(-1);
+        format!("{} {}x{} @{} fps, stride {}", sub, w, h, fr, stride)
+    }
+
+    /// NV12 (dicht gepackt) als PNG ablegen - damit laesst sich das Bild
+    /// wirklich ANSEHEN statt nur Zahlen zu vergleichen.
+    fn nv12_png(nv12: &[u8], w: u32, h: u32, pfad: &str) -> String {
+        let mut rgba = Vec::new();
+        if !crate::h264::nv12_to_rgba(nv12, w, h, w as usize, h, &mut rgba) {
+            return format!("{}: NV12 zu kurz ({} Bytes)", pfad, nv12.len());
+        }
+        match image::RgbaImage::from_raw(w, h, rgba) {
+            Some(img) => match img.save(pfad) {
+                Ok(_) => format!("{} geschrieben ({}x{})", pfad, w, h),
+                Err(e) => format!("{}: {}", pfad, e),
+            },
+            None => format!("{}: Puffer passt nicht", pfad),
+        }
+    }
+
+    unsafe fn diagnose_inner(
+        id: Option<String>,
+        zw: u32,
+        zh: u32,
+        fps: u32,
+        ordner: &str,
+    ) -> String {
+        let mut log = String::new();
+        macro_rules! sag {
+            ($($a:tt)*) => {{ let z = format!($($a)*); println!("{}", z); log.push_str(&z); log.push('\n'); }};
+        }
+        mf_startup();
+        let gesucht = id.unwrap_or_default();
+        let treffer = mit_kameras(|a, name, gid| {
+            if gesucht.is_empty()
+                || gid.eq_ignore_ascii_case(&gesucht)
+                || name.to_lowercase().contains(&gesucht.to_lowercase())
+            {
+                match a.ActivateObject::<IMFMediaSource>() {
+                    Ok(src) => Some(Ok((src, name.to_string()))),
+                    Err(e) => Some(Err(format!("{}: {}", name, e))),
+                }
+            } else {
+                None
+            }
+        });
+        let (quelle, name) = match treffer {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => return format!("Kamera nicht zu oeffnen: {}", e),
+            None => return "keine Kamera gefunden".to_string(),
+        };
+        sag!("Kamera: {}", name);
+        sag!("Wunsch: {}x{} @{} fps NV12", zw, zh, fps);
+
+        let mut attrs: Option<IMFAttributes> = None;
+        if MFCreateAttributes(&mut attrs, 2).is_err() {
+            return "Attribute".into();
+        }
+        let attrs = attrs.unwrap();
+        let _ = attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1);
+        let _ = attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
+        let leser = match MFCreateSourceReaderFromMediaSource(&quelle, &attrs) {
+            Ok(l) => l,
+            Err(e) => return format!("Leser: {}", e),
+        };
+        let strom = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+
+        sag!("--- was die Kamera von sich aus kann ---");
+        for i in 0..64u32 {
+            match leser.GetNativeMediaType(strom, i) {
+                Ok(t) => sag!("  [{:2}] {}", i, typ_text(&t)),
+                Err(_) => break,
+            }
+        }
+
+        // Genau derselbe Ablauf wie im Aufnahmefaden.
+        let mut skalieren = false;
+        let mt = MFCreateMediaType().unwrap();
+        let _ = mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+        let _ = mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12);
+        let _ = mt.SetUINT64(&MF_MT_FRAME_SIZE, pack(zw, zh));
+        if fps > 0 {
+            let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1));
+        }
+        match leser.SetCurrentMediaType(strom, None, &mt) {
+            Ok(_) => sag!("Wunschgroesse angenommen"),
+            Err(e) => {
+                skalieren = true;
+                sag!("Wunschgroesse abgelehnt ({}) -> nur NV12 setzen", e);
+                let mt2 = MFCreateMediaType().unwrap();
+                let _ = mt2.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+                let _ = mt2.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12);
+                if let Err(e) = leser.SetCurrentMediaType(strom, None, &mt2) {
+                    return format!("{}\nKamera kann kein NV12: {}", log, e);
+                }
+            }
+        }
+        let _ = leser.SetStreamSelection(strom, true);
+        if let Ok(cur) = leser.GetCurrentMediaType(strom) {
+            sag!("JETZT eingestellt: {}", typ_text(&cur));
+        }
+        let (qw, qh) = groesse(&leser, strom).unwrap_or((zw, zh));
+        if qw != zw || qh != zh {
+            skalieren = true;
+        }
+        sag!("Quelle {}x{}, Ziel {}x{}, skalieren={}", qw, qh, zw, zh, skalieren);
+
+        // Ein paar Bilder verwerfen (Belichtung), dann eins genau ansehen.
+        let mut roh: Vec<u8> = Vec::new();
+        let mut fertig: Vec<u8> = Vec::new();
+        let mut gesehen = 0;
+        for runde in 0..60 {
+            let mut flags = 0u32;
+            let mut ts = 0i64;
+            let mut sample: Option<IMFSample> = None;
+            if leser
+                .ReadSample(strom, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))
+                .is_err()
+            {
+                sag!("ReadSample fehlgeschlagen");
+                break;
+            }
+            let s = match sample {
+                Some(s) => s,
+                None => continue,
+            };
+            gesehen += 1;
+            if gesehen < 12 {
+                continue;
+            }
+            // --- Puffer genau vermessen ---
+            let buf = match s.ConvertToContiguousBuffer() {
+                Ok(b) => b,
+                Err(e) => {
+                    sag!("kein zusammenhaengender Puffer: {}", e);
+                    break;
+                }
+            };
+            let cur_len = buf.GetCurrentLength().unwrap_or(0);
+            let max_len = buf.GetMaxLength().unwrap_or(0);
+            let dicht = (qw as usize) * (qh as usize) * 3 / 2;
+            sag!("--- Puffer (Runde {}) ---", runde);
+            sag!("  GetCurrentLength {}  GetMaxLength {}  dicht waere {}", cur_len, max_len, dicht);
+            let mut pitch_i = 0i32;
+            match buf.cast::<IMF2DBuffer>() {
+                Ok(b2) => {
+                    let mut z0: *mut u8 = std::ptr::null_mut();
+                    let mut pitch = 0i32;
+                    if b2.Lock2D(&mut z0, &mut pitch).is_ok() {
+                        pitch_i = pitch;
+                        sag!("  IMF2DBuffer: pitch {}", pitch);
+                        let _ = b2.Unlock2D();
+                    } else {
+                        sag!("  IMF2DBuffer: Lock2D scheitert");
+                    }
+                }
+                Err(_) => sag!("  kein IMF2DBuffer"),
+            }
+            sag!(
+                "  Weg im Code: {}",
+                if pitch_i > 0 && cur_len as usize >= (pitch_i as usize) * (qh as usize) * 3 / 2 {
+                    "2D-Pfad (nv12_packen)"
+                } else {
+                    "flacher Rueckfall (Lock)"
+                }
+            );
+            if !bild_holen(&s, qw, qh, &mut roh) {
+                sag!("  bild_holen: FEHLGESCHLAGEN");
+                break;
+            }
+            sag!("  bild_holen ok, {} Bytes", roh.len());
+            // Kennzahlen: liegt die Farbe wirklich um 128?
+            let yn = (qw as usize) * (qh as usize);
+            let ys: u64 = roh[..yn].iter().map(|v| *v as u64).sum();
+            let us: u64 = roh[yn..].iter().step_by(2).map(|v| *v as u64).sum();
+            let vs: u64 = roh[yn + 1..].iter().step_by(2).map(|v| *v as u64).sum();
+            let n2 = (roh.len() - yn) / 2;
+            sag!(
+                "  Mittelwerte: Y {:.1}  U {:.1}  V {:.1}  (U/V sollten nahe 128 liegen)",
+                ys as f64 / yn as f64,
+                us as f64 / n2 as f64,
+                vs as f64 / n2 as f64
+            );
+            sag!("  {}", nv12_png(&roh, qw, qh, &format!("{}\\cam-roh.png", ordner)));
+            if skalieren
+                && super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig)
+            {
+                sag!("  {}", nv12_png(&fertig, zw, zh, &format!("{}\\cam-fertig.png", ordner)));
+            }
+            break;
+        }
+        let _ = leser.Flush(strom);
+        let _ = quelle.Shutdown();
+        log
     }
 
     unsafe fn groesse(leser: &IMFSourceReader, strom: u32) -> Option<(u32, u32)> {

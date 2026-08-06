@@ -213,6 +213,24 @@ fn main() -> eframe::Result<()> {
     // up in a build step instead of in front of the user.
     // Kameraliste (Stufe 2d): welche Kameras sieht der Rechner?
     //   freeviewer --kameraliste
+    // KAMERA-DIAGNOSE: was bietet das Geraet an, welches Format bekommen
+    // wir wirklich, wie sehen Roh- und Endbild aus. Nur so laesst sich ein
+    // Farb- oder Zuschnittfehler BELEGEN statt zu raten.
+    //   freeviewer --camtest [breite hoehe fps] [ordner]
+    if let Some(i) = std::env::args().position(|a| a == "--camtest") {
+        let args: Vec<String> = std::env::args().collect();
+        let zahl = |n: usize, vor: u32| -> u32 {
+            args.get(n).and_then(|v| v.parse::<u32>().ok()).unwrap_or(vor)
+        };
+        let (w, h, fps) = (zahl(i + 1, 640), zahl(i + 2, 360), zahl(i + 3, 15));
+        let ordner = args
+            .get(i + 4)
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+        println!("{}", meetcam::diagnose(None, w, h, fps, &ordner));
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--kameraliste") {
         let l = meetcam::liste();
         println!("KAMERAS {}", l.len());
