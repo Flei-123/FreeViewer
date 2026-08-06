@@ -2141,6 +2141,8 @@ struct App {
     nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
+    /// Das eigene GETEILTE Bild - damit man selbst sieht, was man teilt.
+    nativ_eigen_schirm: Option<(u64, egui::TextureHandle)>,
     /// Kamera und Mikrofon VOR dem Beitritt (Selbstvorschau, Pegel).
     vorprobe: meetui::Vorprobe,
     /// Was nur die Oberflaeche angeht: Seitenleiste, Reiter, Kameraplatz.
@@ -2283,6 +2285,7 @@ impl App {
             nativ_bilder: std::collections::HashMap::new(),
             nativ_schirme: std::collections::HashMap::new(),
             nativ_eigen: None,
+            nativ_eigen_schirm: None,
             vorprobe: meetui::Vorprobe::default(),
             meet_z: meetfenster::Fensterzustand::default(),
             meet_gelesen: 0,
@@ -3368,6 +3371,12 @@ impl App {
         self.meet_win.tn.lock().unwrap().clear();
         // Gleich einmal nachsehen, wer schon da ist.
         self.meet_win.tn_next = std::time::Instant::now();
+        // Bildschirme sind sofort da (reine Systemabfrage) - die brauchen
+        // wir, um bei mehreren zu FRAGEN, welcher geteilt werden soll.
+        self.meet_win.monitore = meetschirm::liste()
+            .into_iter()
+            .map(|m| (m.name, m.breite, m.hoehe))
+            .collect();
         if !self.meet_win.geraete_geladen {
             self.meet_win.geraete_geladen = true;
             let slot = self.meet_win.geraete.clone();
@@ -3680,6 +3689,30 @@ impl App {
             }
             self.nativ_schirme
                 .retain(|k, _| n.schirme.bilder.contains_key(k));
+            // Das eigene geteilte Bild. Ohne diese Kachel sieht man beim
+            // Teilen ueberhaupt nichts - der Knopf wirkt dann wirkungslos.
+            match n.eigen_schirm.as_ref() {
+                Some((w, h, px)) => {
+                    let frisch = self
+                        .nativ_eigen_schirm
+                        .as_ref()
+                        .map(|(alt, _)| *alt != n.eigen_schirm_stand)
+                        .unwrap_or(true);
+                    if frisch {
+                        let bild = egui::ColorImage::from_rgba_unmultiplied(
+                            [*w as usize, *h as usize],
+                            px,
+                        );
+                        let tex = ctx.load_texture(
+                            "meeteigenschirm",
+                            bild,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.nativ_eigen_schirm = Some((n.eigen_schirm_stand, tex));
+                    }
+                }
+                None => self.nativ_eigen_schirm = None,
+            }
 
             // ---- Sicht zusammenstellen
             let ich_name = if self.meet_win.name.trim().is_empty() {
@@ -3757,11 +3790,16 @@ impl App {
             let tippen: Vec<String> = n.tippen.iter().map(|id| n.name_von(*id)).collect();
             // Der Servertext zum Warteraum steht in der letzten Meldung.
             let warte_text = if z.im_warteraum { n.meldung.clone() } else { String::new() };
-            let schirme: Vec<(u64, String)> = self
+            let mut schirme: Vec<(u64, String)> = self
                 .nativ_schirme
                 .keys()
                 .map(|id| (*id, n.name_von(*id)))
                 .collect();
+            // Die EIGENE Freigabe gehoert auch auf die Buehne - wie im
+            // Browser. Sonst klickt man "Bildschirm" und sieht nichts.
+            if n.schirm_an && self.nativ_eigen_schirm.is_some() {
+                schirme.push((z.ich, "Du".to_string()));
+            }
 
             let ton_namen = n.ton_namen();
             // Wessen Bildschirm ist der Hauptinhalt? Der erste fremde.
@@ -3819,6 +3857,7 @@ impl App {
                 teiler_zeiger: schirm_haupt.and_then(|p| n.zeiger_des_teilers(p)),
                 schirm_bereich: schirm_haupt.and_then(|p| n.bereich_des_teilers(p)),
                 scharf_moeglich: schirm_haupt.map(|p| n.kann_scharf(p)).unwrap_or(false),
+                monitore: self.meet_win.monitore.clone(),
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
@@ -3828,9 +3867,15 @@ impl App {
                     .map(|(k, (_, t))| (*k, t.clone()))
                     .collect(),
                 schirme: self
-                    .nativ_schirme
-                    .iter()
-                    .map(|(k, (_, t))| (*k, t.clone()))
+                    .nativ_eigen_schirm
+                    .as_ref()
+                    .map(|(_, t)| (z.ich, t.clone()))
+                    .into_iter()
+                    .chain(
+                        self.nativ_schirme
+                            .iter()
+                            .map(|(k, (_, t))| (*k, t.clone())),
+                    )
                     .collect(),
             };
         }
@@ -3897,6 +3942,10 @@ impl App {
 
         let mut steuern_zu: Option<(String, String)> = None;
         let mut verlassen = false;
+        // Scheitert das Teilen, MUSS das sichtbar werden. Frueher stand es
+        // nur im Info-Reiter - fuer den Nutzer sah es aus, als passiere
+        // ueberhaupt nichts.
+        let mut schirm_fehler: Option<String> = None;
         for a in aktionen {
             let n = match self.nativ_meet.as_mut() {
                 Some(n) => n,
@@ -3905,7 +3954,16 @@ impl App {
             match a {
                 meetfenster::Aktion::Stumm(v) => n.stumm_schalten(v),
                 meetfenster::Aktion::Kamera(v) => n.kamera_schalten(v),
-                meetfenster::Aktion::Schirm(v) => n.schirm_schalten(v, 0),
+                meetfenster::Aktion::Schirm(v) => {
+                    if let Some(m) = n.schirm_schalten_melden(v, 0) {
+                        schirm_fehler = Some(m);
+                    }
+                }
+                meetfenster::Aktion::SchirmWaehlen(i) => {
+                    if let Some(m) = n.schirm_schalten_melden(true, i) {
+                        schirm_fehler = Some(m);
+                    }
+                }
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
                 meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
                 meetfenster::Aktion::Senden(t) => {
@@ -3987,6 +4045,9 @@ impl App {
                     ));
                 }
             }
+        }
+        if let Some(m) = schirm_fehler {
+            self.meet_win.toast = Some((m, std::time::Instant::now()));
         }
         if let Some((fvid, wer)) = steuern_zu {
             // Aus dem Meeting heraus direkt in die Sitzung: Hauptfenster nach
@@ -7341,6 +7402,8 @@ struct MeetWin {
     /// Beitritt zeigt der Browser sie auch nicht.
     spks: Vec<String>,
     spk_sel: usize,
+    /// Bildschirme dieses Rechners (Name, Breite, Hoehe) - einmal eingelesen.
+    monitore: Vec<(String, u32, u32)>,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
     tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
     tn_busy: Arc<std::sync::atomic::AtomicBool>,
@@ -7364,6 +7427,7 @@ impl Default for MeetWin {
             cam_sel: 0,
             spks: Vec::new(),
             spk_sel: 0,
+            monitore: Vec::new(),
             stumm: false,
             ohne_video: false,
             geraete: Arc::new(std::sync::Mutex::new(None)),

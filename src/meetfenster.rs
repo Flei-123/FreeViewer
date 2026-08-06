@@ -180,6 +180,10 @@ pub struct Sicht {
     /// Der Sender kann Ausschnitte liefern (neuer Client). Nur dann lohnt
     /// es, "scharf" anzubieten - sonst waere der Knopf eine Luege.
     pub scharf_moeglich: bool,
+    /// Die Bildschirme dieses Rechners (Name, Breite, Hoehe). Bei mehr als
+    /// einem wird gefragt, welcher geteilt werden soll - der Browser bekommt
+    /// dafuer die Auswahl von Windows, nativ muessen wir selbst fragen.
+    pub monitore: Vec<(String, u32, u32)>,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -197,6 +201,8 @@ pub struct Fensterzustand {
     pub tippt_gemeldet: bool,
     /// Einstellungen (Geraetewahl) sind aufgeklappt.
     pub einstellungen_offen: bool,
+    /// Die Frage "welchen Bildschirm?" steht offen.
+    pub schirmwahl_offen: bool,
     /// Im Bild-im-Bild auch die EIGENE Kamera zeigen.
     pub pip_selbst: bool,
     /// Vergroesserung im geteilten Bildschirm (1.0 = alles).
@@ -225,6 +231,7 @@ impl Default for Fensterzustand {
             pip: false,
             tippt_gemeldet: false,
             einstellungen_offen: false,
+            schirmwahl_offen: false,
             // Sich selbst im kleinen Fenster sehen ist der Normalfall - beim
             // Bildschirmteilen will man ja pruefen, ob die Kamera laeuft.
             pip_selbst: true,
@@ -275,6 +282,8 @@ pub enum Aktion {
     LautsprecherGeraet(usize),
     /// Geraeteliste neu einlesen (nach Ein-/Ausstecken).
     GeraeteNeuLesen,
+    /// Diesen Bildschirm teilen (Index aus `Sicht::monitore`).
+    SchirmWaehlen(usize),
 }
 
 /// Der Beitritts-Schirm braucht Schreibzugriff (Name, Geraetewahl).
@@ -1264,6 +1273,9 @@ pub fn meeting_ui(
     if z.einstellungen_offen {
         einstellungen(ctx, s, z, &f, &mut aktionen);
     }
+    if z.schirmwahl_offen {
+        schirmwahl(ctx, s, z, &f, &mut aktionen);
+    }
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(f.p.bg).inner_margin(egui::Margin::same(0)))
@@ -1412,7 +1424,16 @@ fn fuss(
                 )
                 .clicked()
                 {
-                    aktionen.push(Aktion::Schirm(!s.schirm_an));
+                    if s.schirm_an {
+                        aktionen.push(Aktion::Schirm(false));
+                    } else if s.monitore.len() > 1 {
+                        // Zwei Bildschirme, und wir haetten stillschweigend
+                        // den ersten genommen - wer den zweiten teilen wollte,
+                        // sah scheinbar "nichts passiert".
+                        z.schirmwahl_offen = true;
+                    } else {
+                        aktionen.push(Aktion::SchirmWaehlen(0));
+                    }
                 }
                 if ctl(
                     ui,
@@ -1529,6 +1550,47 @@ fn fuss(
                 }
             });
         });
+}
+
+/// Welchen Bildschirm teilen? Nur noetig, wenn es mehrere gibt.
+fn schirmwahl(
+    ctx: &egui::Context,
+    s: &Sicht,
+    z: &mut Fensterzustand,
+    f: &Farben,
+    aktionen: &mut Vec<Aktion>,
+) {
+    let mut offen = true;
+    egui::Window::new("Welchen Bildschirm teilen?")
+        .open(&mut offen)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(330.0)
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -20.0))
+        .frame(
+            egui::Frame::NONE
+                .fill(f.p.card)
+                .stroke(egui::Stroke::new(1.0, f.p.line))
+                .corner_radius(12.0)
+                .inner_margin(egui::Margin::same(14)),
+        )
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+            for (i, (name, b, h)) in s.monitore.iter().enumerate() {
+                let text = format!("{}  ·  {}×{}", kurz(name, 26), b, h);
+                if mini(ui, f, &text, i == 0).clicked() {
+                    aktionen.push(Aktion::SchirmWaehlen(i));
+                    z.schirmwahl_offen = false;
+                }
+            }
+            ui.add_space(4.0);
+            if mini(ui, f, "Abbrechen", false).clicked() {
+                z.schirmwahl_offen = false;
+            }
+        });
+    if !offen {
+        z.schirmwahl_offen = false;
+    }
 }
 
 /// Einstellungen MITTEN im Meeting: Kamera, Mikrofon, Lautsprecher.
@@ -2660,7 +2722,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 // --------------------------------------------------- Beispiele zum Pruefen
 
 /// Wie viele Beispielzustaende es gibt.
-pub const BEISPIELE: usize = 11;
+pub const BEISPIELE: usize = 12;
 
 /// Beispielzustand des Beitritts-Schirms (fuer --meetdemo).
 pub fn beispiel_beitritt() -> Beitritt {
@@ -2771,6 +2833,10 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             teiler_zeiger: if mit_schirm { Some((0.62, 0.41)) } else { None },
             schirm_bereich: None,
             scharf_moeglich: mit_schirm,
+            monitore: vec![
+                ("Surface Panel".to_string(), 2496, 1664),
+                ("Generic PnP Monitor".to_string(), 2160, 1440),
+            ],
             // (Beispiel 10 setzt den Bereich weiter unten von Hand.)
         }
     };
@@ -2839,6 +2905,14 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 zoom: 2.5,
                 zoomanker: Zoomanker::Teiler,
                 zoommitte: vec2(0.62, 0.41),
+                ..Default::default()
+            },
+        ),
+        11 => (
+            "Bildschirmauswahl offen",
+            mach(2, false, false),
+            Fensterzustand {
+                schirmwahl_offen: true,
                 ..Default::default()
             },
         ),

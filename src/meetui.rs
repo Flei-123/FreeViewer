@@ -62,6 +62,12 @@ pub struct NativMeet {
     pub schirm_an: bool,
     pub schirm_meldung: String,
     pub schirm_gesendet: u64,
+    /// Das eigene geteilte Bild als RGBA - damit man SELBST sieht, was man
+    /// teilt. Der Browser-Client macht genau das ("sonst sieht man selbst
+    /// nicht, WAS man gerade teilt"); nativ fehlte es, und ein Klick auf
+    /// "Bildschirm" sah deshalb aus, als passiere gar nichts.
+    pub eigen_schirm: Option<(u32, u32, Vec<u8>)>,
+    pub eigen_schirm_stand: u64,
     naechstes_schirmbild: std::time::Instant,
     /// Wuensche der Zuschauer: wer will welchen Ausschnitt meines
     /// Bildschirms? (Teilnehmer -> Bereich, plus wann zuletzt gehoert)
@@ -166,6 +172,8 @@ impl NativMeet {
             schirm_an: false,
             schirm_meldung: String::new(),
             schirm_gesendet: 0,
+            eigen_schirm: None,
+            eigen_schirm_stand: 0,
             naechstes_schirmbild: std::time::Instant::now(),
             wunsch_von: std::collections::HashMap::new(),
             schirm_bereich: crate::meetschirm::GANZ,
@@ -495,6 +503,23 @@ impl NativMeet {
             }
             Err(e) => self.schirm_meldung = format!("Kodierer: {}", e),
         }
+        // Eigene Vorschau: nur jedes ZWEITE Bild (10-mal je Sekunde). Ein
+        // Bildschirm ist gross, das Umrechnen nach RGBA kostet mehr als bei
+        // der Kamera - und zum Kontrollieren reicht das dicke.
+        if self.schirm_gesendet % 2 == 0 {
+            let mut rgba = Vec::new();
+            if crate::h264::nv12_to_rgba(
+                &bild.nv12,
+                bild.breite,
+                bild.hoehe,
+                bild.breite as usize,
+                bild.hoehe,
+                &mut rgba,
+            ) {
+                self.eigen_schirm = Some((bild.breite, bild.hoehe, rgba));
+                self.eigen_schirm_stand += 1;
+            }
+        }
         let f = auf.fehler();
         if !f.is_empty() {
             self.schirm_meldung = f;
@@ -507,6 +532,23 @@ impl NativMeet {
     }
 
     /// Bildschirmfreigabe an/aus. `index` waehlt den Bildschirm.
+    /// Bildschirmfreigabe schalten. Liefert eine MELDUNG zurueck, wenn es
+    /// nicht geklappt hat - die gehoert dem Nutzer vor die Nase, nicht nur
+    /// ins Protokoll. Genau daran lag es, dass ein Fehlschlag aussah wie
+    /// "es passiert nichts".
+    pub fn schirm_schalten_melden(&mut self, an: bool, index: usize) -> Option<String> {
+        self.schirm_schalten(an, index);
+        if an && !self.schirm_an {
+            let m = self.schirm_meldung.clone();
+            return Some(if m.is_empty() {
+                "Bildschirm laesst sich nicht teilen".to_string()
+            } else {
+                m
+            });
+        }
+        None
+    }
+
     pub fn schirm_schalten(&mut self, an: bool, index: usize) {
         if an {
             if self.schirm.is_some() {
@@ -547,6 +589,9 @@ impl NativMeet {
             }
             self.schirm_koder = None;
             self.schirm_an = false;
+            self.eigen_schirm = None;
+            self.eigen_schirm_stand += 1;
+            self.schirm_meldung = String::new();
             self.sig.roh(serde_json::json!({"t":"screen","on":false}));
         }
     }
