@@ -1508,13 +1508,22 @@ mod tempo {
         let mut out = Vec::new();
         // Einmal warmlaufen (Speicher anlegen).
         assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
-        let runden = 30;
-        let start = std::time::Instant::now();
-        for _ in 0..runden {
-            assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
+        // Von drei Messreihen die SCHNELLSTE nehmen. Der Rechner baut
+        // nebenher, da faellt eine Reihe schon mal doppelt so lang aus - und
+        // ein Test, der zufaellig durchfaellt, ist schlimmer als keiner.
+        // Die schnellste Reihe ist trotzdem eine ehrliche Untergrenze: eine
+        // echte Verschlechterung (der gefundene Fehler lag bei 46 ms) bleibt
+        // in JEDER Reihe langsam.
+        let runden = 20;
+        let mut je = f64::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            for _ in 0..runden {
+                assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
+            }
+            je = je.min(start.elapsed().as_secs_f64() * 1000.0 / runden as f64);
         }
-        let je = start.elapsed().as_secs_f64() * 1000.0 / runden as f64;
-        println!("1280x720 -> 640x360: {:.2} ms je Bild", je);
+        println!("1280x720 -> 640x360: {:.2} ms je Bild (schnellste von 3)", je);
         // 30 Bilder je Sekunde heisst 33 ms fuer ALLES - Verkleinern,
         // Kodieren, Senden, Zeichnen. Der ausgelieferte Bau ist der
         // Release-Bau, deshalb gilt dort die scharfe Grenze. Der Debug-Bau
