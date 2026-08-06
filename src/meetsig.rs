@@ -107,6 +107,13 @@ pub enum Ereignis {
         peer: u64,
         fvid: String,
     },
+    /// Wo steht der Mauszeiger dessen, der gerade teilt (0..1 in SEINEM
+    /// Bild)? Damit kann ein Zuschauer genau dorthin zoomen.
+    Zeiger {
+        peer: u64,
+        x: f32,
+        y: f32,
+    },
     /// Wir sitzen im Warteraum.
     Wartet {
         titel: String,
@@ -219,6 +226,14 @@ impl Sitzung {
     pub fn bildschirm(&self, an: bool) {
         let _ = self.befehle.send(Befehl::Bildschirm(an));
     }
+    /// Eigene Zeigerposition im geteilten Bild melden (0..1). Nur sinnvoll,
+    /// solange wirklich geteilt wird.
+    pub fn zeiger(&self, x: f32, y: f32) {
+        let _ = self
+            .befehle
+            .send(Befehl::Roh(serde_json::json!({"t":"cursor","x":x,"y":y})));
+    }
+
     /// Fernsteuerung ueber FreeViewer anbieten (`an`) oder zuruecknehmen.
     /// `fvid` ist die eigene FreeViewer-Nummer; beim Zuruecknehmen egal.
     pub fn fernsteuerung(&self, an: bool, fvid: &str) {
@@ -497,6 +512,19 @@ fn verarbeiten(
                 peer: u64f("peer"),
                 an: boolf("on"),
             });
+        }
+        "cursor" => {
+            let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(-1.0) as f32;
+            let (x, y) = (f("x"), f("y"));
+            // Werte ausserhalb des Bildes waeren eine Falschmeldung - lieber
+            // gar nichts sagen, als auf eine erfundene Stelle zu zoomen.
+            if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+                let _ = ev.send(Ereignis::Zeiger {
+                    peer: u64f("peer"),
+                    x,
+                    y,
+                });
+            }
         }
         "hand" => {
             let (peer, an) = (u64f("peer"), boolf("on"));

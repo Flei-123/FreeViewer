@@ -111,6 +111,41 @@ pub fn bild_nach_nv12(
     true
 }
 
+/// Wo steht der Mauszeiger AUF diesem Bildschirm - als Anteil 0..1?
+///
+/// WARUM als Anteil und nicht in Bildpunkten: der Zuschauer bekommt ein
+/// verkleinertes Bild und weiss nichts von der echten Aufloesung. Ein
+/// Anteil passt immer, egal wie stark verkleinert wurde.
+///
+/// None = der Zeiger ist gerade auf einem ANDEREN Bildschirm; dann waere
+/// jede Zahl gelogen.
+pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let m = crate::capture::list_monitors(true).into_iter().nth(index)?;
+        if m.w < 2 || m.h < 2 {
+            return None;
+        }
+        let mut p = POINT::default();
+        if unsafe { GetCursorPos(&mut p) }.is_err() {
+            return None;
+        }
+        let dx = p.x - m.x;
+        let dy = p.y - m.y;
+        if dx < 0 || dy < 0 || dx >= m.w as i32 || dy >= m.h as i32 {
+            return None;
+        }
+        Some((dx as f32 / m.w as f32, dy as f32 / m.h as f32))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = index;
+        None
+    }
+}
+
 /// Laufende Bildschirmaufnahme. Haelt immer nur das NEUESTE Bild bereit.
 pub struct Aufnahme {
     pub name: String,

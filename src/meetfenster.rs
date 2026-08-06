@@ -54,6 +54,40 @@ pub enum Reiter {
     Info,
 }
 
+/// Woran haengt der Ausschnitt, wenn in einen geteilten Bildschirm
+/// hineingezoomt wird?
+///
+/// WARUM drei Arten: beim Zuschauen will man mal selbst herumfahren
+/// ("Eigene": das Fenster ist eine Lupe, die dem eigenen Zeiger folgt) und
+/// mal genau das sehen, worauf der andere gerade zeigt ("Teiler"). Wer sich
+/// eine Stelle festhalten will, zieht das Bild - dann steht es fest.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Zoomanker {
+    /// Lupe: die Stelle unter dem eigenen Mauszeiger.
+    Eigene,
+    /// Dem Mauszeiger dessen folgen, der den Bildschirm teilt.
+    Teiler,
+    /// Fester Ausschnitt (selbst hingezogen).
+    Fest,
+}
+
+impl Zoomanker {
+    pub fn wort(self) -> &'static str {
+        match self {
+            Zoomanker::Eigene => "eigene Maus",
+            Zoomanker::Teiler => "Maus des Teilers",
+            Zoomanker::Fest => "fest",
+        }
+    }
+    pub fn weiter(self) -> Zoomanker {
+        match self {
+            Zoomanker::Eigene => Zoomanker::Teiler,
+            Zoomanker::Teiler => Zoomanker::Fest,
+            Zoomanker::Fest => Zoomanker::Eigene,
+        }
+    }
+}
+
 /// Wohin mit den Kameras, waehrend ein Bildschirm geteilt wird?
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kameraplatz {
@@ -136,6 +170,9 @@ pub struct Sicht {
     pub kamera_name: String,
     pub ton_ein: String,
     pub ton_aus: String,
+    /// Wo steht der Mauszeiger dessen, der gerade den Bildschirm teilt?
+    /// (0..1 im geteilten Bild). None = der Sender meldet ihn nicht.
+    pub teiler_zeiger: Option<(f32, f32)>,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -155,6 +192,11 @@ pub struct Fensterzustand {
     pub einstellungen_offen: bool,
     /// Im Bild-im-Bild auch die EIGENE Kamera zeigen.
     pub pip_selbst: bool,
+    /// Vergroesserung im geteilten Bildschirm (1.0 = alles).
+    pub zoom: f32,
+    pub zoomanker: Zoomanker,
+    /// Mitte des Ausschnitts (0..1) - nur bei Zoomanker::Fest von Hand.
+    pub zoommitte: Vec2,
 }
 
 impl Default for Fensterzustand {
@@ -171,6 +213,9 @@ impl Default for Fensterzustand {
             // Sich selbst im kleinen Fenster sehen ist der Normalfall - beim
             // Bildschirmteilen will man ja pruefen, ob die Kamera laeuft.
             pip_selbst: true,
+            zoom: 1.0,
+            zoomanker: Zoomanker::Eigene,
+            zoommitte: vec2(0.5, 0.5),
         }
     }
 }
@@ -529,6 +574,19 @@ fn bild_malen(
     spiegeln: bool,
     ganz: bool,
 ) {
+    bild_malen_zoom(mal, rect, tex, spiegeln, ganz, None)
+}
+
+/// Wie `bild_malen`, aber mit einem Ausschnitt (0..1) - dafuer da, in einen
+/// geteilten Bildschirm hineinzuzoomen, ohne das Bild neu zu berechnen.
+fn bild_malen_zoom(
+    mal: &egui::Painter,
+    rect: Rect,
+    tex: &egui::TextureHandle,
+    spiegeln: bool,
+    ganz: bool,
+    ausschnitt: Option<Rect>,
+) {
     let ar_bild = tex.aspect_ratio().max(0.05);
     let ar_rect = (rect.width() / rect.height().max(1.0)).max(0.05);
     let (ziel, mut uv) = if ganz {
@@ -555,6 +613,15 @@ fn bild_malen(
         };
         (rect, uv)
     };
+    // Der Zoom-Ausschnitt wird IN den schon berechneten Bereich gelegt -
+    // so bleibt das Zuschneiden fuer krumme Seitenverhaeltnisse erhalten.
+    if let Some(a) = ausschnitt {
+        let (b, h) = (uv.width(), uv.height());
+        uv = Rect::from_min_max(
+            pos2(uv.min.x + a.min.x * b, uv.min.y + a.min.y * h),
+            pos2(uv.min.x + a.max.x * b, uv.min.y + a.max.y * h),
+        );
+    }
     if spiegeln {
         uv = Rect::from_min_max(
             pos2(uv.max.x, uv.min.y),
@@ -562,6 +629,20 @@ fn bild_malen(
         );
     }
     mal.image(tex.id(), ziel, uv, Color32::WHITE);
+}
+
+/// Welcher Ausschnitt des Bildes ist bei dieser Vergroesserung zu sehen?
+///
+/// `mitte` ist der Punkt (0..1), auf den gezoomt wird. Das Ergebnis liegt
+/// IMMER vollstaendig im Bild - sonst saehe man am Rand schwarze Streifen
+/// oder gestreckte Bildpunkte. Genau deshalb wandert die Mitte am Rand
+/// automatisch nach innen, statt den Ausschnitt hinausragen zu lassen.
+pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
+    let z = zoom.clamp(1.0, 8.0);
+    let halb = 0.5 / z;
+    let x = mitte.x.clamp(halb, 1.0 - halb);
+    let y = mitte.y.clamp(halb, 1.0 - halb);
+    Rect::from_min_max(pos2(x - halb, y - halb), pos2(x + halb, y + halb))
 }
 
 /// Wird das Bild abgeschnitten, wenn wir es fuellend zeichnen? Weicht das
@@ -613,10 +694,21 @@ fn kachel_malen(
     tex: Option<&egui::TextureHandle>,
     f: &Farben,
 ) -> egui::Response {
+    kachel_malen_zoom(ui, rect, k, tex, f, None)
+}
+
+fn kachel_malen_zoom(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    k: &Kachel,
+    tex: Option<&egui::TextureHandle>,
+    f: &Farben,
+    ausschnitt: Option<Rect>,
+) -> egui::Response {
     let resp = ui.interact(
         rect,
         ui.id().with(("kachel", k.id, k.schirm)),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
     let mal = ui.painter_at(rect);
     mal.rect_filled(rect, 14.0, f.tief);
@@ -625,7 +717,7 @@ fn kachel_malen(
             // Ein geteilter Bildschirm wird NIE zugeschnitten - abgeschnittener
             // Text ist wertlos.
             let ganz = k.schirm || passt_nicht(t, rect);
-            bild_malen(&mal, rect, t, k.ich && !k.schirm, ganz);
+            bild_malen_zoom(&mal, rect, t, k.ich && !k.schirm, ganz, ausschnitt);
         }
         None => {
             // Kein Bild: weicher Kreis mit den Anfangsbuchstaben, wie im
@@ -2015,6 +2107,175 @@ fn tex_fuer<'a>(k: &Kachel, b: &'a Bilder) -> Option<&'a egui::TextureHandle> {
     }
 }
 
+/// Den geteilten Bildschirm zeichnen - mit Lupe.
+///
+/// Rad = groesser/kleiner, Ziehen = Ausschnitt verschieben (und damit auf
+/// "fest" stellen), Doppelklick = zurueck auf ganz. Oben rechts sitzt eine
+/// kleine Leiste mit demselben in Knopfform, damit man es auch findet.
+fn schirm_kachel(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    k: &Kachel,
+    tex: Option<&egui::TextureHandle>,
+    s: &Sicht,
+    z: &mut Fensterzustand,
+    f: &Farben,
+) {
+    // --- Rad: hinein- und herauszoomen ---
+    let zeiger = ui.ctx().pointer_latest_pos();
+    let ueber = zeiger.map(|p| rect.contains(p)).unwrap_or(false);
+    if ueber {
+        let rad = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+        if rad.abs() > 0.5 {
+            // Vor dem ersten Radklick steht der Anker auf "eigene Maus" -
+            // dann wirkt das Rad wie eine Lupe unter dem Zeiger.
+            z.zoom = (z.zoom * (1.0 + rad * 0.0025)).clamp(1.0, 8.0);
+            if z.zoom <= 1.001 {
+                z.zoom = 1.0;
+            }
+        }
+    }
+
+    // --- Wohin schaut die Lupe? ---
+    let mut mitte = z.zoommitte;
+    if z.zoom > 1.0 {
+        match z.zoomanker {
+            Zoomanker::Eigene => {
+                // Der Zeiger IM Kachelbereich wird direkt auf das Bild
+                // abgebildet: links oben zeigen heisst links oben sehen.
+                // Kein Nachlaufen, kein Driften - eine echte Lupe.
+                if let Some(p) = zeiger {
+                    if rect.contains(p) {
+                        mitte = vec2(
+                            ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0),
+                            ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0),
+                        );
+                        z.zoommitte = mitte;
+                    }
+                }
+            }
+            Zoomanker::Teiler => {
+                if let Some((x, y)) = s.teiler_zeiger {
+                    mitte = vec2(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+                    z.zoommitte = mitte;
+                }
+            }
+            Zoomanker::Fest => {}
+        }
+    }
+    let ausschnitt = if z.zoom > 1.0 {
+        Some(zoom_ausschnitt(z.zoom, mitte))
+    } else {
+        None
+    };
+
+    let antwort = kachel_malen_zoom(ui, rect, k, tex, f, ausschnitt);
+
+    // --- Ziehen verschiebt den Ausschnitt (und haelt ihn fest) ---
+    if z.zoom > 1.0 && antwort.dragged() {
+        let d = antwort.drag_delta();
+        if d.length_sq() > 0.0 {
+            z.zoomanker = Zoomanker::Fest;
+            let a = zoom_ausschnitt(z.zoom, z.zoommitte);
+            z.zoommitte = vec2(
+                (z.zoommitte.x - d.x / rect.width().max(1.0) * a.width()).clamp(0.0, 1.0),
+                (z.zoommitte.y - d.y / rect.height().max(1.0) * a.height()).clamp(0.0, 1.0),
+            );
+        }
+    }
+    if antwort.double_clicked() {
+        z.zoom = 1.0;
+        z.zoomanker = Zoomanker::Eigene;
+        z.zoommitte = vec2(0.5, 0.5);
+    }
+    if z.zoom > 1.0 && ueber {
+        ui.ctx().set_cursor_icon(if antwort.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
+
+    zoomleiste(ui, rect, s, z, f);
+}
+
+/// Kleine Leiste oben rechts im geteilten Bild: -, Stufe, +, Anker, zurueck.
+fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, f: &Farben) {
+    if rect.width() < 260.0 || rect.height() < 120.0 {
+        return; // in einem Briefmarkenbild waere die Leiste nur im Weg
+    }
+    let anker_text = match z.zoomanker {
+        Zoomanker::Teiler if s.teiler_zeiger.is_none() => "Maus des Teilers (kommt nicht an)",
+        a => a.wort(),
+    };
+    let stufe = format!("{:.0} %", z.zoom * 100.0);
+    let h = 28.0;
+    let mal = ui.painter_at(rect);
+    // Breite grob aus den Texten schaetzen - genau genug fuer eine Leiste.
+    let breite = 30.0 + 54.0 + 30.0 + 14.0 + anker_text.chars().count() as f32 * 6.4 + 16.0
+        + if z.zoom > 1.0 { 62.0 } else { 0.0 };
+    let leiste = Rect::from_min_size(
+        pos2(rect.right() - 10.0 - breite.min(rect.width() - 20.0), rect.top() + 10.0),
+        vec2(breite.min(rect.width() - 20.0), h),
+    );
+    mal.rect_filled(
+        leiste,
+        9.0,
+        if f.p.dark {
+            Color32::from_black_alpha(185)
+        } else {
+            Color32::from_white_alpha(215)
+        },
+    );
+    mal.rect_stroke(leiste, 9.0, egui::Stroke::new(1.0, f.p.line), egui::StrokeKind::Inside);
+
+    let mut x = leiste.left() + 5.0;
+    let mut knopf = |ui: &mut egui::Ui, x: &mut f32, text: &str, w: f32, tip: &str| -> bool {
+        let r = Rect::from_min_size(pos2(*x, leiste.top() + 3.0), vec2(w, h - 6.0));
+        let a = ui
+            .interact(r, ui.id().with(("zoomknopf", text.to_string())), egui::Sense::click())
+            .on_hover_text(tip);
+        if a.hovered() {
+            ui.painter_at(rect).rect_filled(r, 7.0, f.p.card_hi);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        ui.painter_at(rect).text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(12.0),
+            f.p.text,
+        );
+        *x += w;
+        a.clicked()
+    };
+    if knopf(ui, &mut x, "−", 26.0, "Kleiner (Mausrad geht auch)") {
+        z.zoom = (z.zoom / 1.25).max(1.0);
+        if z.zoom <= 1.001 {
+            z.zoom = 1.0;
+        }
+    }
+    let _ = knopf(ui, &mut x, &stufe, 50.0, "Vergroesserung");
+    if knopf(ui, &mut x, "+", 26.0, "Groesser (Mausrad geht auch)") {
+        z.zoom = (z.zoom * 1.25).min(8.0);
+    }
+    x += 6.0;
+    if knopf(
+        ui,
+        &mut x,
+        anker_text,
+        anker_text.chars().count() as f32 * 6.4 + 14.0,
+        "Woran haengt der Ausschnitt? Klicken zum Umschalten.",
+    ) {
+        z.zoomanker = z.zoomanker.weiter();
+    }
+    if z.zoom > 1.0 && knopf(ui, &mut x, "ganz", 56.0, "Zurueck auf das ganze Bild") {
+        z.zoom = 1.0;
+        z.zoomanker = Zoomanker::Eigene;
+        z.zoommitte = vec2(0.5, 0.5);
+    }
+}
+
 fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &Farben) {
     let flaeche = ui.available_rect_before_wrap();
     ui.allocate_rect(flaeche, egui::Sense::hover());
@@ -2035,7 +2296,8 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
         .unwrap_or(0);
     if z.vollbild {
         let t = tex_fuer(&schirme[haupt], b);
-        kachel_malen(ui, schirm_rect(flaeche.shrink(6.0), t), &schirme[haupt], t, f);
+        let r = schirm_rect(flaeche.shrink(6.0), t);
+        schirm_kachel(ui, r, &schirme[haupt], t, s, z, f);
         return;
     }
     let lueck = 10.0;
@@ -2082,7 +2344,14 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
         );
         if r.height() > 20.0 {
             let t = tex_fuer(k, b);
-            kachel_malen(ui, schirm_rect(r, t), k, t, f);
+            // Nur die HAUPT-Freigabe bekommt die Lupe. Bei mehreren
+            // Freigaben gleichzeitig waere ein gemeinsamer Zoomzustand
+            // verwirrend - man wuesste nicht, welches Bild er meint.
+            if i == haupt {
+                schirm_kachel(ui, schirm_rect(r, t), k, t, s, z, f);
+            } else {
+                kachel_malen(ui, schirm_rect(r, t), k, t, f);
+            }
         }
     }
     // Kamerastreifen. Die Hoehe wird so gewaehlt, dass alle hineinpassen -
@@ -2315,7 +2584,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 // --------------------------------------------------- Beispiele zum Pruefen
 
 /// Wie viele Beispielzustaende es gibt.
-pub const BEISPIELE: usize = 9;
+pub const BEISPIELE: usize = 10;
 
 /// Beispielzustand des Beitritts-Schirms (fuer --meetdemo).
 pub fn beispiel_beitritt() -> Beitritt {
@@ -2423,6 +2692,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             kamera_name: "Integrated Webcam (1280x720 -> 640x360)".into(),
             ton_ein: "Mikrofonarray".into(),
             ton_aus: "Lautsprecher (Realtek)".into(),
+            teiler_zeiger: if mit_schirm { Some((0.62, 0.41)) } else { None },
         }
     };
     let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| Fensterzustand {
@@ -2479,6 +2749,19 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             "Einstellungen offen",
             mach(3, false, false),
             mit_einstellungen(),
+        ),
+        // Der Zoom im geteilten Bildschirm - sonst wuerde die Lupe samt
+        // Leiste nie gezeichnet und ein Fehler darin faellt erst dem
+        // Zuschauer auf.
+        9 => (
+            "Bildschirm hineingezoomt",
+            mach(3, true, false),
+            Fensterzustand {
+                zoom: 2.5,
+                zoomanker: Zoomanker::Teiler,
+                zoommitte: vec2(0.62, 0.41),
+                ..Default::default()
+            },
         ),
         _ => (
             "Info-Reiter, schmales Fenster",
@@ -2546,6 +2829,49 @@ mod tests {
         let (s, b) = beste_aufteilung(vec2(800.0, 600.0), 0);
         assert_eq!(s, 1);
         assert_eq!(b, 0.0);
+    }
+
+    /// Der Ausschnitt muss IMMER ganz im Bild liegen - sonst sieht man am
+    /// Rand schwarze Streifen oder gestreckte Bildpunkte.
+    #[test]
+    fn zoom_ausschnitt_bleibt_im_bild() {
+        for zoom in [1.0f32, 1.5, 2.0, 3.7, 8.0] {
+            for (mx, my) in [(0.0f32, 0.0f32), (1.0, 1.0), (0.5, 0.5), (-3.0, 9.0)] {
+                let a = zoom_ausschnitt(zoom, vec2(mx, my));
+                assert!(a.min.x >= -0.0001 && a.min.y >= -0.0001, "links/oben raus: {:?}", a);
+                assert!(a.max.x <= 1.0001 && a.max.y <= 1.0001, "rechts/unten raus: {:?}", a);
+                let erwartet = 1.0 / zoom.clamp(1.0, 8.0);
+                assert!(
+                    (a.width() - erwartet).abs() < 0.001,
+                    "Breite {} statt {}",
+                    a.width(),
+                    erwartet
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_eins_zeigt_alles() {
+        let a = zoom_ausschnitt(1.0, vec2(0.2, 0.9));
+        assert_eq!(a, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
+    }
+
+    /// Doppelte Vergroesserung in der Mitte = genau das mittlere Viertel.
+    #[test]
+    fn zoom_zwei_nimmt_die_mitte() {
+        let a = zoom_ausschnitt(2.0, vec2(0.5, 0.5));
+        assert_eq!(a, Rect::from_min_max(pos2(0.25, 0.25), pos2(0.75, 0.75)));
+    }
+
+    #[test]
+    fn zoomanker_dreht_sich_im_kreis() {
+        let mut a = Zoomanker::Eigene;
+        for _ in 0..3 {
+            a = a.weiter();
+        }
+        assert_eq!(a, Zoomanker::Eigene);
+        assert!(!Zoomanker::Teiler.wort().is_empty());
     }
 
     #[test]

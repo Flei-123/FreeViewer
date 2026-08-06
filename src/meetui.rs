@@ -63,6 +63,13 @@ pub struct NativMeet {
     pub schirm_meldung: String,
     pub schirm_gesendet: u64,
     naechstes_schirmbild: std::time::Instant,
+    /// Zeigerpositionen der anderen (0..1 auf IHREM geteilten Bildschirm).
+    /// Damit kann ein Zuschauer dorthin zoomen, wohin der andere zeigt.
+    pub zeiger_von: std::collections::HashMap<u64, (f32, f32)>,
+    /// Wann darf der naechste eigene Zeigerstand raus (10-mal je Sekunde).
+    naechster_zeiger: std::time::Instant,
+    /// Zuletzt gesendeter Stand - unveraenderte Werte gehen nicht raus.
+    letzter_zeiger: Option<(f32, f32)>,
     /// Wann zuletzt ein Schluesselbild angefordert wurde.
     letztes_schluesselbild: std::time::Instant,
     /// Eigene FreeViewer-Nummer - die geben wir bei der Freigabe bekannt.
@@ -147,6 +154,9 @@ impl NativMeet {
             schirm_meldung: String::new(),
             schirm_gesendet: 0,
             naechstes_schirmbild: std::time::Instant::now(),
+            zeiger_von: std::collections::HashMap::new(),
+            naechster_zeiger: std::time::Instant::now(),
+            letzter_zeiger: None,
             letztes_schluesselbild: std::time::Instant::now(),
             ich_fvid: fvid.to_string(),
             steuer_frei: steuerung && fvid.chars().any(|c| c.is_ascii_digit()),
@@ -257,6 +267,9 @@ impl NativMeet {
                             .push((0, format!("{} erlaubt Fernsteuerung ({})", wer, fvid)));
                     }
                 }
+                meetsig::Ereignis::Zeiger { peer, x, y } => {
+                    self.zeiger_von.insert(peer, (x, y));
+                }
                 meetsig::Ereignis::Fehler { code, text } => {
                     self.meldung = format!("{}: {}", code, text);
                 }
@@ -348,6 +361,7 @@ impl NativMeet {
         }
         self.kamera_pumpe();
         self.schirm_pumpe();
+        self.zeiger_pumpe();
         self.messen();
     }
 
@@ -389,6 +403,37 @@ impl NativMeet {
     /// Bildschirm -> H.264 -> Meeting (eigene Spur). 15 Bilder je Sekunde,
     /// immer das neueste Bild; alle 4 Sekunden ein Schluesselbild, damit
     /// spaet Dazugekommene nicht vor einer leeren Flaeche sitzen.
+    /// Eigene Zeigerposition melden, solange der Bildschirm geteilt wird.
+    ///
+    /// 10-mal je Sekunde und nur bei ECHTER Aenderung: das sind ein paar
+    /// Dutzend Byte, die dem Zuschauer aber erlauben, genau dorthin zu
+    /// zoomen, wohin gezeigt wird.
+    fn zeiger_pumpe(&mut self) {
+        if !self.schirm_an {
+            return;
+        }
+        let jetzt = std::time::Instant::now();
+        if jetzt < self.naechster_zeiger {
+            return;
+        }
+        self.naechster_zeiger = jetzt + std::time::Duration::from_millis(100);
+        let index = match self.schirm.as_ref() {
+            Some(a) => a.index,
+            None => return,
+        };
+        if let Some((x, y)) = crate::meetschirm::zeiger_anteil(index) {
+            let neu = (x, y);
+            let anders = match self.letzter_zeiger {
+                Some((ax, ay)) => (ax - x).abs() > 0.002 || (ay - y).abs() > 0.002,
+                None => true,
+            };
+            if anders {
+                self.letzter_zeiger = Some(neu);
+                self.sig.zeiger(x, y);
+            }
+        }
+    }
+
     fn schirm_pumpe(&mut self) {
         let jetzt = std::time::Instant::now();
         if jetzt < self.naechstes_schirmbild {
@@ -641,6 +686,11 @@ impl NativMeet {
             Some(g) => (g.eingang.clone(), g.ausgang.clone()),
             None => (String::new(), String::new()),
         }
+    }
+
+    /// Zeiger dessen, der gerade teilt (0..1). None = kommt (noch) nicht an.
+    pub fn zeiger_des_teilers(&self, peer: u64) -> Option<(f32, f32)> {
+        self.zeiger_von.get(&peer).copied()
     }
 
     pub fn hand_heben(&mut self, an: bool) {

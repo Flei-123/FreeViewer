@@ -3761,6 +3761,12 @@ impl App {
                 .collect();
 
             let ton_namen = n.ton_namen();
+            // Wessen Bildschirm ist der Hauptinhalt? Der erste fremde.
+            let schirm_haupt = schirme
+                .iter()
+                .map(|(id, _)| *id)
+                .find(|id| *id != z.ich)
+                .or_else(|| schirme.first().map(|(id, _)| *id));
             sicht = meetfenster::Sicht {
                 raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
                 titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
@@ -3805,6 +3811,8 @@ impl App {
                 kamera_name: n.kamera_name(),
                 ton_ein: ton_namen.0,
                 ton_aus: ton_namen.1,
+                // Zeiger DESSEN, dessen Bildschirm gerade gross zu sehen ist.
+                teiler_zeiger: schirm_haupt.and_then(|p| n.zeiger_des_teilers(p)),
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
