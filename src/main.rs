@@ -1872,15 +1872,26 @@ fn main() -> eframe::Result<()> {
                         _ => SettingsTab::General,
                     };
                 }
-                if std::env::args().any(|a| a == "--meetshot") {
-                    // Das eigene Meeting-Fenster oeffnen und DAVON das Bild:
-                    // so laesst sich der Zoom-Ablauf fotografieren.
+                if let Some(mi) = std::env::args().position(|a| a == "--meetshot") {
+                    // Das eigene Meeting-Fenster oeffnen und DAVON das Bild.
+                    // Mit "--meetshot bild.jpg RAUM PASS" wird wirklich
+                    // beigetreten - dann zeigt das Bild das echte Meeting und
+                    // nicht nur den Beitritts-Schirm.
+                    // Aufruf:  --shot bild.jpg --meetshot [RAUM PASS]
+                    let a2 = std::env::args().nth(mi + 1).unwrap_or_default();
+                    let a3 = std::env::args().nth(mi + 2).unwrap_or_default();
+                    let echt = a2.contains('-') && !a3.is_empty();
                     app.meet_win_open(meet::Meeting {
-                        id: "482-913-770".to_string(),
+                        id: if echt { a2.clone() } else { "482-913-770".to_string() },
                         titel: "Fenster-Test".to_string(),
-                        passwort: "test1234".to_string(),
+                        passwort: if echt { a3.clone() } else { "test1234".to_string() },
                         termin_text: String::new(),
                     });
+                    app.meet_shot_join = echt;
+                    // Mit echtem Beitritt muss die Verbindung erst stehen.
+                    app.shot_warte = if echt { 900 } else { 60 };
+                    // shot MUSS mitgesetzt sein - der Bildmacher haengt daran.
+                    app.shot = Some(std::path::PathBuf::from(path.clone()));
                     app.meet_shot = Some(std::path::PathBuf::from(path));
                 } else {
                     app.shot = Some(std::path::PathBuf::from(path));
@@ -2014,6 +2025,10 @@ struct App {
     /// Framezaehler und Scharfschaltung des Meetshots.
     meet_shot_n: u32,
     meet_shot_arm: u32,
+    /// --meetshot mit Raum/Passwort: automatisch beitreten.
+    meet_shot_join: bool,
+    /// Nach wie vielen Rahmen das Bild gemacht wird (Beitritt braucht Zeit).
+    shot_warte: u32,
     /// Gezeichnete Frames seit dem Start im --shot-Modus.
     /// Gewaehltes Aussehen (Vorlage, Akzent, Groesse, Rundung).
     look: theme::Appearance,
@@ -2174,6 +2189,8 @@ impl App {
             meet_shot: None,
             meet_shot_n: 0,
             meet_shot_arm: 0,
+            meet_shot_join: false,
+            shot_warte: 6,
             look: theme::load(),
             stab: SettingsTab::General,
             fb_bug: true,
@@ -3505,6 +3522,11 @@ impl App {
                 }
             }
             let z = n.zustand();
+            // Nur beim Bildermachen (--meetshot): Wartende gleich hereinlassen.
+            // Sonst saehe man auf dem Beweisbild nie einen zweiten Teilnehmer.
+            if self.meet_shot_join && !z.wartende.is_empty() {
+                n.alle_einlassen();
+            }
             let zahlen = n.zahlen();
 
             // ---- Texturen nachladen (nur bei wirklich neuem Bild)
@@ -3801,12 +3823,17 @@ impl App {
     fn shot_ui(&mut self, ctx: &egui::Context) {
 if let Some(path) = self.shot.clone() {
             self.shot_n += 1;
-            if self.shot_n == 6 {
+            // Sobald die Geraeteliste da ist, den Beitritt ausloesen.
+            if self.meet_shot_join && self.meet_shot_arm == 0 && self.meet_win.geraete_da {
+                self.meet_shot_arm = self.shot_n;
+                self.meet_win.nativ_start = true;
+            }
+            if self.shot_n == self.shot_warte {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
                     egui::UserData::default(),
                 ));
             }
-            if self.shot_n > 6 {
+            if self.shot_n > self.shot_warte {
                 let img = ctx.input(|i| {
                     i.events.iter().rev().find_map(|e| match e {
                         egui::Event::Screenshot { image, .. } => Some(image.clone()),
@@ -3817,7 +3844,7 @@ if let Some(path) = self.shot.clone() {
                     save_shot(&img, &path);
                     std::process::exit(0);
                 }
-                if self.shot_n > 150 {
+                if self.shot_n > self.shot_warte + 150 {
                     eprintln!("SHOT: kein Bild bekommen");
                     std::process::exit(2);
                 }
@@ -6891,6 +6918,16 @@ impl eframe::App for App {
             self.shot_ui(ctx);
             return;
         }
+        // Ohne staendiges Neuzeichnen im Elternfenster bekommt das
+        // Meetingfenster keine Rahmen - und --meetshot wartet ewig.
+        // Fuer das Bild wird das Meetingfenster ins HAUPTfenster gezeichnet.
+        // Ein eigenes Unterfenster liefert beim Bildbefehl nichts zurueck -
+        // gemessen: der Screenshot-Ereignis kam dort nie an.
+        if self.meet_shot.is_some() {
+            self.meet_win_ui(ctx);
+            self.shot_ui(ctx);
+            return;
+        }
         if self.caption_tick.elapsed() > Duration::from_secs(2) {
             self.caption_tick = std::time::Instant::now();
             chrome::paint_from_theme();
@@ -7053,41 +7090,6 @@ impl eframe::App for App {
                         closed = true;
                     }
                     vctx.request_repaint_after(Duration::from_millis(150));
-                    // --meetshot: auf die Geraeteliste warten, dann aufnehmen.
-                    if let Some(path) = self.meet_shot.clone() {
-                        self.meet_shot_n += 1;
-                        let n = self.meet_shot_n;
-                        if self.meet_win.geraete_da && self.meet_shot_arm == 0 {
-                            self.meet_shot_arm = n;
-                        }
-                        let arm = self.meet_shot_arm;
-                        if arm > 0 && n == arm + 12 {
-                            vctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
-                                egui::UserData::default(),
-                            ));
-                        }
-                        if arm > 0 && n > arm + 12 {
-                            let img = vctx.input(|i| {
-                                i.events.iter().rev().find_map(|e| match e {
-                                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                                    _ => None,
-                                })
-                            });
-                            if let Some(img) = img {
-                                save_shot(&img, &path);
-                                std::process::exit(0);
-                            }
-                            if n > arm + 150 {
-                                eprintln!("MEETSHOT: kein Bild bekommen");
-                                std::process::exit(2);
-                            }
-                        }
-                        // Notaus, falls die Geraeteabfrage haengt.
-                        if n > 250 {
-                            eprintln!("MEETSHOT: Geraete kamen nie");
-                            std::process::exit(2);
-                        }
-                    }
                 },
             );
             if closed {
