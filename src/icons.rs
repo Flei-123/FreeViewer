@@ -135,6 +135,10 @@ pub const ICONS: &[(&str, &str)] = &[
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v9"/><path d="M6.8 6.8a7.5 7.5 0 1 0 10.4 0"/></svg>"##,
     ),
     (
+        "eye-off",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 5.1A9.6 9.6 0 0 1 12 4.9c6 0 9.5 5.5 9.5 5.5a17 17 0 0 1-2.9 3.4"/><path d="M6.3 6.8A16.6 16.6 0 0 0 2.5 10.4S6 15.9 12 15.9c1.3 0 2.4-.25 3.4-.65"/><path d="M9.6 8.3a3 3 0 0 0 4.2 4.2"/><path d="M3.5 3.5l17 17"/></svg>"##,
+    ),
+    (
         "eye",
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg>"##,
     ),

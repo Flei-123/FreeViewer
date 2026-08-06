@@ -61,6 +61,45 @@ pub fn nv12_packen(src: &[u8], stride: usize, w: u32, h: u32, out: &mut Vec<u8>)
     true
 }
 
+/// Aus Puffergroesse und Zeilenabstand die ECHTE Bildgroesse ableiten.
+///
+/// Media Foundation darf im Medientyp eine Groesse melden und dann eine
+/// andere liefern - gemessen am 06.08.2026: angemeldet 640x360 NV12,
+/// geliefert ein Puffer mit 1 382 400 Bytes und Zeilenabstand 1280, also in
+/// Wahrheit 1280x720. Wer der Meldung glaubt, kopiert das linke obere
+/// Viertel (Bild wirkt hineingezoomt) und liest die Farbebene mitten aus der
+/// Helligkeit (Bild wird gruen/magenta). Zeilenabstand und Puffergroesse
+/// luegen nicht - also rechnen wir die Wahrheit daraus aus.
+///
+/// Rueckgabe: die Groesse, mit der der Puffer gelesen werden DARF.
+pub fn echte_groesse(len: usize, stride: usize, w: u32, h: u32) -> Option<(u32, u32)> {
+    let (wu, hu) = (w as usize, h as usize);
+    if stride == 0 || wu == 0 || hu == 0 || stride < wu {
+        return None;
+    }
+    // Eine NV12-Bildzeile kostet stride Bytes Helligkeit plus stride/2 Bytes
+    // Farbe - zusammen stride*3/2. Daraus folgt, wie viele Zeilen WIRKLICH
+    // im Puffer liegen.
+    let je_zeile = stride * 3 / 2;
+    if je_zeile == 0 {
+        return None;
+    }
+    let zeilen = ((len / je_zeile) as u32) & !1;
+    if zeilen < 2 || (zeilen as usize) < hu {
+        // Weniger Daten als gemeldet: der Puffer liegt nicht mit diesem
+        // Zeilenabstand da (meist dicht gepackt). Hier NICHT raten - der
+        // flache Rueckfall liest ihn richtig.
+        return None;
+    }
+    if zeilen as usize == hu {
+        return Some((w, h)); // Meldung und Puffer passen zusammen
+    }
+    // MEHR Zeilen als gemeldet -> der Medientyp hat gelogen. Dann ist der
+    // Zeilenabstand zugleich die echte Breite (Kameras liefern NV12 ohne
+    // Fuellbytes) und die Zeilenzahl die echte Hoehe.
+    Some(((stride as u32) & !1, zeilen))
+}
+
 /// Mittigen Ausschnitt im Zielverhaeltnis nehmen und auf die Zielgroesse
 /// verkleinern (Flaechenmittel, damit es nicht flimmert).
 ///
@@ -612,20 +651,23 @@ mod win {
             .map_err(|e| format!("Leser: {}", e))?;
         let strom = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
-        // Zuerst genau die gewuenschte Groesse versuchen; klappt das nicht,
-        // nur das Format festlegen und selbst verkleinern.
-        let mut skalieren = false;
-        let mt = MFCreateMediaType().map_err(|e| format!("Medientyp: {}", e))?;
-        mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-            .map_err(|e| format!("Haupttyp: {}", e))?;
-        mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
-            .map_err(|e| format!("Untertyp: {}", e))?;
-        let _ = mt.SetUINT64(&MF_MT_FRAME_SIZE, pack(zw, zh));
-        if fps > 0 {
-            let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1));
+        // ZUERST ein Format nehmen, das die Kamera WIRKLICH kann.
+        //
+        // Frueher wurde einfach die Wunschgroesse gesetzt. Der Leser sagt
+        // dazu "ja" - und liefert trotzdem das native Bild (gemessen:
+        // 640x360 angemeldet, 1280x720 geliefert). Das Ergebnis war ein
+        // zerschnittenes, gruenes Bild. Ein natives Format kann nicht
+        // luegen; verkleinert wird danach mit unserem eigenen, geprueften
+        // Rechenweg.
+        let mut skalieren = true;
+        let mut gesetzt = false;
+        if let Some(t) = bestes_format(&leser, strom, zw, zh, fps) {
+            if leser.SetCurrentMediaType(strom, None, &t).is_ok() {
+                gesetzt = true;
+            }
         }
-        if leser.SetCurrentMediaType(strom, None, &mt).is_err() {
-            skalieren = true;
+        if !gesetzt {
+            // Rueckfall: nur das Farbformat festlegen, Groesse offen lassen.
             let mt2 = MFCreateMediaType().map_err(|e| format!("Medientyp2: {}", e))?;
             mt2.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| format!("Haupttyp2: {}", e))?;
@@ -639,9 +681,7 @@ mod win {
 
         // Was liefert die Kamera nun wirklich?
         let (mut qw, mut qh) = groesse(&leser, strom).unwrap_or((zw, zh));
-        if qw != zw || qh != zh {
-            skalieren = true;
-        }
+        skalieren = qw != zw || qh != zh;
         let _ = tx.send(Ok(name));
 
         let mut roh: Vec<u8> = Vec::new();
@@ -684,8 +724,17 @@ mod win {
                 Some(s) => s,
                 None => continue, // Kamera hat gerade nichts (Pause/Tick)
             };
-            if !bild_holen(&s, qw, qh, &mut roh) {
-                continue;
+            let (rw, rh) = match bild_holen(&s, qw, qh, &mut roh) {
+                Some(g) => g,
+                None => continue,
+            };
+            if rw != qw || rh != qh {
+                // Der Medientyp hat gelogen - ab jetzt mit der echten
+                // Groesse weiterrechnen, sonst schneidet der Skalierer in
+                // einen falschen Ausschnitt.
+                qw = rw;
+                qh = rh;
+                skalieren = qw != zw || qh != zh;
             }
             let bild = if skalieren {
                 if !super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig) {
@@ -861,7 +910,7 @@ mod win {
             let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1));
         }
         match leser.SetCurrentMediaType(strom, None, &mt) {
-            Ok(_) => sag!("Wunschgroesse angenommen"),
+            Ok(_) => sag!("Wunschgroesse angenommen (ACHTUNG: sagt nichts ueber die echten Daten)"),
             Err(e) => {
                 skalieren = true;
                 sag!("Wunschgroesse abgelehnt ({}) -> nur NV12 setzen", e);
@@ -872,6 +921,20 @@ mod win {
                     return format!("{}\nKamera kann kein NV12: {}", log, e);
                 }
             }
+        }
+        // Und jetzt der neue Weg: ein Format, das die Kamera WIRKLICH kann.
+        match bestes_format(&leser, strom, zw, zh, fps) {
+            Some(t) => {
+                sag!("bestes natives NV12: {}", typ_text(&t));
+                match leser.SetCurrentMediaType(strom, None, &t) {
+                    Ok(_) => {
+                        skalieren = true;
+                        sag!("natives Format gesetzt");
+                    }
+                    Err(e) => sag!("natives Format abgelehnt: {}", e),
+                }
+            }
+            None => sag!("kein natives NV12 gefunden"),
         }
         let _ = leser.SetStreamSelection(strom, true);
         if let Ok(cur) = leser.GetCurrentMediaType(strom) {
@@ -942,11 +1005,14 @@ mod win {
                     "flacher Rueckfall (Lock)"
                 }
             );
-            if !bild_holen(&s, qw, qh, &mut roh) {
-                sag!("  bild_holen: FEHLGESCHLAGEN");
-                break;
-            }
-            sag!("  bild_holen ok, {} Bytes", roh.len());
+            let (qw, qh) = match bild_holen(&s, qw, qh, &mut roh) {
+                Some(g) => g,
+                None => {
+                    sag!("  bild_holen: FEHLGESCHLAGEN");
+                    break;
+                }
+            };
+            sag!("  bild_holen ok, {} Bytes, ECHTE Groesse {}x{}", roh.len(), qw, qh);
             // Kennzahlen: liegt die Farbe wirklich um 128?
             let yn = (qw as usize) * (qh as usize);
             let ys: u64 = roh[..yn].iter().map(|v| *v as u64).sum();
@@ -960,7 +1026,7 @@ mod win {
                 vs as f64 / n2 as f64
             );
             sag!("  {}", nv12_png(&roh, qw, qh, &format!("{}\\cam-roh.png", ordner)));
-            if skalieren
+            if (qw != zw || qh != zh)
                 && super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig)
             {
                 sag!("  {}", nv12_png(&fertig, zw, zh, &format!("{}\\cam-fertig.png", ordner)));
@@ -970,6 +1036,69 @@ mod win {
         let _ = leser.Flush(strom);
         let _ = quelle.Shutdown();
         log
+    }
+
+    /// Sucht unter den Formaten, die die Kamera von sich aus beherrscht,
+    /// das beste NV12 fuer die Zielgroesse.
+    ///
+    /// Bewertung, in dieser Reihenfolge:
+    ///   1. gleiches Seitenverhaeltnis wie das Ziel (sonst muss zugeschnitten
+    ///      werden - dann fehlt links und rechts etwas vom Raum),
+    ///   2. mindestens so gross wie das Ziel (hochrechnen bringt nichts),
+    ///   3. moeglichst KLEIN darueber (spart Rechenzeit beim Verkleinern),
+    ///   4. moeglichst nahe an der Wunschbildrate.
+    unsafe fn bestes_format(
+        leser: &IMFSourceReader,
+        strom: u32,
+        zw: u32,
+        zh: u32,
+        fps: u32,
+    ) -> Option<IMFMediaType> {
+        let ziel = zw as f64 / zh.max(1) as f64;
+        let mut bester: Option<(i64, IMFMediaType)> = None;
+        for i in 0..64u32 {
+            let t = match leser.GetNativeMediaType(strom, i) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if t.GetGUID(&MF_MT_SUBTYPE).ok() != Some(MFVideoFormat_NV12) {
+                continue;
+            }
+            let (w, h) = match t.GetUINT64(&MF_MT_FRAME_SIZE) {
+                Ok(v) => ((v >> 32) as u32, (v & 0xffff_ffff) as u32),
+                Err(_) => continue,
+            };
+            if w < 2 || h < 2 {
+                continue;
+            }
+            let bilder = t
+                .GetUINT64(&MF_MT_FRAME_RATE)
+                .ok()
+                .and_then(|v| {
+                    let (n, d) = ((v >> 32) as u32, (v & 0xffff_ffff) as u32);
+                    if d > 0 {
+                        Some(n as f64 / d as f64)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(30.0);
+            // Kleiner ist besser -> negative Punkte fuer Flaeche und Abstand.
+            let verhaeltnis = w as f64 / h as f64;
+            let mut punkte: i64 = 0;
+            if (verhaeltnis - ziel).abs() < 0.02 {
+                punkte += 4_000_000; // gleiches Bildverhaeltnis: kein Zuschnitt
+            }
+            if w >= zw && h >= zh {
+                punkte += 2_000_000; // gross genug, nur verkleinern
+            }
+            punkte -= (w as i64 * h as i64) / 100; // je kleiner, desto besser
+            punkte -= ((bilder - fps.max(1) as f64).abs() * 1000.0) as i64;
+            if bester.as_ref().map(|(p, _)| punkte > *p).unwrap_or(true) {
+                bester = Some((punkte, t));
+            }
+        }
+        bester.map(|(_, t)| t)
     }
 
     unsafe fn groesse(leser: &IMFSourceReader, strom: u32) -> Option<(u32, u32)> {
@@ -983,59 +1112,90 @@ mod win {
         Some((w & !1, h & !1))
     }
 
-    /// Kopiert ein Sample in dicht gepacktes NV12.
-    unsafe fn bild_holen(s: &IMFSample, w: u32, h: u32, out: &mut Vec<u8>) -> bool {
-        let noetig = (w as usize) * (h as usize) * 3 / 2;
-        let buf = match s.ConvertToContiguousBuffer() {
-            Ok(b) => b,
-            Err(_) => return false,
-        };
-        // Der 2D-Weg kennt den Zeilenabstand - der sichere Weg.
-        let vorhanden = buf
+    /// Kopiert ein Sample in dicht gepacktes NV12 und liefert die Groesse,
+    /// die WIRKLICH darin steckt.
+    ///
+    /// WARUM nicht einfach dem Medientyp glauben: gemessen am 06.08.2026 auf
+    /// der "Surface Camera Front" meldet der Quell-Leser 640x360 NV12 und
+    /// liefert dann einen Puffer von 1 382 400 Bytes mit Zeilenabstand 1280 -
+    /// also in Wahrheit ein 1280x720-Bild. Wer dem Typ glaubt, kopiert die
+    /// ersten 640 Bytes von 360 Zeilen (= linkes oberes Viertel, das Bild
+    /// wirkt stark hineingezoomt) und sucht die Farbebene bei 1280*360 -
+    /// mitten in der Helligkeit. Genau daher kamen Justins gruen/magenta
+    /// Bilder. Zeilenabstand und Puffergroesse luegen nicht, der Typ schon.
+    unsafe fn bild_holen(s: &IMFSample, w: u32, h: u32, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        let (wu, hu) = (w as usize, h as usize);
+        let buf = s.ConvertToContiguousBuffer().ok()?;
+        let len = buf
             .GetCurrentLength()
             .ok()
             .filter(|v| *v > 0)
             .or_else(|| buf.GetMaxLength().ok())
             .unwrap_or(0) as usize;
+
+        // --- Weg A: Zeilen mit Abstand (der uebliche Fall) ---
         if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
             let mut zeile0: *mut u8 = std::ptr::null_mut();
             let mut pitch = 0i32;
             if b2.Lock2D(&mut zeile0, &mut pitch).is_ok() {
-                let ok = if pitch > 0 && !zeile0.is_null() {
-                    let stride = pitch as usize;
-                    let gebraucht = stride * (h as usize) * 3 / 2;
-                    // Nie mehr lesen, als der Puffer wirklich hergibt.
-                    if vorhanden >= gebraucht {
-                        let quelle = std::slice::from_raw_parts(zeile0, gebraucht);
-                        super::nv12_packen(quelle, stride, w, h, out)
-                    } else {
-                        false
+                let ergebnis = (|| {
+                    if pitch <= 0 || zeile0.is_null() {
+                        return None;
                     }
-                } else {
-                    false
-                };
+                    let stride = pitch as usize;
+                    let (rw, rh) = super::echte_groesse(len, stride, w, h)?;
+                    let noetig = stride * (rh as usize) * 3 / 2;
+                    if len < noetig {
+                        return None;
+                    }
+                    let q = std::slice::from_raw_parts(zeile0, noetig);
+                    if super::nv12_packen(q, stride, rw, rh, out) {
+                        Some((rw, rh))
+                    } else {
+                        None
+                    }
+                })();
                 let _ = b2.Unlock2D();
-                if ok {
-                    return true;
+                if let Some(g) = ergebnis {
+                    return Some(g);
                 }
             }
         }
-        // Rueckfall: flach sperren. Laut Doku liefert Lock() bei
-        // 2D-Puffern bereits dicht gepackte Daten.
+
+        // --- Weg B: flach sperren. Lock() liefert bei 2D-Puffern dicht
+        // gepackte Daten. Auch hier gilt: passt die Laenge nicht zur
+        // gemeldeten Groesse, hat der Medientyp gelogen.
         let mut p: *mut u8 = std::ptr::null_mut();
-        let mut len = 0u32;
-        if buf.Lock(&mut p, None, Some(&mut len)).is_err() || p.is_null() {
-            return false;
+        let mut flach = 0u32;
+        if buf.Lock(&mut p, None, Some(&mut flach)).is_err() || p.is_null() {
+            return None;
         }
-        let ok = if len as usize >= noetig {
+        let flach = flach as usize;
+        let dicht = wu * hu * 3 / 2;
+        let ergebnis = if flach >= dicht && flach < dicht * 2 {
             out.clear();
-            out.extend_from_slice(std::slice::from_raw_parts(p, noetig));
-            true
+            out.extend_from_slice(std::slice::from_raw_parts(p, dicht));
+            Some((w, h))
+        } else if flach >= dicht * 2 {
+            // Deutlich mehr Daten als erwartet: gleiches Seitenverhaeltnis
+            // annehmen und die echte Groesse ausrechnen (n*n*3/2 = flach).
+            let punkte = flach * 2 / 3;
+            let faktor = (punkte as f64 / (wu * hu) as f64).sqrt();
+            let rw = (((wu as f64 * faktor).round() as u32) & !1).max(2);
+            let rh = (((hu as f64 * faktor).round() as u32) & !1).max(2);
+            let noetig = (rw as usize) * (rh as usize) * 3 / 2;
+            if flach >= noetig {
+                out.clear();
+                out.extend_from_slice(std::slice::from_raw_parts(p, noetig));
+                Some((rw, rh))
+            } else {
+                None
+            }
         } else {
-            false
+            None
         };
         let _ = buf.Unlock();
-        ok
+        ergebnis
     }
 }
 
@@ -1161,6 +1321,61 @@ mod tests {
         assert!(!out.contains(&0xEE), "Muell aus dem Zeilenabstand kopiert");
         assert_eq!(&out[0..4], &[0, 1, 2, 3]);
         assert_eq!(&out[16..20], &[40, 41, 42, 43]); // erste UV-Zeile
+    }
+
+    /// Der echte Messwert vom 06.08.2026 (Surface Camera Front): der
+    /// Medientyp meldete 640x360, der Puffer war 1 382 400 Bytes gross bei
+    /// Zeilenabstand 1280 - das ist 1280x720. Genau dieser Fall hat Justins
+    /// Bild gruen und hineingezoomt gemacht.
+    #[test]
+    fn luegender_medientyp_wird_entlarvt() {
+        assert_eq!(echte_groesse(1_382_400, 1280, 640, 360), Some((1280, 720)));
+    }
+
+    #[test]
+    fn ehrlicher_medientyp_bleibt_stehen() {
+        // 640x360 mit Zeilenabstand 640: passt genau.
+        assert_eq!(echte_groesse(640 * 360 * 3 / 2, 640, 640, 360), Some((640, 360)));
+        // Mit Fuellbytes (Zeilenabstand 768) und passend grossem Puffer.
+        assert_eq!(echte_groesse(768 * 360 * 3 / 2, 768, 640, 360), Some((640, 360)));
+    }
+
+    /// Dicht gepackter Puffer bei grossem Zeilenabstand: hier darf NICHT
+    /// geraten werden, sonst schneidet der 2D-Weg das Bild kaputt. Der
+    /// flache Rueckfall liest ihn richtig - also None melden.
+    #[test]
+    fn dicht_gepackter_puffer_geht_an_den_rueckfall() {
+        assert_eq!(echte_groesse(640 * 360 * 3 / 2, 768, 640, 360), None);
+    }
+
+    #[test]
+    fn unsinnige_puffer_geben_nichts_zurueck() {
+        assert_eq!(echte_groesse(0, 1280, 640, 360), None);
+        assert_eq!(echte_groesse(1000, 0, 640, 360), None);
+        assert_eq!(echte_groesse(100, 1280, 640, 360), None);
+    }
+
+    /// Die Farbebene MUSS hinter der ganzen Helligkeit liegen. Wird sie zu
+    /// frueh gelesen, kommt Helligkeit als Farbe an - das Bild wird gruen.
+    #[test]
+    fn packen_liest_die_farbe_nicht_aus_der_helligkeit() {
+        let (w, h, stride) = (8u32, 6u32, 8usize);
+        let mut src = vec![0u8; stride * (h as usize) * 3 / 2];
+        // Helligkeit 200, Farbe 128 (= farblos).
+        for v in src[..stride * h as usize].iter_mut() {
+            *v = 200;
+        }
+        for v in src[stride * h as usize..].iter_mut() {
+            *v = 128;
+        }
+        let mut out = Vec::new();
+        assert!(nv12_packen(&src, stride, w, h, &mut out));
+        let yn = (w * h) as usize;
+        assert!(out[..yn].iter().all(|v| *v == 200), "Helligkeit verfaelscht");
+        assert!(
+            out[yn..].iter().all(|v| *v == 128),
+            "Farbe kommt aus der Helligkeit - genau der Gruenstich-Fehler"
+        );
     }
 
     #[test]

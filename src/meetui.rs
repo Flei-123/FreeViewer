@@ -39,6 +39,12 @@ pub struct NativMeet {
     kamera: Option<crate::meetcam::Kamera>,
     koder: Option<crate::meetvideo::Kodierer>,
     pub kamera_an: bool,
+    /// Welche Geraete gerade benutzt werden (leer = Standard des Systems).
+    /// WARUM gemerkt: nur so laesst sich im laufenden Meeting umschalten,
+    /// ohne den Raum zu verlassen - genau wie im Browser-Client.
+    pub kamera_geraet: Option<String>,
+    pub mikro_geraet: Option<String>,
+    pub lautsprecher_geraet: Option<String>,
     pub kamera_meldung: String,
     /// Eigenes Bild fuer die Vorschau: (Breite, Hoehe, RGBA).
     pub eigen: Option<(u32, u32, Vec<u8>)>,
@@ -99,6 +105,7 @@ impl NativMeet {
         let ton = meetrtc::starten()?;
         // Ohne Soundkarte (Server, Testrechner) laeuft das Meeting trotzdem -
         // man hoert dann nur nichts. Ehrlich melden statt abbrechen.
+        let (mikro_merk, lautsprecher_merk) = (mikro.clone(), lautsprecher.clone());
         let (geraete, meldung) = match meetaudio::geraete_starten(mikro, lautsprecher) {
             Ok(g) => {
                 let m = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
@@ -125,6 +132,9 @@ impl NativMeet {
             kamera: None,
             koder: None,
             kamera_an: false,
+            kamera_geraet: None,
+            mikro_geraet: mikro_merk,
+            lautsprecher_geraet: lautsprecher_merk,
             kamera_meldung: String::new(),
             eigen: None,
             eigen_stand: 0,
@@ -238,16 +248,13 @@ impl NativMeet {
                 meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
                     // Nicht ueber die eigene Freigabe selbst berichten.
                     let ich = self.sig.zustand().ich;
-                    if peer != ich {
+                    // Nur das FREIGEBEN ist eine Nachricht wert. Das
+                    // Zuruecknehmen stand frueher auch im Chat - das ist
+                    // Rauschen, der Knopf verschwindet ohnehin sichtbar.
+                    if peer != ich && !fvid.is_empty() {
                         let wer = self.name_von(peer);
-                        self.chat.push((
-                            0,
-                            if fvid.is_empty() {
-                                format!("{} hat die Steuerung zurueckgezogen", wer)
-                            } else {
-                                format!("{} erlaubt Fernsteuerung ({})", wer, fvid)
-                            },
-                        ));
+                        self.chat
+                            .push((0, format!("{} erlaubt Fernsteuerung ({})", wer, fvid)));
                     }
                 }
                 meetsig::Ereignis::Fehler { code, text } => {
@@ -524,7 +531,7 @@ impl NativMeet {
                 return;
             }
             match crate::meetcam::oeffnen(
-                None,
+                self.kamera_geraet.clone(),
                 crate::meetvideo::BREITE,
                 crate::meetvideo::HOEHE,
                 30,
@@ -574,6 +581,58 @@ impl NativMeet {
             g.stumm.store(an, std::sync::atomic::Ordering::Relaxed);
         }
         self.sig.stumm("audio", an);
+    }
+
+    /// Kamera im LAUFENDEN Meeting wechseln. `geraet` = None ist das
+    /// Standardgeraet. Laeuft die Kamera gerade, wird sie neu geoeffnet -
+    /// sonst merkt sich das Meeting die Wahl fuer das naechste Einschalten.
+    pub fn kamera_waehlen(&mut self, geraet: Option<String>) {
+        if self.kamera_geraet == geraet {
+            return;
+        }
+        self.kamera_geraet = geraet;
+        if self.kamera_an {
+            // Aus und wieder an: der Aufnahmefaden haengt fest am Geraet,
+            // ein Wechsel im Betrieb ist nicht vorgesehen.
+            self.kamera_schalten(false);
+            self.kamera_schalten(true);
+        }
+    }
+
+    /// Mikrofon und/oder Lautsprecher im laufenden Meeting wechseln.
+    ///
+    /// WARUM beides zusammen: Aufnahme und Wiedergabe haengen an EINEM
+    /// Baustein (gemeinsame Echoausloeschung). Einzeln tauschen ginge nur,
+    /// indem man die Echoschaetzung wegwirft - dann pfeift es.
+    pub fn ton_waehlen(&mut self, mikro: Option<String>, lautsprecher: Option<String>) {
+        if self.mikro_geraet == mikro && self.lautsprecher_geraet == lautsprecher {
+            return;
+        }
+        self.mikro_geraet = mikro.clone();
+        self.lautsprecher_geraet = lautsprecher.clone();
+        // Erst das alte loslassen (Drop stoppt die Faeden), dann das neue.
+        self.geraete = None;
+        match meetaudio::geraete_starten(mikro, lautsprecher) {
+            Ok(g) => {
+                g.stumm
+                    .store(self.stumm, std::sync::atomic::Ordering::Relaxed);
+                self.meldung = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
+                self.protokoll.push(self.meldung.clone());
+                self.geraete = Some(g);
+            }
+            Err(e) => {
+                self.meldung = format!("Kein Ton-Geraet: {}", e);
+                self.protokoll.push(self.meldung.clone());
+            }
+        }
+    }
+
+    /// Namen der gerade benutzten Tongeraete (fuer die Anzeige).
+    pub fn ton_namen(&self) -> (String, String) {
+        match &self.geraete {
+            Some(g) => (g.eingang.clone(), g.ausgang.clone()),
+            None => (String::new(), String::new()),
+        }
     }
 
     pub fn hand_heben(&mut self, an: bool) {
@@ -642,14 +701,10 @@ impl NativMeet {
         }
         self.steuer_frei = an;
         self.sig.fernsteuerung(an, &self.ich_fvid);
-        self.chat.push((
-            0,
-            if an {
-                "Du erlaubst jetzt Fernsteuerung".into()
-            } else {
-                "Fernsteuerung zurueckgezogen".to_string()
-            },
-        ));
+        if an {
+            self.chat
+                .push((0, "Du erlaubst jetzt Fernsteuerung".to_string()));
+        }
     }
 
     /// Wer im Raum laesst sich fernsteuern? (Teilnehmer, Name, FreeViewer-Nr.)

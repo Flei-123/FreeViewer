@@ -3328,8 +3328,16 @@ impl App {
             self.meet_win.geraete_geladen = true;
             let slot = self.meet_win.geraete.clone();
             std::thread::spawn(move || {
-                let g = meet::geraete();
-                *slot.lock().unwrap() = Some(g);
+                let (mics, mut cams) = meet::geraete();
+                // Fuer die Auswahl IM Meeting zaehlen die Namen, die der
+                // Kamera-Oeffner selbst kennt (Media Foundation). Die
+                // PnP-Liste ist nur ein Rueckfall, wenn die leer bleibt.
+                let echte = crate::meetcam::liste();
+                if !echte.is_empty() {
+                    cams = echte.into_iter().map(|g| g.name).collect();
+                }
+                let (_, spks) = crate::meetaudio::geraete_liste();
+                *slot.lock().unwrap() = Some((mics, cams, spks));
             });
         }
     }
@@ -3372,12 +3380,36 @@ impl App {
     /// Nutzer angeklickt hat. Diese Trennung ist der Grund, warum sich jede
     /// Ansicht in `--uitest` ohne Server, Kamera und Soundkarte durchrendern
     /// laesst.
+    /// Meetingfenster zu = Meeting verlassen.
+    ///
+    /// WARUM nicht nur `offen = false`: das Fenster haelt echte Geraete.
+    /// Vorher lief nach dem Schliessen die Kamera weiter (Leuchte an) und
+    /// der Server hielt uns weiter fuer anwesend - genau das, was Justin
+    /// gemeldet hat. Das Kreuz muss dasselbe tun wie "Verlassen".
+    fn meet_win_schliessen(&mut self) {
+        // Die Vorschau vor dem Beitritt haelt Kamera UND Mikrofon.
+        self.vorprobe.aus();
+        if let Some(n) = self.nativ_meet.take() {
+            n.verlassen();
+        }
+        self.nativ_bilder.clear();
+        self.nativ_schirme.clear();
+        self.nativ_eigen = None;
+        self.meet_win.beigetreten = false;
+        self.meet_win.nativ_start = false;
+        self.meet_kam_start = None;
+        // Auch das kleine Fenster muss zu, sonst bleibt es allein stehen.
+        self.meet_z = meetfenster::Fensterzustand::default();
+        self.meet_win.offen = false;
+    }
+
     fn meet_win_ui(&mut self, ctx: &egui::Context) {
         // Geraeteliste uebernehmen, sobald der Hintergrundfaden fertig ist.
         if !self.meet_win.geraete_da {
-            if let Some((mics, cams)) = self.meet_win.geraete.lock().unwrap().clone() {
+            if let Some((mics, cams, spks)) = self.meet_win.geraete.lock().unwrap().clone() {
                 self.meet_win.mics = mics;
                 self.meet_win.cams = cams;
+                self.meet_win.spks = spks;
                 self.meet_win.geraete_da = true;
             }
         }
@@ -3462,9 +3494,7 @@ impl App {
                 self.meet_win.ohne_video = !self.meet_win.ohne_video;
             }
             Some(meetfenster::Beitrittsaktion::Zurueck) => {
-                self.vorprobe.aus();
-                self.nativ_eigen = None;
-                self.meet_win.offen = false;
+                self.meet_win_schliessen();
             }
             Some(meetfenster::Beitrittsaktion::Beitreten) => {
                 self.meet_win.nativ_start = true;
@@ -3686,6 +3716,7 @@ impl App {
                 .map(|id| (*id, n.name_von(*id)))
                 .collect();
 
+            let ton_namen = n.ton_namen();
             sicht = meetfenster::Sicht {
                 raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
                 titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
@@ -3721,6 +3752,15 @@ impl App {
                 tippen,
                 im_warteraum: z.im_warteraum,
                 warte_text: warte_text.clone(),
+                cams: self.meet_win.cams.clone(),
+                mics: self.meet_win.mics.clone(),
+                spks: self.meet_win.spks.clone(),
+                cam_sel: self.meet_win.cam_sel,
+                mic_sel: self.meet_win.mic_sel,
+                spk_sel: self.meet_win.spk_sel,
+                kamera_name: n.kamera_name(),
+                ton_ein: ton_namen.0,
+                ton_aus: ton_namen.1,
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
@@ -3750,27 +3790,37 @@ impl App {
             }
             return;
         }
-        let aktionen = meetfenster::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
+        let mut aktionen = meetfenster::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
         // Bild im Bild: eigenes kleines Fenster, das oben bleibt - sonst
         // sieht man beim Teilen des eigenen Bildschirms niemanden mehr.
         if self.meet_z.pip && !self.headless {
             let mut zu = false;
+            // Der Schalter liegt im Fensterzustand, die Schliesse aber im
+            // Viewport-Rueckruf - deshalb hier eine Kopie, die danach
+            // zurueckgeschrieben wird (sonst liehe sich `self` doppelt aus).
+            let mut selbst = self.meet_z.pip_selbst;
+            let mut pip_aktionen: Vec<meetfenster::Aktion> = Vec::new();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("fv_meet_pip"),
                 egui::ViewportBuilder::default()
                     .with_title("Meeting")
-                    .with_inner_size([260.0, 300.0])
+                    .with_inner_size([260.0, 330.0])
                     .with_always_on_top(),
                 |pctx, _class| {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.fill(theme::bg()))
-                        .show(pctx, |ui| meetfenster::pip_inhalt(ui, &sicht, &bilder));
+                        .show(pctx, |ui| {
+                            pip_aktionen
+                                .extend(meetfenster::pip_inhalt(ui, &sicht, &bilder, &mut selbst));
+                        });
                     if pctx.input(|i| i.viewport().close_requested()) {
                         zu = true;
                     }
                     pctx.request_repaint_after(Duration::from_millis(100));
                 },
             );
+            self.meet_z.pip_selbst = selbst;
+            aktionen.extend(pip_aktionen);
             if zu {
                 self.meet_z.pip = false;
             }
@@ -3807,6 +3857,59 @@ impl App {
                 }
                 meetfenster::Aktion::Verlassen => verlassen = true,
                 meetfenster::Aktion::Steuern(fvid, wer) => steuern_zu = Some((fvid, wer)),
+                meetfenster::Aktion::KameraGeraet(i) => {
+                    self.meet_win.cam_sel = i;
+                    let g = if i == 0 {
+                        None
+                    } else {
+                        self.meet_win.cams.get(i - 1).cloned()
+                    };
+                    n.kamera_waehlen(g);
+                }
+                meetfenster::Aktion::MikroGeraet(i) => {
+                    self.meet_win.mic_sel = i;
+                    let mik = if i == 0 {
+                        None
+                    } else {
+                        self.meet_win.mics.get(i - 1).cloned()
+                    };
+                    let spk = if self.meet_win.spk_sel == 0 {
+                        None
+                    } else {
+                        self.meet_win.spks.get(self.meet_win.spk_sel - 1).cloned()
+                    };
+                    n.ton_waehlen(mik, spk);
+                }
+                meetfenster::Aktion::LautsprecherGeraet(i) => {
+                    self.meet_win.spk_sel = i;
+                    let spk = if i == 0 {
+                        None
+                    } else {
+                        self.meet_win.spks.get(i - 1).cloned()
+                    };
+                    let mik = if self.meet_win.mic_sel == 0 {
+                        None
+                    } else {
+                        self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
+                    };
+                    n.ton_waehlen(mik, spk);
+                }
+                meetfenster::Aktion::GeraeteNeuLesen => {
+                    // Neu einlesen laeuft wieder im Hintergrund - die
+                    // PnP-Abfrage dauert unter Windows fast eine Sekunde.
+                    self.meet_win.geraete_da = false;
+                    *self.meet_win.geraete.lock().unwrap() = None;
+                    let slot = self.meet_win.geraete.clone();
+                    std::thread::spawn(move || {
+                        let (mics, mut cams) = meet::geraete();
+                        let echte = crate::meetcam::liste();
+                        if !echte.is_empty() {
+                            cams = echte.into_iter().map(|g| g.name).collect();
+                        }
+                        let (_, spks) = crate::meetaudio::geraete_liste();
+                        *slot.lock().unwrap() = Some((mics, cams, spks));
+                    });
+                }
                 meetfenster::Aktion::EinladungKopieren => {
                     ctx.copy_text(meet::invite(m));
                     self.meet_win.toast = Some((
@@ -7111,7 +7214,7 @@ impl eframe::App for App {
                 },
             );
             if closed {
-                self.meet_win.offen = false;
+                self.meet_win_schliessen();
             }
         }
 
@@ -7150,9 +7253,14 @@ struct MeetWin {
     stumm: bool,
     ohne_video: bool,
     /// Einmalig im Hintergrund eingelesen (die Abfrage dauert einen Moment).
-    geraete: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>)>>>,
+    #[allow(clippy::type_complexity)]
+    geraete: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>, Vec<String>)>>>,
     geraete_geladen: bool,
     geraete_da: bool,
+    /// Lautsprecher - nur fuer die Einstellungen IM Meeting; vor dem
+    /// Beitritt zeigt der Browser sie auch nicht.
+    spks: Vec<String>,
+    spk_sel: usize,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
     tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
     tn_busy: Arc<std::sync::atomic::AtomicBool>,
@@ -7174,6 +7282,8 @@ impl Default for MeetWin {
             cams: Vec::new(),
             mic_sel: 0,
             cam_sel: 0,
+            spks: Vec::new(),
+            spk_sel: 0,
             stumm: false,
             ohne_video: false,
             geraete: Arc::new(std::sync::Mutex::new(None)),

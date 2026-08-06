@@ -123,6 +123,19 @@ pub struct Sicht {
     pub im_warteraum: bool,
     /// Text des Servers dazu ("Der Gastgeber wurde benachrichtigt.").
     pub warte_text: String,
+    /// Geraete, die sich im LAUFENDEN Meeting umstellen lassen. Der Browser
+    /// kann das auch - ohne den Raum zu verlassen.
+    pub cams: Vec<String>,
+    pub mics: Vec<String>,
+    pub spks: Vec<String>,
+    /// 0 = Standardgeraet, sonst Index+1 in der jeweiligen Liste.
+    pub cam_sel: usize,
+    pub mic_sel: usize,
+    pub spk_sel: usize,
+    /// Was gerade WIRKLICH laeuft (Name aus dem Treiber) - zur Kontrolle.
+    pub kamera_name: String,
+    pub ton_ein: String,
+    pub ton_aus: String,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -138,6 +151,10 @@ pub struct Fensterzustand {
     /// JEDEM Tastendruck eine Nachricht raus - der Server bekaeme Dutzende
     /// Meldungen je Wort.
     pub tippt_gemeldet: bool,
+    /// Einstellungen (Geraetewahl) sind aufgeklappt.
+    pub einstellungen_offen: bool,
+    /// Im Bild-im-Bild auch die EIGENE Kamera zeigen.
+    pub pip_selbst: bool,
 }
 
 impl Default for Fensterzustand {
@@ -150,6 +167,10 @@ impl Default for Fensterzustand {
             vollbild: false,
             pip: false,
             tippt_gemeldet: false,
+            einstellungen_offen: false,
+            // Sich selbst im kleinen Fenster sehen ist der Normalfall - beim
+            // Bildschirmteilen will man ja pruefen, ob die Kamera laeuft.
+            pip_selbst: true,
         }
     }
 }
@@ -186,6 +207,12 @@ pub enum Aktion {
     /// Eine echte FreeViewer-Sitzung zu diesem Teilnehmer aufbauen.
     Steuern(String, String),
     EinladungKopieren,
+    /// Geraet im laufenden Meeting wechseln (0 = Standardgeraet).
+    KameraGeraet(usize),
+    MikroGeraet(usize),
+    LautsprecherGeraet(usize),
+    /// Geraeteliste neu einlesen (nach Ein-/Ausstecken).
+    GeraeteNeuLesen,
 }
 
 /// Der Beitritts-Schirm braucht Schreibzugriff (Name, Geraetewahl).
@@ -1101,6 +1128,9 @@ pub fn meeting_ui(
     if !s.wartende.is_empty() {
         lobby_leiste(ctx, s, z, &f, &mut aktionen);
     }
+    if z.einstellungen_offen {
+        einstellungen(ctx, s, z, &f, &mut aktionen);
+    }
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(f.p.bg).inner_margin(egui::Margin::same(0)))
@@ -1203,7 +1233,7 @@ fn fuss(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 // Zentrieren: der Rest links und rechts als Luecke.
-                let anzahl = 8
+                let anzahl = 9
                     + if !s.schirme.is_empty() { 2 } else { 0 }
                     + if s.gastgeber { 2 } else { 0 };
                 let gebraucht = anzahl as f32 * 82.0;
@@ -1324,6 +1354,19 @@ fn fuss(
                 if ctl(
                     ui,
                     f,
+                    "settings",
+                    "Einstellungen",
+                    if z.einstellungen_offen { Ctl::An } else { Ctl::Normal },
+                    None,
+                )
+                .on_hover_text("Kamera, Mikrofon und Lautsprecher umstellen")
+                .clicked()
+                {
+                    z.einstellungen_offen = !z.einstellungen_offen;
+                }
+                if ctl(
+                    ui,
+                    f,
                     "chat",
                     "Chat",
                     if z.seite_offen { Ctl::An } else { Ctl::Normal },
@@ -1353,6 +1396,102 @@ fn fuss(
                 }
             });
         });
+}
+
+/// Einstellungen MITTEN im Meeting: Kamera, Mikrofon, Lautsprecher.
+///
+/// WARUM als eigenes Fenster und nicht in der Seitenleiste: die Wahl ist
+/// eine kurze Unterbrechung, danach will man sie wieder weghaben. Der
+/// Browser-Client macht es genauso (Overlay ueber der Buehne).
+fn einstellungen(
+    ctx: &egui::Context,
+    s: &Sicht,
+    z: &mut Fensterzustand,
+    f: &Farben,
+    aktionen: &mut Vec<Aktion>,
+) {
+    let mut offen = true;
+    egui::Window::new("Einstellungen")
+        .open(&mut offen)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(340.0)
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -20.0))
+        .frame(
+            egui::Frame::NONE
+                .fill(f.p.card)
+                .stroke(egui::Stroke::new(1.0, f.p.line))
+                .corner_radius(12.0)
+                .inner_margin(egui::Margin::same(14)),
+        )
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            let breite = 300.0;
+
+            feld_beschriftung(ui, f, Some("cam"), "Kamera");
+            let mut cam = s.cam_sel;
+            geraete_wahl(ui, "set_cam", breite, &s.cams, &mut cam);
+            if cam != s.cam_sel {
+                aktionen.push(Aktion::KameraGeraet(cam));
+            }
+            if !s.kamera_name.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("läuft: {}", kurz(&s.kamera_name, 42)))
+                        .size(10.5)
+                        .color(f.p.muted),
+                );
+            }
+            ui.add_space(6.0);
+
+            feld_beschriftung(ui, f, Some("mic"), "Mikrofon");
+            let mut mic = s.mic_sel;
+            geraete_wahl(ui, "set_mic", breite, &s.mics, &mut mic);
+            if mic != s.mic_sel {
+                aktionen.push(Aktion::MikroGeraet(mic));
+            }
+            ui.add_space(6.0);
+
+            feld_beschriftung(ui, f, Some("sound"), "Lautsprecher");
+            let mut spk = s.spk_sel;
+            geraete_wahl(ui, "set_spk", breite, &s.spks, &mut spk);
+            if spk != s.spk_sel {
+                aktionen.push(Aktion::LautsprecherGeraet(spk));
+            }
+            if !s.ton_ein.is_empty() || !s.ton_aus.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "läuft: {} → {}",
+                        kurz(&s.ton_ein, 20),
+                        kurz(&s.ton_aus, 20)
+                    ))
+                    .size(10.5)
+                    .color(f.p.muted),
+                );
+            }
+            ui.add_space(10.0);
+
+            ui.horizontal(|ui| {
+                if mini(ui, f, "Geräte neu suchen", false).clicked() {
+                    aktionen.push(Aktion::GeraeteNeuLesen);
+                }
+                if mini(ui, f, "Fertig", true).clicked() {
+                    z.einstellungen_offen = false;
+                }
+            });
+            // Ehrlich bleiben: ein Wechsel der Tongeraete setzt die
+            // Echoausloeschung zurueck, das hoert man kurz.
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Beim Wechsel setzt die Echounterdrückung kurz aus - das ist normal.",
+                )
+                .size(10.0)
+                .color(f.p.muted),
+            );
+        });
+    if !offen {
+        z.einstellungen_offen = false;
+    }
 }
 
 // ------------------------------------------------------------- Seitenleiste
@@ -2054,36 +2193,122 @@ fn raster(ui: &mut egui::Ui, flaeche: Rect, kacheln: &[Kachel], b: &Bilder, f: &
 
 /// Das kleine Bild-im-Bild-Fenster: die Kameras der anderen, waehrend man
 /// selbst den Bildschirm teilt und das grosse Fenster verdeckt ist.
-pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder) {
+/// Das kleine Fenster, das oben bleibt. Es zeigt die anderen UND - wenn
+/// gewuenscht - die eigene Kamera, dazu eine schmale Leiste mit reinen
+/// Symbolknoepfen.
+///
+/// WARUM Knoepfe hier: waehrend man den eigenen Bildschirm teilt, liegt das
+/// grosse Meetingfenster hinter der geteilten Anwendung. Ohne Knoepfe im
+/// kleinen Fenster kaeme man an Stummschaltung und Kamera nicht mehr heran,
+/// ohne das Teilen zu unterbrechen.
+pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -> Vec<Aktion> {
     let f = farben();
+    let mut aktionen: Vec<Aktion> = Vec::new();
     let (_, kameras) = kacheln_bauen(s);
-    let andere: Vec<&Kachel> = kameras.iter().filter(|k| !k.ich).collect();
+    // Erst die anderen, die eigene Kachel zuletzt (wie im Browser).
+    let mut zeigen: Vec<&Kachel> = kameras.iter().filter(|k| !k.ich).collect();
+    if *selbst {
+        if let Some(ich) = kameras.iter().find(|k| k.ich) {
+            zeigen.push(ich);
+        }
+    }
     let flaeche = ui.available_rect_before_wrap();
     ui.allocate_rect(flaeche, egui::Sense::hover());
     ui.painter().rect_filled(flaeche, 0.0, f.p.bg);
-    if andere.is_empty() {
+
+    // --- Leiste unten: nur Symbole, damit sie in 260 px Breite passt ---
+    let leiste_h = 34.0;
+    let leiste = Rect::from_min_size(
+        pos2(flaeche.left(), flaeche.bottom() - leiste_h),
+        vec2(flaeche.width(), leiste_h),
+    );
+    ui.painter().rect_filled(leiste, 0.0, f.p.card);
+    let knoepfe: [(&str, bool, &str); 4] = [
+        (
+            if s.stumm { "mic-off" } else { "mic" },
+            s.stumm,
+            if s.stumm { "Stummschaltung aufheben" } else { "Stummschalten" },
+        ),
+        (
+            if s.kamera_an { "cam" } else { "cam-off" },
+            !s.kamera_an,
+            if s.kamera_an { "Kamera aus" } else { "Kamera an" },
+        ),
+        (
+            if *selbst { "eye" } else { "eye-off" },
+            !*selbst,
+            if *selbst { "Dich hier ausblenden" } else { "Dich hier einblenden" },
+        ),
+        ("leave", true, "Meeting verlassen"),
+    ];
+    let gr = 26.0;
+    let luecke = 8.0;
+    let gesamt = knoepfe.len() as f32 * gr + (knoepfe.len() as f32 - 1.0) * luecke;
+    let mut x = leiste.center().x - gesamt * 0.5;
+    for (i, (name, aus, tip)) in knoepfe.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, leiste.center().y - gr * 0.5), Vec2::splat(gr));
+        let antwort = ui
+            .interact(r, ui.id().with(("pipknopf", i)), egui::Sense::click())
+            .on_hover_text(*tip);
+        // Der letzte Knopf ist das Auflegen - immer rot, sonst greift man daneben.
+        let grund = if i == 3 {
+            f.bad
+        } else if *aus {
+            dunkler(f.p.card_hi, 0.9)
+        } else {
+            f.p.card_hi
+        };
+        let grund = if antwort.hovered() { dunkler(grund, 1.25) } else { grund };
+        ui.painter().circle_filled(r.center(), gr * 0.5, grund);
+        let farbe = if i == 3 {
+            Color32::WHITE
+        } else if *aus {
+            f.bad
+        } else {
+            f.p.text
+        };
+        let ir = Rect::from_center_size(r.center(), Vec2::splat(gr * 0.58));
+        icons::image(name, gr * 0.58, farbe).paint_at(ui, ir);
+        if antwort.clicked() {
+            match i {
+                0 => aktionen.push(Aktion::Stumm(!s.stumm)),
+                1 => aktionen.push(Aktion::Kamera(!s.kamera_an)),
+                2 => *selbst = !*selbst,
+                _ => aktionen.push(Aktion::Verlassen),
+            }
+        }
+        if antwort.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        x += gr + luecke;
+    }
+
+    // --- Kacheln darueber ---
+    let oben = Rect::from_min_max(flaeche.min, pos2(flaeche.right(), leiste.top()));
+    if zeigen.is_empty() {
         ui.painter().text(
-            flaeche.center(),
+            oben.center(),
             egui::Align2::CENTER_CENTER,
             "Niemand sonst da",
             egui::FontId::proportional(12.0),
             f.p.muted,
         );
-        return;
+        return aktionen;
     }
     let lueck = 6.0;
-    let n = andere.len();
-    let hoehe = ((flaeche.height() - lueck * (n as f32 + 1.0)) / n as f32).max(40.0);
-    for (i, k) in andere.iter().enumerate() {
+    let n = zeigen.len();
+    let hoehe = ((oben.height() - lueck * (n as f32 + 1.0)) / n as f32).max(40.0);
+    for (i, k) in zeigen.iter().enumerate() {
         let r = Rect::from_min_size(
-            pos2(flaeche.left() + lueck, flaeche.top() + lueck + i as f32 * (hoehe + lueck)),
-            vec2(flaeche.width() - 2.0 * lueck, hoehe),
+            pos2(oben.left() + lueck, oben.top() + lueck + i as f32 * (hoehe + lueck)),
+            vec2(oben.width() - 2.0 * lueck, hoehe),
         );
-        if r.bottom() > flaeche.bottom() {
+        if r.bottom() > oben.bottom() {
             break;
         }
         kachel_malen(ui, r, k, tex_fuer(k, b), &f);
     }
+    aktionen
 }
 
 
@@ -2189,6 +2414,15 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             tippen: vec!["Cem".into()],
             im_warteraum: false,
             warte_text: String::new(),
+            cams: vec!["Integrated Webcam".into(), "Logitech StreamCam".into()],
+            mics: vec!["Mikrofonarray".into(), "Yeti Nano".into()],
+            spks: vec!["Lautsprecher (Realtek)".into(), "Kopfhoerer".into()],
+            cam_sel: 1,
+            mic_sel: 0,
+            spk_sel: 0,
+            kamera_name: "Integrated Webcam (1280x720 -> 640x360)".into(),
+            ton_ein: "Mikrofonarray".into(),
+            ton_aus: "Lautsprecher (Realtek)".into(),
         }
     };
     let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| Fensterzustand {
