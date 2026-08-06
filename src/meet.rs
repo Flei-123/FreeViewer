@@ -79,14 +79,77 @@ pub fn create(titel: &str) -> Result<Meeting> {
     Ok(m)
 }
 
-/// Was gerade im Verzeichnis steht (ohne Passwoerter).
+/// Wo die EIGENEN Meetings liegen.
+fn eigene_datei() -> std::path::PathBuf {
+    crate::ident::config_dir().join("meine-meetings.json")
+}
+
+fn eigene_schreiben(liste: &[Meeting]) {
+    let arr: Vec<serde_json::Value> = liste
+        .iter()
+        .map(|x| {
+            serde_json::json!({
+                "id": x.id,
+                "titel": x.titel,
+                "passwort": x.passwort,
+                "termin_text": x.termin_text,
+            })
+        })
+        .collect();
+    let p = eigene_datei();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, serde_json::to_vec_pretty(&arr).unwrap_or_default());
+}
+
+/// Die eigenen Meetings (angelegt oder beigetreten), neueste zuerst.
+///
+/// WARUM nicht mehr vom Server: der lieferte frueher ALLE Meetings mit
+/// Nummer und Titel an jeden, der fragte - ohne Anmeldung. Damit sah jeder
+/// Fremde, wer sich gerade wozu trifft. Eine Uebersicht ist das nicht wert.
+/// Jetzt merkt sich jeder Rechner seine eigenen; ob eines noch laeuft,
+/// beantwortet der Server weiterhin - dafuer muss man die Nummer aber
+/// bereits kennen.
+pub fn eigene() -> Vec<Meeting> {
+    let text = std::fs::read_to_string(eigene_datei()).unwrap_or_default();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    v.as_array()
+        .map(|a| a.iter().map(from_json).collect())
+        .unwrap_or_default()
+}
+
+/// Ein Meeting in die eigene Liste aufnehmen (oder auffrischen).
+pub fn merken(m: &Meeting) {
+    if m.id.trim().is_empty() {
+        return;
+    }
+    let mut liste = eigene();
+    liste.retain(|x| x.id != m.id);
+    liste.insert(0, m.clone());
+    let hoechstens: Vec<Meeting> = liste.into_iter().take(12).collect();
+    eigene_schreiben(&hoechstens);
+}
+
+/// Ein Meeting aus der eigenen Liste streichen.
+pub fn vergessen(id: &str) {
+    let mut liste = eigene();
+    liste.retain(|x| x.id != id);
+    eigene_schreiben(&liste);
+}
+
+/// Die eigenen Meetings, die WIRKLICH noch laufen. Der Server wird je
+/// Nummer einzeln gefragt - abgelaufene fliegen aus der Liste.
 pub fn list() -> Result<Vec<Meeting>> {
-    let v = get_json(&format!("{}/api/meetings", base()))?;
-    let arr = v.as_array().cloned().unwrap_or_default();
-    // Neueste zuerst und hoechstens ein Dutzend - der Server haelt 24 Stunden vor.
-    let mut list: Vec<Meeting> = arr.iter().map(from_json).collect();
-    list.reverse();
-    Ok(list.into_iter().take(12).collect())
+    let mut aus = Vec::new();
+    for m in eigene() {
+        if exists(&m.id) {
+            aus.push(m);
+        } else {
+            vergessen(&m.id);
+        }
+    }
+    Ok(aus)
 }
 
 /// Gibt es die ID? (Der Server antwortet ohne Passwort.)

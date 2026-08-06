@@ -20,10 +20,12 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
         DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
     unsafe {
-        let hwnd = match crate::tray::main_window() {
-            Some(h) => h,
-            None => return,
-        };
+        // ALLE eigenen Fenster einfaerben, nicht nur das Hauptfenster.
+        //
+        // Das Meetingfenster ist ein eigenes Fenster - es bekam die Farbe nie
+        // und trug deshalb immer die weisse Standard-Titelleiste, egal welches
+        // Aussehen eingestellt war. Genau das hat Justin gesehen.
+        for hwnd in eigene_fenster() {
         let d = BOOL::from(dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -43,7 +45,32 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
                 4,
             );
         }
+        }
     }
+}
+
+/// Alle sichtbaren Fenster oberster Ebene DIESES Programms.
+#[cfg(windows)]
+fn eigene_fenster() -> Vec<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    unsafe extern "system" fn sammeln(h: HWND, l: LPARAM) -> BOOL {
+        let liste = &mut *(l.0 as *mut Vec<HWND>);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == GetCurrentProcessId() && IsWindowVisible(h).as_bool() {
+            liste.push(h);
+        }
+        BOOL::from(true)
+    }
+    let mut liste: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(sammeln), LPARAM(&mut liste as *mut _ as isize));
+    }
+    liste
 }
 
 #[cfg(not(windows))]

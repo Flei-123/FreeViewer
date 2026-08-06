@@ -463,6 +463,60 @@ pub enum Ctl {
     Gefahr,
 }
 
+/// Ein KLEINER Knopf: nur das Zeichen, Beschriftung als Hinweis beim
+/// Darauffahren. Fuer die Leiste oben rechts - dort zaehlt jeder Pixel,
+/// und die Woerter darunter haben die halbe Fensterhoehe gekostet.
+fn ctl_klein(
+    ui: &mut egui::Ui,
+    f: &Farben,
+    symbol: &str,
+    wort: &str,
+    zustand: Ctl,
+    zaehler: Option<u32>,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::click());
+    let (grund, rand, vorn) = match zustand {
+        Ctl::Normal => (
+            f.p.card_hi,
+            f.p.line,
+            if resp.hovered() { f.p.text } else { f.p.muted },
+        ),
+        Ctl::An => (
+            f.p.accent.gamma_multiply(0.16),
+            f.p.accent.gamma_multiply(0.45),
+            f.p.accent,
+        ),
+        Ctl::Aus => (f.bad.gamma_multiply(0.16), f.bad.gamma_multiply(0.45), f.bad),
+        Ctl::Gefahr => (f.bad.gamma_multiply(0.14), f.bad.gamma_multiply(0.32), f.bad),
+    };
+    let grund = if resp.hovered() {
+        grund.gamma_multiply(1.35)
+    } else {
+        grund
+    };
+    let mal = ui.painter();
+    mal.rect_filled(rect, 9.0, grund);
+    mal.rect_stroke(rect, 9.0, egui::Stroke::new(1.0, rand), egui::StrokeKind::Inside);
+    icons::image(symbol, 17.0, vorn)
+        .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(17.0)));
+    if let Some(n) = zaehler {
+        if n > 0 {
+            let text = if n > 9 { "9+".to_string() } else { n.to_string() };
+            let mitte = pos2(rect.right() - 5.0, rect.top() + 5.0);
+            ui.painter().circle_filled(mitte, 7.0, f.bad);
+            ui.painter().text(
+                mitte,
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(9.0),
+                Color32::from_rgb(0x2b, 0x05, 0x05),
+            );
+        }
+    }
+    resp.on_hover_text(wort)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Ein Knopf der Fussleiste: Zeichen oben, Wort darunter - wie bei Meet
 /// und Teams. Genau die Form, die der Browser-Client zeigt.
 fn ctl(
@@ -1262,8 +1316,10 @@ pub fn meeting_ui(
     let f = farben();
     let mut aktionen: Vec<Aktion> = Vec::new();
 
-    kopf(ctx, s, &f, &mut aktionen);
-    fuss(ctx, s, z, &f, &mut aktionen);
+    // Die Bedienknoepfe sitzen jetzt klein oben rechts statt als breite
+    // Leiste unten - die kostete fast ein Zehntel der Fensterhoehe, und im
+    // Meeting zaehlt jeder Pixel fuer das Bild.
+    kopf(ctx, s, z, &f, &mut aktionen);
     if z.seite_offen {
         seite(ctx, s, z, &f, &mut aktionen);
     }
@@ -1285,7 +1341,13 @@ pub fn meeting_ui(
     aktionen
 }
 
-fn kopf(ctx: &egui::Context, s: &Sicht, f: &Farben, aktionen: &mut Vec<Aktion>) {
+fn kopf(
+    ctx: &egui::Context,
+    s: &Sicht,
+    z: &mut Fensterzustand,
+    f: &Farben,
+    aktionen: &mut Vec<Aktion>,
+) {
     egui::TopBottomPanel::top("meet_kopf")
         .frame(
             egui::Frame::NONE
@@ -1349,205 +1411,159 @@ fn kopf(ctx: &egui::Context, s: &Sicht, f: &Farben, aktionen: &mut Vec<Aktion>) 
                     tag(ui, f, None, &s.bandbreite, Ton::Neutral, false);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let wort = if s.leute.len() == 1 {
-                        "1 Teilnehmer".to_string()
-                    } else {
-                        format!("{} Teilnehmer", s.leute.len())
-                    };
-                    tag(ui, f, Some("people"), &wort, Ton::Neutral, false)
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    // Von RECHTS nach links aufgebaut: das Auflegen ganz
+                    // aussen, wo man es sucht.
+                    if ctl_klein(ui, f, "leave", "Meeting verlassen", Ctl::Gefahr, None).clicked() {
+                        aktionen.push(Aktion::Verlassen);
+                    }
+                    if s.gastgeber {
+                        if ctl_klein(ui, f, "end", "Meeting für ALLE beenden", Ctl::Gefahr, None)
+                            .clicked()
+                        {
+                            aktionen.push(Aktion::Beenden);
+                        }
+                        if ctl_klein(ui, f, "muteall", "Alle stummschalten", Ctl::Normal, None)
+                            .clicked()
+                        {
+                            aktionen.push(Aktion::AlleStumm);
+                        }
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        "chat",
+                        "Chat",
+                        if z.seite_offen { Ctl::An } else { Ctl::Normal },
+                        Some(s.ungelesen),
+                    )
+                    .clicked()
+                    {
+                        z.seite_offen = !z.seite_offen;
+                        z.reiter = Reiter::Chat;
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        "settings",
+                        "Kamera, Mikrofon und Lautsprecher umstellen",
+                        if z.einstellungen_offen { Ctl::An } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        z.einstellungen_offen = !z.einstellungen_offen;
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        "hand",
+                        "Hand heben",
+                        if s.hand { Ctl::An } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        aktionen.push(Aktion::Hand(!s.hand));
+                    }
+                    if !s.schirme.is_empty() {
+                        if ctl_klein(
+                            ui,
+                            f,
+                            if z.vollbild { "shrink" } else { "full" },
+                            "Geteilten Bildschirm groß auf die ganze Fläche",
+                            if z.vollbild { Ctl::An } else { Ctl::Normal },
+                            None,
+                        )
+                        .clicked()
+                        {
+                            z.vollbild = !z.vollbild;
+                        }
+                        if ctl_klein(
+                            ui,
+                            f,
+                            "layout",
+                            z.kameraplatz.wort(),
+                            if z.kameraplatz == Kameraplatz::Aus { Ctl::Aus } else { Ctl::Normal },
+                            None,
+                        )
+                        .clicked()
+                        {
+                            z.kameraplatz = z.kameraplatz.weiter();
+                        }
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        if z.pip { "pip" } else { "pip-off" },
+                        "Kleines Fenster, das oben bleibt",
+                        if z.pip { Ctl::An } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        z.pip = !z.pip;
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        "keyboard",
+                        "Andere dürfen diesen PC mit FreeViewer steuern",
+                        if s.steuer_frei { Ctl::An } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        aktionen.push(Aktion::Steuerung(!s.steuer_frei));
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        if s.schirm_an { "screen-off" } else { "screen" },
+                        if s.schirm_an { "Teilen beenden" } else { "Bildschirm teilen" },
+                        if s.schirm_an { Ctl::An } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        if s.schirm_an {
+                            aktionen.push(Aktion::Schirm(false));
+                        } else if s.monitore.len() > 1 {
+                            z.schirmwahl_offen = true;
+                        } else {
+                            aktionen.push(Aktion::SchirmWaehlen(0));
+                        }
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        if s.kamera_an { "cam" } else { "cam-off" },
+                        if s.kamera_an { "Kamera aus" } else { "Kamera an" },
+                        if s.kamera_an { Ctl::Normal } else { Ctl::Aus },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        aktionen.push(Aktion::Kamera(!s.kamera_an));
+                    }
+                    if ctl_klein(
+                        ui,
+                        f,
+                        if s.stumm { "mic-off" } else { "mic" },
+                        if s.stumm { "Stummschaltung aufheben" } else { "Stummschalten" },
+                        if s.stumm { Ctl::Aus } else { Ctl::Normal },
+                        None,
+                    )
+                    .clicked()
+                    {
+                        aktionen.push(Aktion::Stumm(!s.stumm));
+                    }
+                    ui.add_space(6.0);
+                    // Nur Symbol und Zahl - das Wort "Teilnehmer" sagt
+                    // niemandem etwas Neues und frisst Platz in der Leiste.
+                    tag(ui, f, Some("people"), &s.leute.len().to_string(), Ton::Neutral, false)
                         .on_hover_text("Wer gerade im Raum ist");
                 });
-            });
-        });
-}
-
-fn fuss(
-    ctx: &egui::Context,
-    s: &Sicht,
-    z: &mut Fensterzustand,
-    f: &Farben,
-    aktionen: &mut Vec<Aktion>,
-) {
-    egui::TopBottomPanel::bottom("meet_fuss")
-        .frame(
-            egui::Frame::NONE
-                .fill(f.p.card)
-                .inner_margin(egui::Margin::symmetric(12, 8)),
-        )
-        .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                // Zentrieren: der Rest links und rechts als Luecke.
-                let anzahl = 9
-                    + if !s.schirme.is_empty() { 2 } else { 0 }
-                    + if s.gastgeber { 2 } else { 0 };
-                let gebraucht = anzahl as f32 * 82.0;
-                let luft = ((ui.available_width() - gebraucht) * 0.5).max(0.0);
-                ui.add_space(luft);
-
-                if ctl(
-                    ui,
-                    f,
-                    if s.stumm { "mic-off" } else { "mic" },
-                    "Mikro",
-                    if s.stumm { Ctl::Aus } else { Ctl::Normal },
-                    None,
-                )
-                .on_hover_text(if s.stumm {
-                    "Stummschaltung aufheben"
-                } else {
-                    "Stummschalten"
-                })
-                .clicked()
-                {
-                    aktionen.push(Aktion::Stumm(!s.stumm));
-                }
-                if ctl(
-                    ui,
-                    f,
-                    if s.kamera_an { "cam" } else { "cam-off" },
-                    "Kamera",
-                    if s.kamera_an { Ctl::Normal } else { Ctl::Aus },
-                    None,
-                )
-                .clicked()
-                {
-                    aktionen.push(Aktion::Kamera(!s.kamera_an));
-                }
-                if ctl(
-                    ui,
-                    f,
-                    if s.schirm_an { "screen-off" } else { "screen" },
-                    "Bildschirm",
-                    if s.schirm_an { Ctl::An } else { Ctl::Normal },
-                    None,
-                )
-                .clicked()
-                {
-                    if s.schirm_an {
-                        aktionen.push(Aktion::Schirm(false));
-                    } else if s.monitore.len() > 1 {
-                        // Zwei Bildschirme, und wir haetten stillschweigend
-                        // den ersten genommen - wer den zweiten teilen wollte,
-                        // sah scheinbar "nichts passiert".
-                        z.schirmwahl_offen = true;
-                    } else {
-                        aktionen.push(Aktion::SchirmWaehlen(0));
-                    }
-                }
-                if ctl(
-                    ui,
-                    f,
-                    "keyboard",
-                    "Steuerung",
-                    if s.steuer_frei { Ctl::An } else { Ctl::Normal },
-                    None,
-                )
-                .on_hover_text("Andere dürfen diesen PC mit FreeViewer steuern")
-                .clicked()
-                {
-                    aktionen.push(Aktion::Steuerung(!s.steuer_frei));
-                }
-                if ctl(
-                    ui,
-                    f,
-                    if z.pip { "pip" } else { "pip-off" },
-                    "Bild im Bild",
-                    if z.pip { Ctl::An } else { Ctl::Normal },
-                    None,
-                )
-                .on_hover_text("Kleines Fenster mit den anderen - bleibt sichtbar, wenn du deinen Bildschirm teilst")
-                .clicked()
-                {
-                    z.pip = !z.pip;
-                }
-                if !s.schirme.is_empty() {
-                    if ctl(
-                        ui,
-                        f,
-                        "layout",
-                        z.kameraplatz.wort(),
-                        if z.kameraplatz == Kameraplatz::Aus {
-                            Ctl::Aus
-                        } else {
-                            Ctl::Normal
-                        },
-                        None,
-                    )
-                    .on_hover_text("Wohin mit den Kameras, während ein Bildschirm geteilt wird?")
-                    .clicked()
-                    {
-                        z.kameraplatz = z.kameraplatz.weiter();
-                    }
-                    if ctl(
-                        ui,
-                        f,
-                        if z.vollbild { "shrink" } else { "full" },
-                        "Vollbild",
-                        if z.vollbild { Ctl::An } else { Ctl::Normal },
-                        None,
-                    )
-                    .on_hover_text("Geteilten Bildschirm groß auf die ganze Fläche")
-                    .clicked()
-                    {
-                        z.vollbild = !z.vollbild;
-                    }
-                }
-                if ctl(
-                    ui,
-                    f,
-                    "hand",
-                    "Hand",
-                    if s.hand { Ctl::An } else { Ctl::Normal },
-                    None,
-                )
-                .clicked()
-                {
-                    aktionen.push(Aktion::Hand(!s.hand));
-                }
-                if ctl(
-                    ui,
-                    f,
-                    "settings",
-                    "Einstellungen",
-                    if z.einstellungen_offen { Ctl::An } else { Ctl::Normal },
-                    None,
-                )
-                .on_hover_text("Kamera, Mikrofon und Lautsprecher umstellen")
-                .clicked()
-                {
-                    z.einstellungen_offen = !z.einstellungen_offen;
-                }
-                if ctl(
-                    ui,
-                    f,
-                    "chat",
-                    "Chat",
-                    if z.seite_offen { Ctl::An } else { Ctl::Normal },
-                    Some(s.ungelesen),
-                )
-                .clicked()
-                {
-                    z.seite_offen = !z.seite_offen;
-                    z.reiter = Reiter::Chat;
-                }
-                if s.gastgeber {
-                    if ctl(ui, f, "muteall", "Alle stumm", Ctl::Normal, None)
-                        .on_hover_text("Alle Teilnehmer stummschalten")
-                        .clicked()
-                    {
-                        aktionen.push(Aktion::AlleStumm);
-                    }
-                    if ctl(ui, f, "end", "Beenden", Ctl::Gefahr, None)
-                        .on_hover_text("Meeting für ALLE beenden")
-                        .clicked()
-                    {
-                        aktionen.push(Aktion::Beenden);
-                    }
-                }
-                if ctl(ui, f, "leave", "Verlassen", Ctl::Gefahr, None).clicked() {
-                    aktionen.push(Aktion::Verlassen);
-                }
             });
         });
 }

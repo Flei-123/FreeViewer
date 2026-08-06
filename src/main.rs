@@ -2188,6 +2188,8 @@ struct App {
     meet_pw: String,
     meet_last: Option<meet::Meeting>,
     meet_list: Arc<std::sync::Mutex<Vec<meet::Meeting>>>,
+    /// Wie oft die Titelleiste des Meetingfensters schon nachgefaerbt wurde.
+    meet_chrome: u32,
     meet_busy: Arc<std::sync::atomic::AtomicBool>,
     meet_err: Arc<std::sync::Mutex<String>>,
     meet_loaded: bool,
@@ -2339,6 +2341,7 @@ impl App {
             meet_pw: String::new(),
             meet_last: None,
             meet_list: Arc::new(std::sync::Mutex::new(Vec::new())),
+            meet_chrome: 99,
             meet_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             meet_err: Arc::new(std::sync::Mutex::new(String::new())),
             meet_loaded: false,
@@ -3393,7 +3396,9 @@ impl App {
                     );
                 }
                 for m in list.iter() {
-                    ui.horizontal(|ui| {
+                    // Die GANZE Zeile ist anklickbar, nicht nur der kleine
+                    // Pfeil rechts - und zeigt das auch mit dem Zeigefinger.
+                    let zeile = ui.horizontal(|ui| {
                         dot(ui, true);
                         ui.label(
                             egui::RichText::new(&m.id)
@@ -3408,8 +3413,17 @@ impl App {
                             if icon_ghost(ui, "connect", i18n::t("meet.join")).clicked() {
                                 self.meet_id = m.id.clone();
                             }
+                            ui.add_space(ui.available_width());
                         });
-                    });
+                    })
+                    .response;
+                    let zeile = zeile.interact(egui::Sense::click());
+                    if zeile.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if zeile.clicked() {
+                        self.meet_id = m.id.clone();
+                    }
                     ui.add_space(3.0);
                 }
                 ui.add_space(6.0);
@@ -3423,6 +3437,11 @@ impl App {
     /// Oeffnet das eigene Meeting-Fenster fuer dieses Meeting (Zoom-Ablauf:
     /// erst Geraete pruefen und Einladung kopieren, dann beitreten).
     fn meet_win_open(&mut self, m: meet::Meeting) {
+        self.meet_chrome = 0;
+        // In die EIGENE Liste aufnehmen. Die Uebersicht kommt nicht mehr vom
+        // Server (der zeigte sie jedem Fremden) - jeder Rechner fuehrt seine
+        // eigene.
+        meet::merken(&m);
         self.meet_win.offen = true;
         if self.meet_win.name.trim().is_empty() {
             // Vorschlag: der Rechnername - so heisst man im Browser auch.
@@ -3434,6 +3453,12 @@ impl App {
         self.meet_win.tn.lock().unwrap().clear();
         // Gleich einmal nachsehen, wer schon da ist.
         self.meet_win.tn_next = std::time::Instant::now();
+        // Die Titelleiste des Meetingfensters nachfaerben. Es entsteht erst
+        // ein paar Rahmen nach dem Oeffnen - einmal reicht also nicht.
+        if self.meet_chrome < 30 {
+            self.meet_chrome += 1;
+            chrome::paint_from_theme();
+        }
         // Bildschirme sind sofort da (reine Systemabfrage) - die brauchen
         // wir, um bei mehreren zu FRAGEN, welcher geteilt werden soll.
         self.meet_win.monitore = meetschirm::liste()
