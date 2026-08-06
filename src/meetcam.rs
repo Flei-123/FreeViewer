@@ -460,8 +460,32 @@ mod mac {
         fehler: Arc<Mutex<String>>,
     ) {
         // Welche Kamera? Ohne Angabe die erste.
-        let welche = match id.as_deref().and_then(|s| s.trim().parse::<u32>().ok()) {
-            Some(n) => CameraIndex::Index(n),
+        //
+        // WICHTIG: die Auswahl im Fenster liefert einen NAMEN (so wie ihn
+        // liste() meldet), keine Nummer. Frueher wurde hier nur eine Zahl
+        // gelesen - jeder Name fiel damit auf Kamera 0 zurueck, und auf dem
+        // Mac liess sich die Kamera schlicht nicht umstellen. Deshalb erst
+        // nach Namen suchen, dann nach Nummer, dann die erste.
+        let welche = match id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            Some(w) => match w.parse::<u32>() {
+                Ok(n) => CameraIndex::Index(n),
+                Err(_) => {
+                    let klein = w.to_lowercase();
+                    let treffer = query(ApiBackend::AVFoundation)
+                        .ok()
+                        .and_then(|v| {
+                            v.into_iter().find(|c| {
+                                let n = c.human_name().to_lowercase();
+                                n == klein || n.contains(&klein) || klein.contains(&n)
+                            })
+                        })
+                        .map(|c| c.index().clone());
+                    match treffer {
+                        Some(i) => i,
+                        None => CameraIndex::Index(0),
+                    }
+                }
+            },
             None => CameraIndex::Index(0),
         };
         // Naechstbeste Einstellung zu Wunschgroesse und -bildrate. NV12 ist
