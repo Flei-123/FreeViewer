@@ -842,6 +842,17 @@ impl NativMeet {
         self.zeiger_von.get(&peer).copied()
     }
 
+    /// Der EIGENE Mauszeiger auf dem gerade geteilten Bildschirm.
+    ///
+    /// WARUM extra: der Server schickt Zeigerpositionen nur an die ANDEREN -
+    /// den eigenen bekommt man nie zurueck. Wer seine eigene Freigabe ansieht,
+    /// las deshalb ewig "Maus des Teilers (kommt nicht an)", obwohl die
+    /// Angabe direkt vor der Nase lag.
+    pub fn eigener_zeiger(&self) -> Option<(f32, f32)> {
+        let a = self.schirm.as_ref()?;
+        crate::meetschirm::zeiger_anteil(a.index)
+    }
+
     /// Welchen Ausschnitt sendet dieser Teilnehmer gerade?
     pub fn bereich_des_teilers(&self, peer: u64) -> Option<crate::meetschirm::Bereich> {
         self.bereich_von.get(&peer).copied()

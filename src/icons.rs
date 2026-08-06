@@ -28,7 +28,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ),
     (
         "settings",
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.87.35l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.7 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.35-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.7a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.7a1.7 1.7 0 0 0 1.87-.35l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.3 9v.09c.66.28 1.09.92 1.09 1.65"/></svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22.12 10.76 L22.12 13.24 L19.32 14.03 L18.62 15.74 L20.03 18.28 L18.28 20.03 L15.74 18.62 L14.03 19.32 L13.24 22.12 L10.76 22.12 L9.97 19.32 L8.26 18.62 L5.72 20.03 L3.97 18.28 L5.38 15.74 L4.68 14.03 L1.88 13.24 L1.88 10.76 L4.68 9.97 L5.38 8.26 L3.97 5.72 L5.72 3.97 L8.26 5.38 L9.97 4.68 L10.76 1.88 L13.24 1.88 L14.03 4.68 L15.74 5.38 L18.28 3.97 L20.03 5.72 L18.62 8.26 L19.32 9.97 Z"/><circle cx="12" cy="12" r="3.4"/></svg>"##,
     ),
     (
         "palette",
@@ -316,6 +316,60 @@ mod tests {
             assert!(s.ends_with("</svg>"), "{} endet nicht mit </svg>", n);
             assert!(s.contains("viewBox=\"0 0 24 24\""), "{} ohne viewBox", n);
         }
+    }
+
+    /// Ein Symbol darf nicht MITTEN im Strich aufhoeren.
+    ///
+    /// Genau das war beim Zahnrad der Fall: der Pfad endete mit
+    /// "...c.66.28 1.09.92 1.09 1.65" und kehrte nie zum Anfang zurueck -
+    /// die rechte Seite des Zahnrads fehlte einfach. Justin hat es gesehen,
+    /// kein Test hatte es gemerkt. Ein GESCHLOSSENER Umriss endet auf "Z".
+    #[test]
+    fn geschlossene_umrisse_sind_wirklich_geschlossen() {
+        // Diese Symbole sind Umrisse (keine offenen Striche) und muessen
+        // deshalb zurueck zum Anfang laufen.
+        for name in ["settings"] {
+            let s = source(name);
+            let d = s
+                .split("d=\"")
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+                .unwrap_or("");
+            assert!(!d.is_empty(), "{} hat keinen Pfad", name);
+            let letzte = d.trim().chars().last().unwrap_or(' ');
+            assert!(
+                letzte == 'Z' || letzte == 'z',
+                "{} endet auf '{}' statt geschlossen zu sein: ...{}",
+                name,
+                letzte,
+                &d[d.len().saturating_sub(40)..]
+            );
+        }
+    }
+
+    /// Ein Zahnrad ist rund - also muss es links wie rechts gleich weit
+    /// reichen. Fehlt eine Seite, faellt das hier auf.
+    #[test]
+    fn das_zahnrad_ist_symmetrisch() {
+        let s = source("settings");
+        let d = s.split("d=\"").nth(1).unwrap().split('"').next().unwrap();
+        let zahlen: Vec<f32> = d
+            .replace('M', " ")
+            .replace('L', " ")
+            .replace('Z', " ")
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f32>().ok())
+            .collect();
+        assert!(zahlen.len() >= 16, "zu wenige Punkte: {}", zahlen.len());
+        let xs: Vec<f32> = zahlen.iter().step_by(2).copied().collect();
+        let links = 12.0 - xs.iter().cloned().fold(f32::MAX, f32::min);
+        let rechts = xs.iter().cloned().fold(f32::MIN, f32::max) - 12.0;
+        assert!(
+            (links - rechts).abs() < 0.2,
+            "Zahnrad haengt schief: links {:.2}, rechts {:.2}",
+            links,
+            rechts
+        );
     }
 
     #[test]

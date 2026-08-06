@@ -3854,9 +3854,27 @@ impl App {
                 ton_ein: ton_namen.0,
                 ton_aus: ton_namen.1,
                 // Zeiger DESSEN, dessen Bildschirm gerade gross zu sehen ist.
-                teiler_zeiger: schirm_haupt.and_then(|p| n.zeiger_des_teilers(p)),
-                schirm_bereich: schirm_haupt.and_then(|p| n.bereich_des_teilers(p)),
-                scharf_moeglich: schirm_haupt.map(|p| n.kann_scharf(p)).unwrap_or(false),
+                // Ist es der EIGENE, kommt nichts ueber das Netz zurueck -
+                // dann direkt nachsehen.
+                teiler_zeiger: match schirm_haupt {
+                    Some(p) if p == z.ich => n.eigener_zeiger(),
+                    Some(p) => n.zeiger_des_teilers(p),
+                    None => None,
+                },
+                // Dasselbe beim Ausschnitt: die eigene Bekanntgabe geht nur
+                // an die anderen. Wer die eigene Freigabe ansieht, muss den
+                // Zuschnitt trotzdem kennen - sonst wird DOPPELT gezoomt und
+                // das Bild wird ab etwa 140 % schwarz.
+                schirm_bereich: match schirm_haupt {
+                    Some(p) if p == z.ich => Some(n.schirm_bereich),
+                    Some(p) => n.bereich_des_teilers(p),
+                    None => None,
+                },
+                scharf_moeglich: match schirm_haupt {
+                    Some(p) if p == z.ich => true,
+                    Some(p) => n.kann_scharf(p),
+                    None => false,
+                },
                 monitore: self.meet_win.monitore.clone(),
             };
             bilder = meetfenster::Bilder {
