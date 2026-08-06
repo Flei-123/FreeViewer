@@ -1841,7 +1841,9 @@ fn kacheln_bauen(s: &Sicht) -> (Vec<Kachel>, Vec<Kachel>) {
         .iter()
         .map(|p| Kachel {
             id: p.id,
-            name: p.name.clone(),
+            // Die eigene Kachel heisst "Du" - genau wie im Browser. In der
+            // Teilnehmerliste steht der echte Name, dort ist er nuetzlich.
+            name: if p.ich { "Du".to_string() } else { p.name.clone() },
             stumm: p.stumm,
             hand: p.hand,
             spricht: p.spricht && !p.stumm,
