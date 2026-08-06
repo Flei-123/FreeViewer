@@ -240,6 +240,76 @@ pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
     }
 }
 
+/// Der klassische Pfeil als Umriss (Punkte in einem 12x19-Raster).
+///
+/// WARUM ueberhaupt selbst zeichnen: Windows liefert den Mauszeiger bei der
+/// Bildschirmaufnahme NICHT im Bild mit - er wird von der Grafikkarte
+/// darueber gelegt. Wer nichts tut, sieht beim Zuschauen keinen Zeiger; nur
+/// beim Ziehen eines Fensters blitzt einer auf, weil Windows den Zug dann
+/// wirklich ins Bild malt. Genau das hat Justin beobachtet.
+const PFEIL: &[(f32, f32)] = &[
+    (0.0, 0.0),
+    (0.0, 16.0),
+    (3.6, 12.4),
+    (6.2, 18.4),
+    (8.6, 17.4),
+    (6.0, 11.6),
+    (11.0, 11.6),
+];
+
+/// Den Mauszeiger in ein dicht gepacktes NV12-Bild malen.
+///
+/// `x`/`y` ist die Spitze in Bildpunkten. Weiss mit dunklem Rand - so bleibt
+/// er auf hellem WIE auf dunklem Grund sichtbar.
+pub fn zeiger_malen(nv12: &mut [u8], w: u32, h: u32, x: i32, y: i32, groesse: f32) {
+    let (wu, hu) = (w as usize, h as usize);
+    if nv12.len() < wu * hu * 3 / 2 || groesse <= 0.0 {
+        return;
+    }
+    let s = groesse / 19.0;
+    let punkte: Vec<(f32, f32)> = PFEIL
+        .iter()
+        .map(|(px, py)| (x as f32 + px * s, y as f32 + py * s))
+        .collect();
+    let oben = punkte.iter().fold(f32::MAX, |a, p| a.min(p.1)).floor() as i32;
+    let unten = punkte.iter().fold(f32::MIN, |a, p| a.max(p.1)).ceil() as i32;
+    // Zwei Durchgaenge: erst der dunkle Rand (etwas dicker), dann weiss.
+    for (dick, hell) in [(1.6 * s.max(1.0), 16u8), (0.0, 235u8)] {
+        for zy in oben.max(0)..=unten.min(hu as i32 - 1) {
+            // Schnittpunkte der Abtastzeile mit dem Umriss sammeln.
+            let mut xs: Vec<f32> = Vec::new();
+            let mitte = zy as f32 + 0.5;
+            for i in 0..punkte.len() {
+                let (x1, y1) = punkte[i];
+                let (x2, y2) = punkte[(i + 1) % punkte.len()];
+                if (y1 <= mitte && y2 > mitte) || (y2 <= mitte && y1 > mitte) {
+                    xs.push(x1 + (mitte - y1) / (y2 - y1) * (x2 - x1));
+                }
+            }
+            if xs.len() < 2 {
+                continue;
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for paar in xs.chunks(2) {
+                if paar.len() < 2 {
+                    break;
+                }
+                let von = ((paar[0] - dick).floor() as i32).max(0);
+                let bis = ((paar[1] + dick).ceil() as i32).min(wu as i32 - 1);
+                for zx in von..=bis {
+                    nv12[zy as usize * wu + zx as usize] = hell;
+                    // Farbe neutral setzen, sonst faerbt der Untergrund durch.
+                    let uv = wu * hu + (zy as usize / 2) * wu + (zx as usize & !1);
+                    if uv + 1 < nv12.len() {
+                        nv12[uv] = 128;
+                        nv12[uv + 1] = 128;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Laufende Bildschirmaufnahme. Haelt immer nur das NEUESTE Bild bereit.
 pub struct Aufnahme {
     pub name: String,
@@ -398,28 +468,43 @@ fn schleife(
             continue;
         }
         let teil = bereich.lock().map(|g| *g).unwrap_or(GANZ);
-        let fertig = if teil == GANZ {
-            // Schneller Weg: die Grafikkarte skaliert und wandelt selbst.
-            match backend.scaled(zb, zh, true) {
-                Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
-                    nv12.clear();
-                    nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
-                    true
-                }
-                _ => {
-                    let (px, sb2, sh2, bgra) = backend.frame();
-                    bild_nach_nv12(px, sb2, sh2, bgra, zb, zh, &mut nv12)
-                }
+        // Schneller Weg: die Grafikkarte schneidet zu, skaliert und wandelt
+        // in einem Rutsch.
+        //
+        // WICHTIG: der Rueckfall auf backend.frame() taugt hier NICHT als
+        // Ersatz. Sobald der GPU-Skalierer laeuft, liest die Aufnahme das
+        // Vollbild absichtlich nicht mehr ins RAM zurueck (spart PCIe) -
+        // frame() liefert dann einen alten oder leeren Puffer. Genau daran
+        // lag es, dass der scharfe Zoom ab etwa 140 % schwarz wurde.
+        let fertig = match backend.scaled_teil(zb, zh, true, teil) {
+            Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
+                nv12.clear();
+                nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
+                true
             }
-        } else {
-            // Mit Ausschnitt kann die Grafikkarte nicht helfen - dafuer sind
-            // es WENIGER Quellpunkte als beim ganzen Schirm, der Zuschnitt
-            // kostet also nicht mehr, sondern weniger Rechenzeit.
-            let (px, sb2, sh2, bgra) = backend.frame();
-            bild_nach_nv12_teil(px, sb2, sh2, bgra, teil, zb, zh, &mut nv12)
+            _ => {
+                // Ohne Grafikkarten-Weg (aelteres Geraet, xcap-Rueckfall)
+                // liegt das Vollbild wirklich im Hauptspeicher.
+                let (px, sb2, sh2, bgra) = backend.frame();
+                bild_nach_nv12_teil(px, sb2, sh2, bgra, teil, zb, zh, &mut nv12)
+            }
         };
         if !fertig {
             continue;
+        }
+        // Den Mauszeiger ins Bild malen. Windows legt ihn bei der Aufnahme
+        // NICHT hinein - ohne diesen Schritt sieht der Zuschauer nie, wohin
+        // gezeigt wird.
+        if let Some((fx, fy)) = zeiger_anteil(index) {
+            let (tx, ty, tw, th) = teil;
+            if fx >= tx && fy >= ty && fx <= tx + tw && fy <= ty + th {
+                let px = ((fx - tx) / tw.max(0.0001) * zb as f32) as i32;
+                let py = ((fy - ty) / th.max(0.0001) * zh as f32) as i32;
+                // Beim Hineinzoomen wird der Zeiger mitvergroessert - sonst
+                // waere er im Ausschnitt winzig.
+                let gr = (22.0 / tw.max(0.05)).clamp(18.0, 60.0);
+                zeiger_malen(&mut nv12, zb, zh, px, py, gr);
+            }
         }
         letzte_lieferung = std::time::Instant::now();
         zaehler.fetch_add(1, Ordering::Relaxed);
@@ -452,6 +537,48 @@ mod tests {
     }
 
     #[test]
+    /// Der Zeiger muss WIRKLICH ins Bild kommen - und nur dort, wo er hin
+    /// gehoert. Ohne diesen Test faellt es erst dem Zuschauer auf.
+    #[test]
+    fn zeiger_landet_im_bild() {
+        let (w, h) = (64u32, 48u32);
+        let mut nv12 = vec![100u8; (w * h * 3 / 2) as usize];
+        zeiger_malen(&mut nv12, w, h, 20, 10, 19.0);
+        let y = &nv12[..(w * h) as usize];
+        // An der Spitze muss etwas Helles oder Dunkles stehen, nicht mehr 100.
+        let umgebung: Vec<u8> = (10..14)
+            .flat_map(|zy| (20..24).map(move |zx| (zy, zx)))
+            .map(|(zy, zx)| y[zy * w as usize + zx])
+            .collect();
+        assert!(
+            umgebung.iter().any(|v| *v != 100),
+            "an der Zeigerspitze wurde nichts gezeichnet"
+        );
+        // Weit weg darf nichts angefasst worden sein.
+        assert_eq!(y[40 * w as usize + 60], 100, "es wurde ausserhalb gemalt");
+        // Weiss muss vorkommen (der Koerper des Pfeils).
+        assert!(y.iter().any(|v| *v > 200), "kein heller Pfeilkoerper");
+        assert!(y.iter().any(|v| *v < 40), "kein dunkler Rand");
+    }
+
+    #[test]
+    fn zeiger_malt_nie_ueber_den_rand_hinaus() {
+        let (w, h) = (32u32, 24u32);
+        let laenge = (w * h * 3 / 2) as usize;
+        for (x, y) in [(-5i32, -5i32), (31, 23), (0, 0), (100, 100)] {
+            let mut nv12 = vec![50u8; laenge];
+            zeiger_malen(&mut nv12, w, h, x, y, 19.0);
+            assert_eq!(nv12.len(), laenge, "Puffer veraendert");
+        }
+    }
+
+    #[test]
+    fn zeiger_laesst_zu_kleine_puffer_in_ruhe() {
+        let mut klein = vec![7u8; 10];
+        zeiger_malen(&mut klein, 64, 48, 5, 5, 19.0);
+        assert!(klein.iter().all(|v| *v == 7));
+    }
+
     #[test]
     fn ohne_wunsch_geht_der_ganze_schirm_raus() {
         assert_eq!(bereich_vereinen(&[]), GANZ);

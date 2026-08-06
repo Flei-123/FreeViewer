@@ -45,7 +45,24 @@ pub trait Backend {
     /// does the colour conversion and only 1.5 bytes per pixel travel back
     /// over PCIe instead of 3. `None` means no hardware scaler is available,
     /// then the caller falls back to the CPU path.
-    fn scaled(&mut self, _dw: u32, _dh: u32, _nv12: bool) -> Option<&[u8]> {
+    fn scaled(&mut self, dw: u32, dh: u32, nv12: bool) -> Option<&[u8]> {
+        self.scaled_teil(dw, dh, nv12, (0.0, 0.0, 1.0, 1.0))
+    }
+    /// Wie `scaled`, aber nur ein AUSSCHNITT des Bildschirms (Anteile 0..1).
+    ///
+    /// WARUM auf der Grafikkarte statt im Hauptspeicher: sobald der
+    /// GPU-Skalierer laeuft, wird das Vollbild NICHT mehr ins RAM
+    /// zurueckgelesen (das spart PCIe-Bandbreite). Wer dann `frame()`
+    /// benutzt, bekommt einen alten oder leeren Puffer - genau daran lag es,
+    /// dass der scharfe Zoom ab einer gewissen Stufe schwarz wurde. Der
+    /// Videoprozessor kann den Ausschnitt selbst, das kostet nichts extra.
+    fn scaled_teil(
+        &mut self,
+        _dw: u32,
+        _dh: u32,
+        _nv12: bool,
+        _teil: (f32, f32, f32, f32),
+    ) -> Option<&[u8]> {
         None
     }
     /// True while the GPU path is in use (diagnostics).
@@ -888,8 +905,43 @@ mod dxgi {
 
         /// frame (GPU) -> scaled (GPU) -> staging -> packed RGB.
         pub fn scale(&mut self, ctx: &ID3D11DeviceContext, frame: &ID3D11Texture2D) -> Result<()> {
+            self.scale_teil(ctx, frame, (0.0, 0.0, 1.0, 1.0))
+        }
+
+        /// Wie `scale`, aber nur ein Ausschnitt der Quelle (Anteile 0..1).
+        ///
+        /// Der Videoprozessor kann das von Haus aus: `SetStreamSourceRect`
+        /// sagt ihm, welches Rechteck er auf die Ausgabegroesse ziehen soll.
+        /// Damit bleibt beim Hineinzoomen alles auf der Grafikkarte - kein
+        /// Vollbild ueber PCIe, keine Rechenzeit im Hauptprozessor, und die
+        /// Bildpunkte sind ECHT statt hochgerechnet.
+        pub fn scale_teil(
+            &mut self,
+            ctx: &ID3D11DeviceContext,
+            frame: &ID3D11Texture2D,
+            teil: (f32, f32, f32, f32),
+        ) -> Result<()> {
             unsafe {
                 ctx.CopyResource(&self.src, frame);
+                let (iw, ih) = self.in_size;
+                let (tx, ty, tw, th) = teil;
+                let ganz = tw >= 0.999 && th >= 0.999 && tx <= 0.001 && ty <= 0.001;
+                if ganz {
+                    // Kein Ausschnitt: die Einstellung wieder abschalten,
+                    // sonst bliebe der letzte Zuschnitt fuer immer stehen.
+                    self.vctx
+                        .VideoProcessorSetStreamSourceRect(&self.proc, 0, false, None);
+                } else {
+                    // In Bildpunkte umrechnen und im Bild halten - ein
+                    // Rechteck ausserhalb liefert ein schwarzes Bild.
+                    let l = ((tx.clamp(0.0, 1.0) * iw as f32) as i32).clamp(0, iw as i32 - 2);
+                    let t = ((ty.clamp(0.0, 1.0) * ih as f32) as i32).clamp(0, ih as i32 - 2);
+                    let r = (l + (tw.clamp(0.0, 1.0) * iw as f32) as i32).clamp(l + 2, iw as i32);
+                    let b = (t + (th.clamp(0.0, 1.0) * ih as f32) as i32).clamp(t + 2, ih as i32);
+                    let rect = RECT { left: l, top: t, right: r, bottom: b };
+                    self.vctx
+                        .VideoProcessorSetStreamSourceRect(&self.proc, 0, true, Some(&rect));
+                }
                 let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                     Enable: true.into(),
                     OutputIndex: 0,
@@ -1337,7 +1389,13 @@ mod dxgi {
             "dxgi"
         }
 
-        fn scaled(&mut self, dw: u32, dh: u32, nv12: bool) -> Option<&[u8]> {
+        fn scaled_teil(
+            &mut self,
+            dw: u32,
+            dh: u32,
+            nv12: bool,
+            teil: (f32, f32, f32, f32),
+        ) -> Option<&[u8]> {
             if !self.gpu_ok {
                 return None;
             }
@@ -1366,7 +1424,7 @@ mod dxgi {
             }
             let ctx = self.ctx.clone();
             let err = match slot.as_mut() {
-                Some(s) => s.scale(&ctx, &frame).err(),
+                Some(s) => s.scale_teil(&ctx, &frame, teil).err(),
                 None => Some(anyhow!("kein Scaler")),
             };
             if let Some(e) = err {
