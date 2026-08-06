@@ -1292,6 +1292,40 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
+        // Das kleine Fenster (Bild im Bild) hat eigene Knoepfe - die muss
+        // der Test mitzeichnen, sonst faellt ein Fehler darin erst beim
+        // Nutzer auf, weil es nie im Hauptfenster erscheint.
+        let mut pipzahl = std::collections::HashMap::new();
+        for (nr, selbst) in [(2usize, true), (2, false), (0, true), (0, false)] {
+            let (_, sicht, _) = meetfenster::beispiel(nr);
+            let mut mich = selbst;
+            let mal = |ctx: &egui::Context, mich: &mut bool| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    meetfenster::pip_inhalt(ui, &sicht, &bilder, mich);
+                });
+            };
+            let _ = ctx.run(meetschirm(260.0, 330.0), |ctx| mal(ctx, &mut mich));
+            let out = ctx.run(meetschirm(260.0, 330.0), |ctx| mal(ctx, &mut mich));
+            let n = out.shapes.len();
+            println!(
+                "Meet Bild-im-Bild (Beispiel {}, eigen {}): {} Formen gezeichnet",
+                nr, selbst, n
+            );
+            // Vier runde Knoepfe und ein Hintergrund - darunter fehlt etwas.
+            if n < 12 {
+                ok = false;
+            }
+            pipzahl.insert((nr, selbst), n);
+        }
+        // Die eigene Kachel MUSS einen Unterschied machen - sonst waere der
+        // Schalter wirkungslos und niemand merkte es.
+        for nr in [0usize, 2] {
+            let (an, aus) = (pipzahl[&(nr, true)], pipzahl[&(nr, false)]);
+            if an <= aus {
+                println!("FEHLER: eigene Kachel im Bild-im-Bild fehlt (Beispiel {})", nr);
+                ok = false;
+            }
+        }
         app.meet_win.offen = false;
 
         let _ = std::fs::remove_dir_all(&tmp);

@@ -2315,7 +2315,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 // --------------------------------------------------- Beispiele zum Pruefen
 
 /// Wie viele Beispielzustaende es gibt.
-pub const BEISPIELE: usize = 8;
+pub const BEISPIELE: usize = 9;
 
 /// Beispielzustand des Beitritts-Schirms (fuer --meetdemo).
 pub fn beispiel_beitritt() -> Beitritt {
@@ -2432,6 +2432,13 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         vollbild: voll,
         ..Default::default()
     };
+    // Der Einstellungs-Schirm braucht einen eigenen Beispielzustand, sonst
+    // wuerde er in --uitest nie gezeichnet und ein Fehler darin faellt erst
+    // beim Nutzer auf.
+    let mit_einstellungen = || Fensterzustand {
+        einstellungen_offen: true,
+        ..Default::default()
+    };
     match nr {
         0 => (
             "allein",
@@ -2467,6 +2474,11 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             "Bildschirm allein gross",
             mach(4, true, false),
             zu(false, Reiter::Chat, Kameraplatz::Aus, false),
+        ),
+        8 => (
+            "Einstellungen offen",
+            mach(3, false, false),
+            mit_einstellungen(),
         ),
         _ => (
             "Info-Reiter, schmales Fenster",
