@@ -1,0 +1,35 @@
+name: Windows Build
+
+# Baut die Windows-Fassung auf GitHub - unabhaengig von Justins Rechnern.
+# Vorher lief der Release-Bau nur auf FLEI-ONE; steht der Rechner aus, gibt
+# es kein Windows-Paket. Das Ergebnis liegt als Artefakt bereit.
+on:
+  push:
+    branches: [ main, win-build ]
+  workflow_dispatch:
+
+jobs:
+  bauen:
+    name: bauen + testen auf Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Zwischenspeicher
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bauen
+        run: cargo build --release
+
+      - name: Testen
+        run: cargo test --release
+
+      - name: Ergebnis einsammeln
+        uses: actions/upload-artifact@v4
+        with:
+          name: freeviewer-windows-x64
+          path: target/release/freeviewer.exe
+          if-no-files-found: error
