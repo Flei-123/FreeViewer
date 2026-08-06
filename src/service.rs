@@ -829,7 +829,7 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     desktop_report, elevate, install, installed, is_elevated, kill_agent, log,
-    prepare_machine_config, run, running, uninstall, watch_desktop,
+    prepare_machine_config, run, running, stop_anfordern, uninstall, watch_desktop,
 };
 
 #[cfg(not(windows))]
