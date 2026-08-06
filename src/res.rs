@@ -59,19 +59,45 @@ mod imp {
         ENUM_DISPLAY_SETTINGS_MODE(i)
     }
 
+    /// Bit 1 in StateFlags: dieses Geraet haengt wirklich am Desktop.
+    const ATTACHED_TO_DESKTOP: u32 = 0x0000_0001;
+
+    /// Der Geraetename des `index`-ten ANGESCHLOSSENEN Bildschirms.
+    ///
+    /// WARUM gefiltert wird: EnumDisplayDevicesW zaehlt ALLE Anzeigegeraete
+    /// mit, auch abgemeldete und Spiegeltreiber. Der Index, den der Viewer
+    /// schickt, zaehlt dagegen nur die Bildschirme, die die Aufnahme sieht
+    /// (DXGI zaehlt ausschliesslich angeschlossene Ausgaenge). Ungefiltert
+    /// zeigte der Index deshalb auf ein totes Geraet - und Windows meldete
+    /// "aktuelle Aufloesung unlesbar", die Umstellung wurde jedes Mal
+    /// abgelehnt. Genau dieser Fehler stand in Justins Protokoll.
     fn devicename(index: usize) -> Result<Vec<u16>> {
-        let mut dd = DISPLAY_DEVICEW::default();
-        dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
-        let ok = unsafe { EnumDisplayDevicesW(None, index as u32, &mut dd, 0) };
-        if !ok.as_bool() {
-            return Err(anyhow!("Monitor {} nicht gefunden", index + 1));
+        let mut gefunden = 0usize;
+        for i in 0..64u32 {
+            let mut dd = DISPLAY_DEVICEW::default();
+            dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            let ok = unsafe { EnumDisplayDevicesW(None, i, &mut dd, 0) };
+            if !ok.as_bool() {
+                break;
+            }
+            if dd.StateFlags & ATTACHED_TO_DESKTOP == 0 {
+                continue;
+            }
+            if gefunden == index {
+                let len = dd
+                    .DeviceName
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(dd.DeviceName.len());
+                return Ok(dd.DeviceName[..len].to_vec());
+            }
+            gefunden += 1;
         }
-        let len = dd
-            .DeviceName
-            .iter()
-            .position(|c| *c == 0)
-            .unwrap_or(dd.DeviceName.len());
-        Ok(dd.DeviceName[..len].to_vec())
+        Err(anyhow!(
+            "Monitor {} nicht gefunden ({} angeschlossen)",
+            index + 1,
+            gefunden
+        ))
     }
 
     fn current(index: usize) -> Result<(u32, u32)> {
@@ -144,6 +170,11 @@ mod imp {
             )
         };
         if r == DISP_CHANGE_SUCCESSFUL {
+            // Nach einem Moduswechsel ist die laufende Bildschirmaufnahme
+            // ungueltig (die Duplication meldet danach 0x887A0001). Der
+            // Aufnehmer baut sich bei Fehlern selbst neu auf - hier wird nur
+            // vermerkt, dass es gleich einen Aussetzer geben wird.
+            crate::capture::log_line(&format!("Aufloesung auf {}x{} gestellt", w, h));
             Ok(())
         } else {
             Err(anyhow!("Windows lehnt {}x{} ab (Code {})", w, h, r.0))

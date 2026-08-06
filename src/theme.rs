@@ -360,6 +360,11 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         ]
         .into();
     }
+    // Zeigefinger ueber ALLEM, was sich anklicken laesst - Geraetezeilen,
+    // Ordner, Knoepfe. Bisher stand das nur an einzelnen Stellen von Hand,
+    // und ueberall dort, wo es vergessen wurde, blieb der Pfeil stehen.
+    // egui kann das zentral, also gehoert es genau einmal hierher.
+    style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     let r: u8 = a.radius;
     // Kleine Bedienelemente (Kaestchen, Schieber, Knoepfe) bleiben eckig -
     // mit der grossen Rundung wuerde aus einem Kaestchen ein Punkt.

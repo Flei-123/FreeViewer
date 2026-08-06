@@ -1197,13 +1197,43 @@ fn capture_loop(
                     }
                 }
                 Next::Lost => {
+                    // WARUM hier NICHT mehr abgebrochen wird: frueher stieg
+                    // dieser Faden nach 20 Fehlversuchen (rund 5 Sekunden)
+                    // endgueltig aus - und danach kam fuer den REST der
+                    // Sitzung kein Bild mehr, auch wenn der Bildschirm laengst
+                    // wieder da war. Genau das ist Justin passiert: nach einer
+                    // Aufloesungsumstellung meldete die Duplication
+                    // "AcquireNextFrame ... 0x887A0001", der Faden gab auf,
+                    // Maus und Tastatur liefen weiter, aber das Bild blieb weg.
+                    // Ein Aussetzer der Bildschirmaufnahme ist normal
+                    // (Aufloesungswechsel, Benutzerkonten-Abfrage,
+                    // Sperrbildschirm, Grafiktreiber-Neustart) - er darf die
+                    // Sitzung nicht dauerhaft blind machen.
                     fails += 1;
                     if fails == 5 {
                         shared_grab.set_host_status("Bildschirmaufnahme schlaegt fehl");
                     }
                     std::thread::sleep(Duration::from_millis(250));
-                    if fails > 20 {
-                        break;
+                    // Alle 2 Sekunden die Aufnahme KOMPLETT neu aufbauen -
+                    // beim ersten Mal schnell (gleiches Verfahren), danach
+                    // abwechselnd auch der langsamere Screenshot-Weg, der
+                    // sogar auf dem Sperrbildschirm noch etwas liefert.
+                    if fails % 8 == 0 {
+                        let schnell = (fails / 8) % 2 == 1;
+                        capture::log_line(&format!(
+                            "Aufnahme verloren ({}x) - baue neu auf (schnell={})",
+                            fails, schnell
+                        ));
+                        if let Some(c) = capture::open_index(schnell, cur_mon) {
+                            cap = c;
+                            key_grab.store(true, Ordering::Relaxed);
+                            last_push = Instant::now() - Duration::from_secs(2);
+                        }
+                    }
+                    if fails == 40 {
+                        shared_grab.set_host_status(
+                            "Bildschirmaufnahme haengt - versuche es weiter",
+                        );
                     }
                 }
             }
