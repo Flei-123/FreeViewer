@@ -138,6 +138,98 @@ pub const ICONS: &[(&str, &str)] = &[
         "eye",
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg>"##,
     ),
+    (
+        "cam",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.2A2.2 2.2 0 0 1 5.2 6h7.6A2.2 2.2 0 0 1 15 8.2v7.6A2.2 2.2 0 0 1 12.8 18H5.2A2.2 2.2 0 0 1 3 15.8z"/><path d="M15 11.2l5-2.9v7.4l-5-2.9z"/></svg>"##,
+    ),
+    (
+        "cam-off",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.4 6h3.4A2.2 2.2 0 0 1 15 8.2v3.2"/><path d="M15 14.6v1.2A2.2 2.2 0 0 1 12.8 18H5.2A2.2 2.2 0 0 1 3 15.8V8.2A2.2 2.2 0 0 1 5.2 6"/><path d="M15 11.2l5-2.9v7.4l-2.6-1.5"/><path d="M4 3.6l16 16.8"/></svg>"##,
+    ),
+    (
+        "screen",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="12.5" rx="2.2"/><path d="M9 20.5h6"/><path d="M12 17v3.5"/><path d="M12 13.5V8.6"/><path d="M9.7 10.9L12 8.6l2.3 2.3"/></svg>"##,
+    ),
+    (
+        "screen-off",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.4 4.5h10.4A2.2 2.2 0 0 1 21 6.7v8.1a2.2 2.2 0 0 1-2.2 2.2h-1.4"/><path d="M13.6 17H5.2A2.2 2.2 0 0 1 3 14.8V6.7A2.2 2.2 0 0 1 5.2 4.5"/><path d="M9 20.5h6"/><path d="M12 17v3.5"/><path d="M4 3.6l16 16.8"/></svg>"##,
+    ),
+    (
+        "hand",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.2 12.4V6.6a1.5 1.5 0 1 1 3 0V11"/><path d="M11.2 11V4.9a1.5 1.5 0 1 1 3 0V11"/><path d="M14.2 11V6.6a1.5 1.5 0 1 1 3 0v6.6c0 4.1-2.7 7.3-6.6 7.3s-6.4-3.2-6.4-7.3v-1.4a1.5 1.5 0 1 1 3 0v1.1"/></svg>"##,
+    ),
+    (
+        "leave",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.4 9.6c5.2-3.7 12-3.7 17.2 0v3.1c0 1-.9 1.8-1.9 1.6l-2.4-.3a1.8 1.8 0 0 1-1.5-1.7l-.1-1.2a11.6 11.6 0 0 0-5.4 0l-.1 1.2a1.8 1.8 0 0 1-1.5 1.7l-2.4.3a1.8 1.8 0 0 1-1.9-1.6z"/><path d="M6.5 17.6l11-4"/></svg>"##,
+    ),
+    (
+        "end",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M9 9l6 6"/><path d="M15 9l-6 6"/></svg>"##,
+    ),
+    (
+        "crown",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 7.4l3.8 3.2L12 4.6l4.6 6 3.8-3.2-1.6 10.2H5.2z"/></svg>"##,
+    ),
+    (
+        "signal",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20v-3.6"/><path d="M9.3 20v-7.2"/><path d="M14.7 20V8.4"/><path d="M20 20V4"/></svg>"##,
+    ),
+    (
+        "pip",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2.4"/><rect x="12.2" y="11.4" width="7" height="6" rx="1.4"/></svg>"##,
+    ),
+    (
+        "pip-off",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.6 5H18.6A2.4 2.4 0 0 1 21 7.4v9.2a2.4 2.4 0 0 1-2.4 2.4h-1"/><path d="M13.6 19H5.4A2.4 2.4 0 0 1 3 16.6V7.4A2.4 2.4 0 0 1 5.4 5"/><path d="M4 3.6l16 16.8"/></svg>"##,
+    ),
+    (
+        "layout",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="11.5" height="14" rx="2"/><rect x="16.5" y="5" width="4.5" height="6.5" rx="1.4"/><rect x="16.5" y="12.5" width="4.5" height="6.5" rx="1.4"/></svg>"##,
+    ),
+    (
+        "full",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5"/><path d="M15 4h5v5"/><path d="M15 20h5v-5"/><path d="M9 20H4v-5"/></svg>"##,
+    ),
+    (
+        "people",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9.2" cy="8.4" r="3.3"/><path d="M3.4 19.8a5.8 5.8 0 0 1 11.6 0"/><path d="M16.2 5.6a3.3 3.3 0 0 1 0 6.2"/><path d="M17.6 14.2a5.8 5.8 0 0 1 3 5"/></svg>"##,
+    ),
+    (
+        "info",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M12 11.2v5.2"/><path d="M12 7.7h.01"/></svg>"##,
+    ),
+    (
+        "send",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.4 11.6L20 4.2l-7.4 15.6-2.4-6.4z"/><path d="M10.2 13.4L20 4.2"/></svg>"##,
+    ),
+    (
+        "muteall",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5.4L6.4 9.2H3.2v5.6h3.2L11 18.6z"/><path d="M15.4 9.6l4.4 4.8"/><path d="M19.8 9.6l-4.4 4.8"/></svg>"##,
+    ),
+    (
+        "check",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 12.8l4.4 4.4L19.2 6.8"/></svg>"##,
+    ),
+    (
+        "back",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.2 12H4.8"/><path d="M10.4 6.4L4.8 12l5.6 5.6"/></svg>"##,
+    ),
+    (
+        "x",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.2 6.2l11.6 11.6"/><path d="M17.8 6.2L6.2 17.8"/></svg>"##,
+    ),
+    (
+        "link",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.2 13.8a4.2 4.2 0 0 0 5.9 0l2.4-2.4a4.2 4.2 0 0 0-5.9-5.9l-1.3 1.3"/><path d="M13.8 10.2a4.2 4.2 0 0 0-5.9 0l-2.4 2.4a4.2 4.2 0 0 0 5.9 5.9l1.3-1.3"/></svg>"##,
+    ),
+    (
+        "enter",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.6 3.6h4.2A2.2 2.2 0 0 1 20 5.8v12.4a2.2 2.2 0 0 1-2.2 2.2h-4.2"/><path d="M4 12h9.6"/><path d="M10 8.4l3.6 3.6-3.6 3.6"/></svg>"##,
+    ),
+    (
+        "bild",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.4" y="4.6" width="17.2" height="14.8" rx="2.4"/><circle cx="9" cy="10" r="1.8"/><path d="M4 17.4l4.8-4.4 3.6 3.2 3-2.6 4.6 4"/></svg>"##,
+    ),
 ];
 
 fn source(name: &str) -> &'static str {

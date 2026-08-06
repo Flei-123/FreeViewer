@@ -63,6 +63,21 @@ pub struct NativMeet {
     ich_fvid: String,
     /// Stufe 4: Fernsteuerung fuer die anderen freigegeben?
     pub steuer_frei: bool,
+    /// Wen der Server gerade als Sprecher meldet.
+    pub sprecher: Option<u64>,
+    /// Wie laut jeder andere gerade ist (0..1). Daraus wird die gruene
+    /// Umrandung der Kachel - der Server meldet den Sprecher nicht immer.
+    pub pegel_von: std::collections::HashMap<u64, f32>,
+    /// Wer gerade tippt (fuer "schreibt ..." im Chat).
+    pub tippen: std::collections::HashSet<u64>,
+    /// Protokoll fuer den Reiter "Info" - was im Raum passiert ist.
+    pub protokoll: Vec<String>,
+    /// Gemessener Durchsatz in kbit/s (aus den Byte-Zaehlern, je Sekunde).
+    pub kbit_raus: u32,
+    pub kbit_rein: u32,
+    /// Letzte Messung fuer die Bandbreite.
+    letzte_messung: std::time::Instant,
+    letzte_bytes: (u64, u64),
 }
 
 impl NativMeet {
@@ -125,6 +140,14 @@ impl NativMeet {
             letztes_schluesselbild: std::time::Instant::now(),
             ich_fvid: fvid.to_string(),
             steuer_frei: steuerung && fvid.chars().any(|c| c.is_ascii_digit()),
+            sprecher: None,
+            pegel_von: std::collections::HashMap::new(),
+            tippen: std::collections::HashSet::new(),
+            protokoll: vec![format!("Raum {} - Beitritt laeuft", raum)],
+            kbit_raus: 0,
+            kbit_rein: 0,
+            letzte_messung: std::time::Instant::now(),
+            letzte_bytes: (0, 0),
         })
     }
 
@@ -230,6 +253,18 @@ impl NativMeet {
                 meetsig::Ereignis::Fehler { code, text } => {
                     self.meldung = format!("{}: {}", code, text);
                 }
+                meetsig::Ereignis::Sprecher(p) => self.sprecher = p,
+                meetsig::Ereignis::Tippt { peer, an } => {
+                    if an {
+                        self.tippen.insert(peer);
+                    } else {
+                        self.tippen.remove(&peer);
+                    }
+                }
+                meetsig::Ereignis::Willkommen { raum, server, .. } => {
+                    self.protokoll
+                        .push(format!("Im Raum {} - Server {}", raum, server));
+                }
                 meetsig::Ereignis::Getrennt(m) => {
                     self.meldung = if m.is_empty() {
                         "Verbindung beendet".into()
@@ -259,6 +294,15 @@ impl NativMeet {
         for te in self.ton.abholen() {
             match te {
                 meetrtc::TonEreignis::Rahmen { quelle, pcm } => {
+                    // Lautstaerke je Teilnehmer merken: daraus wird die
+                    // gruene Umrandung "spricht gerade". Der Server meldet
+                    // den Sprecher nur bei Wechseln, das hier ist sofort da.
+                    let spitze = pcm
+                        .iter()
+                        .map(|v| (*v as f32 / 32768.0).abs())
+                        .fold(0.0f32, f32::max);
+                    let e = self.pegel_von.entry(quelle).or_insert(0.0);
+                    *e = e.max(spitze);
                     if let Some(g) = &self.geraete {
                         if let Ok(mut m) = g.lautsprecher.lock() {
                             m.dazu(quelle, &pcm);
@@ -297,6 +341,42 @@ impl NativMeet {
         }
         self.kamera_pumpe();
         self.schirm_pumpe();
+        self.messen();
+    }
+
+    /// Einmal je Sekunde: Durchsatz ausrechnen, Pegel abklingen lassen.
+    /// WARUM gemessen und nicht geschaetzt: die Marke oben soll eine Zahl
+    /// zeigen, die wirklich stimmt - geraten waere sie wertlos.
+    fn messen(&mut self) {
+        for v in self.pegel_von.values_mut() {
+            *v *= 0.90;
+        }
+        let jetzt = std::time::Instant::now();
+        let dt = jetzt.duration_since(self.letzte_messung).as_secs_f32();
+        if dt < 1.0 {
+            return;
+        }
+        let z = self.ton.zahlen();
+        let (alt_raus, alt_rein) = self.letzte_bytes;
+        self.kbit_raus = ((z.bytes_raus.saturating_sub(alt_raus) as f32 * 8.0) / dt / 1000.0) as u32;
+        self.kbit_rein = ((z.bytes_rein.saturating_sub(alt_rein) as f32 * 8.0) / dt / 1000.0) as u32;
+        self.letzte_bytes = (z.bytes_raus, z.bytes_rein);
+        self.letzte_messung = jetzt;
+    }
+
+    /// Spricht dieser Teilnehmer gerade?
+    pub fn spricht(&self, id: u64) -> bool {
+        self.sprecher == Some(id) || self.pegel_von.get(&id).copied().unwrap_or(0.0) > 0.06
+    }
+
+    /// Gastgeber-Befehle: "mute-all" | "mute" | "kick" | "end".
+    pub fn gastgeber_aktion(&self, aktion: &str, peer: Option<u64>) {
+        self.sig.gastgeber_aktion(aktion, peer);
+    }
+
+    /// "schreibt gerade" an die anderen melden.
+    pub fn tippt(&self, an: bool) {
+        self.sig.tippt(an);
     }
 
     /// Bildschirm -> H.264 -> Meeting (eigene Spur). 15 Bilder je Sekunde,
@@ -593,9 +673,179 @@ impl NativMeet {
     }
 }
 
+/// Die Vorschau VOR dem Beitritt: eigenes Kamerabild und Mikrofonpegel,
+/// ohne dass schon ein Meeting laeuft.
+///
+/// WARUM ein eigener Baustein: der Browser zeigt auf seinem Beitritts-Schirm
+/// ein lebendes Selbstbild - ohne das wirkt die Seite wie ein Formular, und
+/// genau das hat Justin bemaengelt. NativMeet kann das nicht liefern, weil es
+/// erst nach dem Beitritt existiert. Beim Beitreten werden die Geraete hier
+/// wieder losgelassen, sonst haelt die Vorschau die Kamera fest und das
+/// Meeting bekaeme sie nicht.
+pub struct Vorprobe {
+    kamera: Option<crate::meetcam::Kamera>,
+    ton: Option<meetaudio::Geraete>,
+    /// Eigenes Bild fuer die Anzeige: (Breite, Hoehe, RGBA).
+    pub eigen: Option<(u32, u32, Vec<u8>)>,
+    /// Zaehlt hoch, sobald ein neues Bild da ist (Textur nachladen).
+    pub stand: u64,
+    pub pegel: f32,
+    pub meldung: String,
+    naechstes: std::time::Instant,
+    /// Was der Nutzer WILL - getrennt vom Ist-Zustand. Ohne diese Trennung
+    /// wuerde ein Geraetefehler in jedem Bild einen neuen Versuch ausloesen.
+    pub wunsch_kamera: bool,
+    pub wunsch_mikro: bool,
+    pub mikro_geraet: Option<String>,
+}
+
+impl Default for Vorprobe {
+    fn default() -> Self {
+        Vorprobe {
+            kamera: None,
+            ton: None,
+            eigen: None,
+            stand: 0,
+            pegel: 0.0,
+            meldung: String::new(),
+            naechstes: std::time::Instant::now(),
+            wunsch_kamera: false,
+            wunsch_mikro: false,
+            mikro_geraet: None,
+        }
+    }
+}
+
+impl Vorprobe {
+    pub fn kamera_an(&self) -> bool {
+        self.kamera.is_some()
+    }
+
+    /// Kamera fuer die Vorschau an- oder ausschalten.
+    pub fn kamera(&mut self, an: bool) {
+        self.wunsch_kamera = an;
+        if an == self.kamera.is_some() {
+            return;
+        }
+        if !an {
+            if let Some(k) = self.kamera.take() {
+                k.stoppen();
+            }
+            self.eigen = None;
+            self.stand += 1;
+            return;
+        }
+        match crate::meetcam::oeffnen(None, crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 30) {
+            Ok(k) => {
+                self.meldung = format!("Kamera: {}", k.name);
+                self.kamera = Some(k);
+            }
+            Err(e) => {
+                self.meldung = format!("Keine Kamera: {}", e);
+            }
+        }
+    }
+
+    /// Mikrofon fuer den Pegelbalken an- oder ausschalten.
+    pub fn mikro(&mut self, an: bool, geraet: Option<String>) {
+        let wechsel = geraet != self.mikro_geraet;
+        self.wunsch_mikro = an;
+        self.mikro_geraet = geraet.clone();
+        if !an {
+            self.ton = None;
+            self.pegel = 0.0;
+            return;
+        }
+        if self.ton.is_some() && !wechsel {
+            return;
+        }
+        self.ton = None;
+        match meetaudio::geraete_starten(geraet, None) {
+            Ok(g) => self.ton = Some(g),
+            Err(e) => self.meldung = format!("Kein Mikrofon: {}", e),
+        }
+    }
+
+    /// In jedem Bild aufrufen: Bild abholen, Pegel messen.
+    pub fn pumpe(&mut self) {
+        if let Some(g) = &self.ton {
+            let mut spitze = 0.0f32;
+            while let Ok(rahmen) = g.mikro.try_recv() {
+                spitze = spitze.max(
+                    rahmen
+                        .iter()
+                        .map(|v| (*v as f32 / 32768.0).abs())
+                        .fold(0.0f32, f32::max),
+                );
+            }
+            self.pegel = self.pegel * 0.7 + spitze * 0.3;
+        }
+        let jetzt = std::time::Instant::now();
+        if jetzt < self.naechstes {
+            return;
+        }
+        let kam = match self.kamera.as_ref() {
+            Some(k) => k,
+            None => return,
+        };
+        let bild = match kam.neuestes() {
+            Some(b) => b,
+            None => return,
+        };
+        // 12 Bilder je Sekunde reichen fuer eine Vorschau vollkommen.
+        self.naechstes = jetzt + std::time::Duration::from_millis(80);
+        let mut rgba = Vec::new();
+        if crate::h264::nv12_to_rgba(
+            &bild.nv12,
+            bild.breite,
+            bild.hoehe,
+            bild.breite as usize,
+            bild.hoehe,
+            &mut rgba,
+        ) {
+            self.eigen = Some((bild.breite, bild.hoehe, rgba));
+            self.stand += 1;
+        }
+        let f = kam.fehler();
+        if !f.is_empty() {
+            self.meldung = f;
+        }
+    }
+
+    /// Alles wieder loslassen (vor dem Beitritt und beim Schliessen).
+    pub fn aus(&mut self) {
+        if let Some(k) = self.kamera.take() {
+            k.stoppen();
+        }
+        self.wunsch_kamera = false;
+        self.wunsch_mikro = false;
+        self.mikro_geraet = None;
+        self.ton = None;
+        self.eigen = None;
+        self.pegel = 0.0;
+        self.stand += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vorprobe_ohne_kamera_und_mikrofon_meldet_sauber() {
+        // Auf einem Server ohne Kamera/Soundkarte darf die Vorschau nicht
+        // knallen - sie muss nur ehrlich melden, dass nichts da ist.
+        let mut v = Vorprobe::default();
+        v.kamera(true);
+        v.mikro(true, None);
+        v.pumpe();
+        #[cfg(not(windows))]
+        assert!(!v.kamera_an(), "ohne Kamera darf keine laufen");
+        assert!(v.eigen.is_none() || v.kamera_an());
+        v.aus();
+        assert!(!v.kamera_an());
+        assert_eq!(v.pegel, 0.0);
+    }
 
     #[test]
     fn geraeteliste_stuerzt_nicht_ab() {

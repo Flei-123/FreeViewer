@@ -31,6 +31,7 @@ mod meetsig;
 mod meetrtc;
 mod meetaudio;
 mod meetui;
+mod meetfenster;
 mod meetvideo;
 mod meetcam;
 mod meetschirm;
@@ -1212,6 +1213,69 @@ fn main() -> eframe::Result<()> {
             }
         }
         shared.connected.store(false, Ordering::Relaxed);
+
+        // ---- Das Meetingfenster. Beitritts-Schirm einmal ueber den echten
+        // Weg (mit Geraeteabfrage), das laufende Meeting ueber eine
+        // zusammengebaute `Sicht` - so bekommt man volle Buehne, Chat,
+        // Warteraum und Bildschirmfreigabe zu sehen, ohne Server und Kamera.
+        app.headless = true;
+        app.meet_win_open(meet::Meeting {
+            id: "482-913-770".to_string(),
+            titel: "Wochenbesprechung".to_string(),
+            passwort: "test1234".to_string(),
+            termin_text: String::new(),
+        });
+        let meetschirm = |b: f32, h: f32| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(b, h),
+            )),
+            ..Default::default()
+        };
+        {
+            // Zweimal zeichnen: der erste Rahmen legt Texturen und Ids an.
+            let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| app.meet_win_ui(ctx));
+            let out = ctx.run(meetschirm(920.0, 640.0), |ctx| app.meet_win_ui(ctx));
+            let shapes = out.shapes.len();
+            println!("Meet Beitritt: {} Formen gezeichnet", shapes);
+            if shapes < 30 {
+                ok = false;
+            }
+        }
+        // Warteraum und Beitritts-Schirm gehoeren mit auf den Pruefstand.
+        {
+            let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| {
+                meetfenster::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            });
+            let out = ctx.run(meetschirm(920.0, 640.0), |ctx| {
+                meetfenster::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            });
+            println!("Meet Warteschirm: {} Formen gezeichnet", out.shapes.len());
+            if out.shapes.len() < 12 {
+                ok = false;
+            }
+        }
+        // Alle Beispielzustaende durchrendern - dieselben, die --meetdemo
+        // spaeter als echtes Bild zeigt.
+        let bilder = meetfenster::pruefbilder(&ctx);
+        for i in 0..meetfenster::BEISPIELE {
+            let (name, sicht, mut z) = meetfenster::beispiel(i);
+            let (b, h) = if name.starts_with("Info") { (560.0, 430.0) } else { (1100.0, 720.0) };
+            // Zweimal: der erste Rahmen legt Ids und Texturen an.
+            let _ = ctx.run(meetschirm(b, h), |ctx| {
+                meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            });
+            let out = ctx.run(meetschirm(b, h), |ctx| {
+                meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            });
+            let shapes = out.shapes.len();
+            println!("Meet {}: {} Formen gezeichnet", name, shapes);
+            if shapes < 40 {
+                ok = false;
+            }
+        }
+        app.meet_win.offen = false;
+
         let _ = std::fs::remove_dir_all(&tmp);
         println!("{}", if ok { "UITEST OK" } else { "UITEST FAIL" });
         return Ok(());
@@ -1773,6 +1837,15 @@ fn main() -> eframe::Result<()> {
                     app.partner_id = "123456789".to_string();
                     *shot_shared.my_id.lock().unwrap() = "497628420".to_string();
                 }
+                if let Some(i) = std::env::args().position(|a| a == "--meetdemo") {
+                    app.meet_demo = Some(
+                        std::env::args()
+                            .nth(i + 1)
+                            .and_then(|x| x.parse().ok())
+                            .unwrap_or(0),
+                    );
+                    app.headless = true;
+                }
                 if knock {
                     *shot_shared.knock.lock().unwrap() = Some(shared::Knock {
                         from: "Laptop von Justin".to_string(),
@@ -1991,6 +2064,22 @@ struct App {
     nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
+    /// Kamera und Mikrofon VOR dem Beitritt (Selbstvorschau, Pegel).
+    vorprobe: meetui::Vorprobe,
+    /// Was nur die Oberflaeche angeht: Seitenleiste, Reiter, Kameraplatz.
+    meet_z: meetfenster::Fensterzustand,
+    /// Wie viele Chatzeilen der Nutzer schon gesehen hat (Zaehler am Knopf).
+    meet_gelesen: usize,
+    /// Wann die Kamera NACH dem Beitritt anlaufen darf. Die Vorschau haelt
+    /// das Geraet bis zum Beitritt fest; unter Windows braucht die Kamera
+    /// einen Moment, bis sie wieder frei ist - sofort neu oeffnen scheitert.
+    meet_kam_start: Option<std::time::Instant>,
+    /// Kein echtes Fenstersystem (--uitest): dann keine Extra-Fenster oeffnen.
+    headless: bool,
+    /// --meetdemo N: statt der Oberflaeche einen Beispielzustand des
+    /// Meetings zeichnen. Nur dafuer da, echte Bilder machen zu koennen -
+    /// der Bauserver hat weder Kamera noch zweiten Teilnehmer.
+    meet_demo: Option<usize>,
     /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
     /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
     full: bool,
@@ -2115,6 +2204,12 @@ impl App {
             nativ_bilder: std::collections::HashMap::new(),
             nativ_schirme: std::collections::HashMap::new(),
             nativ_eigen: None,
+            vorprobe: meetui::Vorprobe::default(),
+            meet_z: meetfenster::Fensterzustand::default(),
+            meet_gelesen: 0,
+            meet_kam_start: None,
+            headless: false,
+            meet_demo: None,
             full: false,
             bar_x: 0.5,
             bar_w: 700.0,
@@ -3184,6 +3279,10 @@ impl App {
     /// erst Geraete pruefen und Einladung kopieren, dann beitreten).
     fn meet_win_open(&mut self, m: meet::Meeting) {
         self.meet_win.offen = true;
+        if self.meet_win.name.trim().is_empty() {
+            // Vorschlag: der Rechnername - so heisst man im Browser auch.
+            self.meet_win.name = presence::device_name();
+        }
         self.meet_win.beigetreten = false;
         self.meet_win.toast = None;
         self.meet_win.meeting = Some(m);
@@ -3229,9 +3328,16 @@ impl App {
         });
     }
 
-    /// Das eigene Meeting-Fenster: Vorbereitung, Einladung, Teilnehmer.
+    /// Das eigene Meeting-Fenster - so wie der FreeMeet-Browser-Client.
+    ///
+    /// Vor dem Beitritt steht die mittige Karte mit lebender Selbstvorschau,
+    /// danach das Meeting: Marken oben, Buehne in der Mitte, Seitenleiste
+    /// rechts, Steuerleiste unten. GEZEICHNET wird in `meetfenster` - hier
+    /// wird nur zusammengetragen, was es braucht, und ausgefuehrt, was der
+    /// Nutzer angeklickt hat. Diese Trennung ist der Grund, warum sich jede
+    /// Ansicht in `--uitest` ohne Server, Kamera und Soundkarte durchrendern
+    /// laesst.
     fn meet_win_ui(&mut self, ctx: &egui::Context) {
-        let p = theme::palette();
         // Geraeteliste uebernehmen, sobald der Hintergrundfaden fertig ist.
         if !self.meet_win.geraete_da {
             if let Some((mics, cams)) = self.meet_win.geraete.lock().unwrap().clone() {
@@ -3241,848 +3347,543 @@ impl App {
             }
         }
         self.meet_win_poll();
+        let m = match self.meet_win.meeting.clone() {
+            Some(m) => m,
+            None => return,
+        };
+        if self.nativ_meet.is_none() {
+            self.meet_beitritt_ui(ctx, &m);
+        } else {
+            self.meet_lauf_ui(ctx, &m);
+        }
+        self.meet_toast(ctx);
+    }
 
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::NONE
-                    .fill(p.bg)
-                    .inner_margin(egui::Margin::symmetric(22, 16)),
-            )
-            .show(ctx, |ui| {
-                let m = match self.meet_win.meeting.clone() {
-                    Some(m) => m,
-                    None => return,
-                };
-                // Kopf: Name und grosse Meeting-ID.
-                ui.label(
-                    egui::RichText::new(i18n::t("meet.window"))
-                        .size(20.0)
-                        .strong()
-                        .color(p.text),
-                );
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&m.id)
-                            .size(17.0)
-                            .family(egui::FontFamily::Monospace)
-                            .color(p.accent),
-                    );
-                    if !m.titel.is_empty() {
-                        ui.label(egui::RichText::new(&m.titel).size(13.0).color(p.muted));
+    /// Der Schirm vor dem Beitritt (`#vorbereiten` im Browser).
+    fn meet_beitritt_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
+        // Kamera und Mikrofon der Vorschau dem Wunsch nachfuehren. Nur bei
+        // ECHTER Aenderung anfassen - sonst wuerde ein Geraetefehler jedes
+        // Bild einen neuen Oeffnungsversuch ausloesen.
+        let will_kamera = !self.meet_win.ohne_video;
+        if will_kamera != self.vorprobe.wunsch_kamera {
+            self.vorprobe.kamera(will_kamera);
+        }
+        let mic = if self.meet_win.mic_sel == 0 {
+            None
+        } else {
+            self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
+        };
+        let will_mikro = !self.meet_win.stumm;
+        if will_mikro != self.vorprobe.wunsch_mikro || mic != self.vorprobe.mikro_geraet {
+            self.vorprobe.mikro(will_mikro, mic.clone());
+        }
+        self.vorprobe.pumpe();
+
+        // Vorschaubild in eine Textur giessen (nur wenn es ein neues gibt).
+        match self.vorprobe.eigen.as_ref() {
+            Some((w, h, px)) => {
+                let stand = self.vorprobe.stand;
+                let frisch = self
+                    .nativ_eigen
+                    .as_ref()
+                    .map(|(alt, _)| *alt != stand)
+                    .unwrap_or(true);
+                if frisch {
+                    let bild =
+                        egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], px);
+                    let tex = ctx.load_texture("meeteigen", bild, egui::TextureOptions::LINEAR);
+                    self.nativ_eigen = Some((stand, tex));
+                }
+            }
+            None => self.nativ_eigen = None,
+        }
+
+        let mut b = meetfenster::Beitritt {
+            raum: m.id.clone(),
+            titel: m.titel.clone(),
+            name: self.meet_win.name.clone(),
+            mics: self.meet_win.mics.clone(),
+            cams: self.meet_win.cams.clone(),
+            mic_sel: self.meet_win.mic_sel,
+            cam_sel: self.meet_win.cam_sel,
+            mikro_an: will_mikro,
+            kamera_an: will_kamera,
+            geraete_da: self.meet_win.geraete_da,
+            pegel: self.vorprobe.pegel,
+            hinweis: self.vorprobe.meldung.clone(),
+            laeuft: self.meet_win.nativ_start,
+        };
+        let tex = self.nativ_eigen.as_ref().map(|(_, t)| t.clone());
+        let aktion = meetfenster::beitritt_ui(ctx, &mut b, tex.as_ref());
+        self.meet_win.name = b.name;
+        self.meet_win.mic_sel = b.mic_sel;
+        self.meet_win.cam_sel = b.cam_sel;
+
+        match aktion {
+            Some(meetfenster::Beitrittsaktion::MikroUm) => {
+                self.meet_win.stumm = !self.meet_win.stumm;
+            }
+            Some(meetfenster::Beitrittsaktion::KameraUm) => {
+                self.meet_win.ohne_video = !self.meet_win.ohne_video;
+            }
+            Some(meetfenster::Beitrittsaktion::Zurueck) => {
+                self.vorprobe.aus();
+                self.nativ_eigen = None;
+                self.meet_win.offen = false;
+            }
+            Some(meetfenster::Beitrittsaktion::Beitreten) => {
+                self.meet_win.nativ_start = true;
+            }
+            None => {}
+        }
+
+        // Beitreten passiert ERST nachdem der Rahmen gezeichnet ist: die
+        // Vorschau muss die Kamera vorher loslassen, sonst bekommt das
+        // Meeting sie nicht.
+        if std::mem::take(&mut self.meet_win.nativ_start) {
+            self.vorprobe.aus();
+            self.nativ_eigen = None;
+            let me = self.shared.my_id.lock().unwrap().clone();
+            let name = if self.meet_win.name.trim().is_empty() {
+                presence::device_name()
+            } else {
+                self.meet_win.name.trim().to_string()
+            };
+            let mic = if self.meet_win.mic_sel == 0 {
+                None
+            } else {
+                self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
+            };
+            match meetui::NativMeet::beitreten(
+                &meet::base(),
+                &m.id,
+                &m.passwort,
+                &name,
+                &me,
+                self.meet_offer_control,
+                mic,
+                None,
+            ) {
+                Ok(mut n) => {
+                    if self.meet_win.stumm {
+                        n.stumm_schalten(true);
                     }
-                });
-                ui.add_space(12.0);
-
-                ui.columns(2, |cols| {
-                    // ------------------------------------- Vorbereitung
-                    let ui = &mut cols[0];
-                    section(ui, i18n::t("meet.prejoin"));
-                    card(ui, |ui| {
-                        if !self.meet_win.geraete_da {
-                            label_small(ui, i18n::t("meet.devices_load"));
-                            ui.add_space(6.0);
-                        }
-                        label_small(ui, i18n::t("meet.cam"));
-                        {
-                            let wahl = &mut self.meet_win.cam_sel;
-                            let namen = &self.meet_win.cams;
-                            let cur = if *wahl == 0 {
-                                i18n::t("meet.dev_default").to_string()
-                            } else {
-                                namen
-                                    .get(*wahl - 1)
-                                    .cloned()
-                                    .unwrap_or_else(|| i18n::t("meet.dev_default").to_string())
-                            };
-                            egui::ComboBox::from_id_salt("meet_cam_pick")
-                                .width(230.0)
-                                .selected_text(cur)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(*wahl == 0, i18n::t("meet.dev_default"))
-                                        .clicked()
-                                    {
-                                        *wahl = 0;
-                                    }
-                                    for (i, n) in namen.iter().enumerate() {
-                                        if ui.selectable_label(*wahl == i + 1, n).clicked() {
-                                            *wahl = i + 1;
-                                        }
-                                    }
-                                });
-                        }
-                        ui.add_space(6.0);
-                        label_small(ui, i18n::t("meet.mic"));
-                        {
-                            let wahl = &mut self.meet_win.mic_sel;
-                            let namen = &self.meet_win.mics;
-                            let cur = if *wahl == 0 {
-                                i18n::t("meet.dev_default").to_string()
-                            } else {
-                                namen
-                                    .get(*wahl - 1)
-                                    .cloned()
-                                    .unwrap_or_else(|| i18n::t("meet.dev_default").to_string())
-                            };
-                            egui::ComboBox::from_id_salt("meet_mic_pick")
-                                .width(230.0)
-                                .selected_text(cur)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(*wahl == 0, i18n::t("meet.dev_default"))
-                                        .clicked()
-                                    {
-                                        *wahl = 0;
-                                    }
-                                    for (i, n) in namen.iter().enumerate() {
-                                        if ui.selectable_label(*wahl == i + 1, n).clicked() {
-                                            *wahl = i + 1;
-                                        }
-                                    }
-                                });
-                        }
-                        ui.add_space(10.0);
-                        check(ui, &mut self.meet_win.stumm, i18n::t("meet.mute_join"));
-                        ui.add_space(4.0);
-                        check(ui, &mut self.meet_win.ohne_video, i18n::t("meet.camoff_join"));
-                        ui.add_space(12.0);
-                        let knopf = if self.meet_win.beigetreten {
-                            i18n::t("meet.reopen")
-                        } else {
-                            i18n::t("meet.join_now")
-                        };
-                        if accent_button(ui, knopf, true).clicked() {
-                            let me = self.shared.my_id.lock().unwrap().clone();
-                            let fvid = if self.meet_offer_control && !me.trim().is_empty() {
-                                Some(me.as_str())
-                            } else {
-                                None
-                            };
-                            let mic = if self.meet_win.mic_sel == 0 {
-                                None
-                            } else {
-                                self.meet_win
-                                    .mics
-                                    .get(self.meet_win.mic_sel - 1)
-                                    .map(|s| s.as_str())
-                            };
-                            let cam = if self.meet_win.cam_sel == 0 {
-                                None
-                            } else {
-                                self.meet_win
-                                    .cams
-                                    .get(self.meet_win.cam_sel - 1)
-                                    .map(|s| s.as_str())
-                            };
-                            // Kein Browser mehr: der Beitritt passiert IM
-                            // Programm. Der Weg darunter (nativ_start) baut
-                            // die Sitzung auf, sobald dieser Rahmen fertig
-                            // gezeichnet ist.
-                            let _ = (fvid, mic, cam);
-                            self.meet_win.nativ_start = true;
-                            self.meet_win.beigetreten = true;
-                            self.meet_win.tn_next = std::time::Instant::now();
-                        }
-                        if self.meet_win.beigetreten {
-                            ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(i18n::t("meet.in_meeting"))
-                                    .size(11.5)
-                                    .color(p.green),
-                            );
-                        }
-
-                        // ---- Nativer Weg (Stufe 1: Ton, Chat, Warteraum) ----
-                        // Kein Browser im Hintergrund. Video kommt in Stufe 2,
-                        // bis dahin steht der Browser-Knopf daneben.
-                        ui.add_space(12.0);
-                        if self.nativ_meet.is_none() {
-                            if std::mem::take(&mut self.meet_win.nativ_start) {
-                                let me = self.shared.my_id.lock().unwrap().clone();
-                                let name = presence::device_name();
-                                let mic = if self.meet_win.mic_sel == 0 {
-                                    None
-                                } else {
-                                    self.meet_win
-                                        .mics
-                                        .get(self.meet_win.mic_sel - 1)
-                                        .cloned()
-                                };
-                                match meetui::NativMeet::beitreten(
-                                    &meet::base(),
-                                    &m.id,
-                                    &m.passwort,
-                                    &name,
-                                    &me,
-                                    // Bisher ging die eigene Nummer IMMER mit -
-                                    // die Einstellung "Fernsteuerung anbieten"
-                                    // galt nur fuer den Browser-Weg. Jetzt gilt
-                                    // sie auch nativ.
-                                    self.meet_offer_control,
-                                    mic,
-                                    None,
-                                ) {
-                                    Ok(n) => {
-                                        if self.meet_win.stumm {
-                                            let mut n = n;
-                                            n.stumm_schalten(true);
-                                            self.nativ_meet = Some(n);
-                                        } else {
-                                            self.nativ_meet = Some(n);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.meet_win.toast =
-                                            Some((format!("{}", e), std::time::Instant::now()));
-                                    }
-                                }
-                            }
-                        } else {
-                            let mut verlassen = false;
-                            let mut stumm_um = None;
-                            let mut kamera_um = None;
-                            let mut schirm_um = None;
-                            let mut hand_um = None;
-                            let mut steuer_um = None;
-                            let mut steuern_zu: Option<(String, String)> = None;
-                            let mut senden = false;
-                            if let Some(n) = self.nativ_meet.as_mut() {
-                                n.pumpe();
-                                let z = n.zustand();
-                                let zahlen = n.zahlen();
-                                ui.horizontal(|ui| {
-                                    let farbe = if zahlen.verbunden { p.green } else { p.muted };
-                                    ui.label(
-                                        egui::RichText::new(if zahlen.verbunden {
-                                            "Nativ verbunden"
-                                        } else {
-                                            "Nativ: verbinde ..."
-                                        })
-                                        .size(11.5)
-                                        .color(farbe),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "gesendet {} / empfangen {}",
-                                            zahlen.gesendet, zahlen.empfangen
-                                        ))
-                                        .size(10.5)
-                                        .color(p.muted),
-                                    );
-                                });
-                                // Pegelbalken des eigenen Mikrofons
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width().min(240.0), 6.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().rect_filled(rect, 3.0, p.field);
-                                let breite = rect.width() * n.pegel.clamp(0.0, 1.0);
-                                if breite > 1.0 {
-                                    let voll = egui::Rect::from_min_size(
-                                        rect.min,
-                                        egui::vec2(breite, rect.height()),
-                                    );
-                                    ui.painter().rect_filled(voll, 3.0, p.green);
-                                }
-                                if !n.meldung.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(n.meldung.clone())
-                                            .size(10.5)
-                                            .color(p.muted),
-                                    );
-                                }
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    if icons::text_button(
-                                        ui,
-                                        if n.stumm { "mic-off" } else { "mic" },
-                                        if n.stumm { "Stumm aus" } else { "Stumm" },
-                                        n.stumm,
-                                    )
-                                    .clicked()
-                                    {
-                                        stumm_um = Some(!n.stumm);
-                                    }
-                                    if icons::text_button(
-                                        ui,
-                                        "meet",
-                                        if n.kamera_an { "Kamera aus" } else { "Kamera an" },
-                                        n.kamera_an,
-                                    )
-                                    .clicked()
-                                    {
-                                        kamera_um = Some(!n.kamera_an);
-                                    }
-                                    if icons::text_button(
-                                        ui,
-                                        "monitor",
-                                        if n.schirm_an {
-                                            "Freigabe beenden"
-                                        } else {
-                                            "Bildschirm teilen"
-                                        },
-                                        n.schirm_an,
-                                    )
-                                    .clicked()
-                                    {
-                                        schirm_um = Some(!n.schirm_an);
-                                    }
-                                    if icons::text_button(
-                                        ui,
-                                        "user",
-                                        if n.hand { "Hand runter" } else { "Hand" },
-                                        n.hand,
-                                    )
-                                    .clicked()
-                                    {
-                                        hand_um = Some(!n.hand);
-                                    }
-                                    // Stufe 4: der Browser kann Bild und Ton,
-                                    // aber niemals fremde Maus und Tastatur.
-                                    // Wer steuern lassen will, gibt hier frei -
-                                    // zugelassen wird die Sitzung trotzdem noch
-                                    // einmal im Programm selbst.
-                                    if icons::text_button(
-                                        ui,
-                                        "keyboard",
-                                        if n.steuer_frei {
-                                            "Steuerung sperren"
-                                        } else {
-                                            "Steuerung freigeben"
-                                        },
-                                        n.steuer_frei,
-                                    )
-                                    .clicked()
-                                    {
-                                        steuer_um = Some(!n.steuer_frei);
-                                    }
-                                    if icons::text_button(ui, "power", "Verlassen", false)
-                                        .clicked()
-                                    {
-                                        verlassen = true;
-                                    }
-                                });
-                                if !n.schirm_meldung.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(if n.schirm_an {
-                                            format!(
-                                                "{}  ·  {} Bilder geteilt",
-                                                n.schirm_meldung, n.schirm_gesendet
-                                            )
-                                        } else {
-                                            n.schirm_meldung.clone()
-                                        })
-                                        .size(10.5)
-                                        .color(p.muted),
-                                    );
-                                }
-                                if !n.kamera_meldung.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(n.kamera_meldung.clone())
-                                            .size(10.5)
-                                            .color(p.muted),
-                                    );
-                                }
-                                // Eigenes Kamerabild - gespiegelt, wie man sich
-                                // im Spiegel sieht (so macht es jedes Meeting).
-                                if let Some((ew, eh, epx)) = n.eigen.as_ref() {
-                                    let frisch = self
-                                        .nativ_eigen
-                                        .as_ref()
-                                        .map(|(alt, _)| *alt != n.eigen_stand)
-                                        .unwrap_or(true);
-                                    if frisch {
-                                        let bild = egui::ColorImage::from_rgba_unmultiplied(
-                                            [*ew as usize, *eh as usize],
-                                            epx,
-                                        );
-                                        let tex = ui.ctx().load_texture(
-                                            "meeteigen",
-                                            bild,
-                                            egui::TextureOptions::LINEAR,
-                                        );
-                                        self.nativ_eigen = Some((n.eigen_stand, tex));
-                                    }
-                                } else {
-                                    self.nativ_eigen = None;
-                                }
-                                // Bildkacheln der anderen (Stufe 2)
-                                let neue: Vec<(u64, u64, u32, u32)> = n
-                                    .bilder
-                                    .bilder
-                                    .iter()
-                                    .map(|(peer, (w, h, _))| {
-                                        (*peer, *n.bilder.stand.get(peer).unwrap_or(&0), *w, *h)
-                                    })
-                                    .collect();
-                                for (peer, stand, w, h) in neue {
-                                    let frisch = self
-                                        .nativ_bilder
-                                        .get(&peer)
-                                        .map(|(alt, _)| *alt != stand)
-                                        .unwrap_or(true);
-                                    if frisch {
-                                        if let Some((_, _, px)) = n.bilder.bilder.get(&peer) {
-                                            let bild = egui::ColorImage::from_rgba_unmultiplied(
-                                                [w as usize, h as usize],
-                                                px,
-                                            );
-                                            let tex = ui.ctx().load_texture(
-                                                format!("meetcam{}", peer),
-                                                bild,
-                                                egui::TextureOptions::LINEAR,
-                                            );
-                                            self.nativ_bilder.insert(peer, (stand, tex));
-                                        }
-                                    }
-                                }
-                                let leute_da: std::collections::HashSet<u64> =
-                                    n.bilder.bilder.keys().copied().collect();
-                                self.nativ_bilder.retain(|k, _| leute_da.contains(k));
-
-                                // Dasselbe fuer geteilte Bildschirme.
-                                let neue_s: Vec<(u64, u64, u32, u32)> = n
-                                    .schirme
-                                    .bilder
-                                    .iter()
-                                    .map(|(peer, (w, h, _))| {
-                                        (*peer, *n.schirme.stand.get(peer).unwrap_or(&0), *w, *h)
-                                    })
-                                    .collect();
-                                for (peer, stand, w, h) in neue_s {
-                                    let frisch = self
-                                        .nativ_schirme
-                                        .get(&peer)
-                                        .map(|(alt, _)| *alt != stand)
-                                        .unwrap_or(true);
-                                    if frisch {
-                                        if let Some((_, _, px)) = n.schirme.bilder.get(&peer) {
-                                            let bild = egui::ColorImage::from_rgba_unmultiplied(
-                                                [w as usize, h as usize],
-                                                px,
-                                            );
-                                            let tex = ui.ctx().load_texture(
-                                                format!("meetschirm{}", peer),
-                                                bild,
-                                                egui::TextureOptions::LINEAR,
-                                            );
-                                            self.nativ_schirme.insert(peer, (stand, tex));
-                                        }
-                                    }
-                                }
-                                let schirme_da: std::collections::HashSet<u64> =
-                                    n.schirme.bilder.keys().copied().collect();
-                                self.nativ_schirme.retain(|k, _| schirme_da.contains(k));
-
-                                // Teilt jemand seinen Bildschirm, gehoert IHM
-                                // die Buehne: gross und vollstaendig (kein
-                                // Zuschnitt - abgeschnittener Text ist
-                                // wertlos), die Gesichter klein darunter.
-                                // Genau das hatte sich Justin gewuenscht.
-                                if !self.nativ_schirme.is_empty() {
-                                    ui.add_space(8.0);
-                                    let breit = ui.available_width().max(120.0);
-                                    for (peer, (_, tex)) in self.nativ_schirme.iter() {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{}  ·  Bildschirm",
-                                                n.name_von(*peer)
-                                            ))
-                                            .size(10.5)
-                                            .color(p.green),
-                                        );
-                                        ui.add(
-                                            egui::Image::new(&*tex)
-                                                .fit_to_exact_size(egui::vec2(
-                                                    breit,
-                                                    breit * tex.aspect_ratio().recip(),
-                                                ))
-                                                .corner_radius(6.0),
-                                        );
-                                    }
-                                }
-                                // ---- Der Call selbst: Kacheln wie im Browser ----
-                                // Jeder im Raum bekommt eine Kachel - auch wer
-                                // die Kamera aus hat (dann Kuerzel statt
-                                // schwarzer Flaeche). Man sieht sich selbst
-                                // gespiegelt, wie im Badezimmerspiegel.
-                                {
-                                    let zk = n.zustand();
-                                    let mut leute: Vec<(u64, String, bool, bool)> =
-                                        vec![(zk.ich, "Du".to_string(), n.stumm, n.hand)];
-                                    for t in zk.leute.iter() {
-                                        leute.push((t.id, t.name.clone(), t.ton_aus, t.hand));
-                                    }
-                                    let bilder: Vec<Option<egui::TextureHandle>> = leute
-                                        .iter()
-                                        .map(|(id, ..)| {
-                                            if *id == zk.ich {
-                                                self.nativ_eigen.as_ref().map(|(_, t)| t.clone())
-                                            } else {
-                                                self.nativ_bilder.get(id).map(|(_, t)| t.clone())
-                                            }
-                                        })
-                                        .collect();
-                                    let anzahl = leute.len().max(1);
-                                    let klein = !self.nativ_schirme.is_empty();
-                                    let spalten = if klein {
-                                        anzahl.min(4)
-                                    } else {
-                                        (anzahl as f32).sqrt().ceil() as usize
-                                    }
-                                    .max(1);
-                                    let abstand = 6.0;
-                                    let voll = ui.available_width().max(160.0);
-                                    let breite = ((voll - abstand * (spalten as f32 - 1.0))
-                                        / spalten as f32)
-                                        .clamp(90.0, 460.0);
-                                    let hoehe = if klein {
-                                        (breite * 9.0 / 16.0).min(110.0)
-                                    } else {
-                                        breite * 9.0 / 16.0
-                                    };
-                                    ui.add_space(8.0);
-                                    let mut i = 0usize;
-                                    while i < leute.len() {
-                                        ui.horizontal(|ui| {
-                                            for _ in 0..spalten {
-                                                if i >= leute.len() {
-                                                    break;
-                                                }
-                                                let (id, name, stumm, hand) = leute[i].clone();
-                                                let tex = bilder[i].clone();
-                                                i += 1;
-                                                let (rect, _r) = ui.allocate_exact_size(
-                                                    egui::vec2(breite, hoehe),
-                                                    egui::Sense::hover(),
-                                                );
-                                                let maler = ui.painter_at(rect);
-                                                maler.rect_filled(rect, 8.0, p.card);
-                                                match tex {
-                                                    Some(t) => {
-                                                        let ar = t.aspect_ratio().max(0.05);
-                                                        let mut bw = rect.width();
-                                                        let mut bh = bw / ar;
-                                                        if bh > rect.height() {
-                                                            bh = rect.height();
-                                                            bw = bh * ar;
-                                                        }
-                                                        let ziel = egui::Rect::from_center_size(
-                                                            rect.center(),
-                                                            egui::vec2(bw, bh),
-                                                        );
-                                                        // Eigenes Bild spiegeln, fremde nicht.
-                                                        let uv = if id == zk.ich {
-                                                            egui::Rect::from_min_max(
-                                                                egui::pos2(1.0, 0.0),
-                                                                egui::pos2(0.0, 1.0),
-                                                            )
-                                                        } else {
-                                                            egui::Rect::from_min_max(
-                                                                egui::pos2(0.0, 0.0),
-                                                                egui::pos2(1.0, 1.0),
-                                                            )
-                                                        };
-                                                        maler.image(
-                                                            t.id(),
-                                                            ziel,
-                                                            uv,
-                                                            egui::Color32::WHITE,
-                                                        );
-                                                    }
-                                                    None => {
-                                                        let kuerzel: String = name
-                                                            .split_whitespace()
-                                                            .filter_map(|w| w.chars().next())
-                                                            .take(2)
-                                                            .collect::<String>()
-                                                            .to_uppercase();
-                                                        maler.circle_filled(
-                                                            rect.center(),
-                                                            (hoehe * 0.22).max(12.0),
-                                                            p.card_hi,
-                                                        );
-                                                        maler.text(
-                                                            rect.center(),
-                                                            egui::Align2::CENTER_CENTER,
-                                                            kuerzel,
-                                                            egui::FontId::proportional(
-                                                                (hoehe * 0.2).clamp(11.0, 26.0),
-                                                            ),
-                                                            p.text,
-                                                        );
-                                                    }
-                                                }
-                                                let schild = format!(
-                                                    "{}{}{}",
-                                                    name,
-                                                    if stumm { "  (stumm)" } else { "" },
-                                                    if hand { "  (meldet sich)" } else { "" }
-                                                );
-                                                maler.text(
-                                                    rect.left_bottom() + egui::vec2(8.0, -6.0),
-                                                    egui::Align2::LEFT_BOTTOM,
-                                                    schild,
-                                                    egui::FontId::proportional(11.0),
-                                                    if stumm { p.muted } else { p.text },
-                                                );
-                                                ui.add_space(abstand);
-                                            }
-                                        });
-                                        ui.add_space(abstand);
-                                    }
-                                }
-
-                                // Teilnehmer
-                                ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new(format!("Im Raum: {}", z.leute.len() + 1))
-                                        .size(11.0)
-                                        .color(p.muted),
-                                );
-                                for t in &z.leute {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{}{}{}",
-                                                t.name,
-                                                if t.ton_aus { "  (stumm)" } else { "" },
-                                                if t.hand { "  (meldet sich)" } else { "" }
-                                            ))
-                                            .size(11.5),
-                                        );
-                                        // Hat der andere die Steuerung
-                                        // freigegeben, steht hier der Knopf -
-                                        // er baut eine echte FreeViewer-
-                                        // Sitzung auf, nicht bloss eine
-                                        // Bildschirmansicht im Meeting.
-                                        if !t.fvid.is_empty() {
-                                            if ghost_button(ui, "Steuern")
-                                                .on_hover_text(format!(
-                                                    "{} mit FreeViewer fernsteuern ({})",
-                                                    t.name, t.fvid
-                                                ))
-                                                .clicked()
-                                            {
-                                                steuern_zu =
-                                                    Some((t.fvid.clone(), t.name.clone()));
-                                            }
-                                        }
-                                    });
-                                }
-                                // Warteraum (nur der Gastgeber sieht das)
-                                if !z.wartende.is_empty() {
-                                    ui.add_space(6.0);
-                                    ui.label(
-                                        egui::RichText::new("Wartet vor der Tuer")
-                                            .size(11.0)
-                                            .color(p.muted),
-                                    );
-                                    let wartende = z.wartende.clone();
-                                    for (id, name) in wartende {
-                                        ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new(name).size(11.5));
-                                            if ghost_button(ui, "Einlassen").clicked() {
-                                                n.einlassen(id);
-                                            }
-                                            if ghost_button(ui, "Ablehnen").clicked() {
-                                                n.abweisen(id);
-                                            }
-                                        });
-                                    }
-                                }
-                                // Chat
-                                ui.add_space(8.0);
-                                egui::ScrollArea::vertical()
-                                    .max_height(120.0)
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        for (von, text) in n.chat.iter().rev().take(40).rev() {
-                                            let wer = if *von == 0 {
-                                                String::new()
-                                            } else {
-                                                format!("{}: ", n.name_von(*von))
-                                            };
-                                            ui.label(
-                                                egui::RichText::new(format!("{}{}", wer, text))
-                                                    .size(11.0)
-                                                    .color(if *von == 0 { p.muted } else { p.text }),
-                                            );
-                                        }
-                                    });
-                                ui.horizontal(|ui| {
-                                    let feld = ui.add(
-                                        egui::TextEdit::singleline(&mut n.eingabe)
-                                            .desired_width(180.0)
-                                            .hint_text("Nachricht"),
-                                    );
-                                    if feld.lost_focus()
-                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                    {
-                                        senden = true;
-                                    }
-                                    if ghost_button(ui, "Senden").clicked() {
-                                        senden = true;
-                                    }
-                                });
-                            }
-                            if let Some(v) = stumm_um {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    n.stumm_schalten(v);
-                                }
-                            }
-                            if let Some(v) = kamera_um {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    n.kamera_schalten(v);
-                                }
-                            }
-                            if let Some(v) = schirm_um {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    // Ohne Auswahl: der Hauptbildschirm.
-                                    n.schirm_schalten(v, 0);
-                                }
-                            }
-                            if let Some(v) = hand_um {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    n.hand_heben(v);
-                                }
-                            }
-                            if let Some(v) = steuer_um {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    n.steuerung_freigeben(v);
-                                }
-                            }
-                            if let Some((fvid, wer)) = steuern_zu {
-                                // Aus dem Meeting heraus direkt in die Sitzung:
-                                // Hauptfenster nach vorn, Start-Seite, verbinden.
-                                self.view = View::Start;
-                                self.hint = i18n::tf("link.control", &partners::pretty_id(&fvid));
-                                self.meet_win.toast =
-                                    Some((format!("Steuere {}", wer), std::time::Instant::now()));
-                                self.connect_to(&fvid);
-                            }
-                            if senden {
-                                if let Some(n) = self.nativ_meet.as_mut() {
-                                    n.senden();
-                                }
-                            }
-                            if verlassen {
-                                if let Some(n) = self.nativ_meet.take() {
-                                    n.verlassen();
-                                }
-                            }
-                        }
-                    });
-
-                    // ------------------------------------- Einladung + Teilnehmer
-                    let ui = &mut cols[1];
-                    section(ui, i18n::t("meet.invite_head"));
-                    card(ui, |ui| {
-                        if ghost_button(ui, i18n::t("meet.copy_invite")).clicked() {
-                            ui.ctx().copy_text(meet::invite(&m));
-                            self.meet_win.toast = Some((
-                                i18n::t("meet.toast_copied").to_string(),
-                                std::time::Instant::now(),
-                            ));
-                        }
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}  ·  {} {}",
-                                i18n::t("meet.id"),
-                                i18n::t("meet.pw"),
-                                m.passwort
-                            ))
-                            .size(11.0)
-                            .color(p.muted),
-                        );
-                    });
-                    ui.add_space(10.0);
-                    section(ui, i18n::t("meet.people"));
-                    card(ui, |ui| {
-                        let liste = self.meet_win.tn.lock().unwrap().clone();
-                        if liste.is_empty() {
-                            ui.label(
-                                egui::RichText::new(i18n::t("meet.people_none"))
-                                    .size(12.0)
-                                    .color(p.muted),
-                            );
-                        }
-                        for t in liste.iter() {
-                            ui.horizontal(|ui| {
-                                dot(ui, true);
-                                ui.label(egui::RichText::new(&t.name).size(13.0).color(p.text));
-                                if t.host {
-                                    ui.label(
-                                        egui::RichText::new(i18n::t("meet.host"))
-                                            .size(11.0)
-                                            .color(p.accent),
-                                    );
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if t.hand {
-                                            ui.label(
-                                                egui::RichText::new(i18n::t("meet.hand_up"))
-                                                    .size(11.0)
-                                                    .color(p.violet),
-                                            );
-                                        }
-                                        if t.kamera_aus {
-                                            ui.label(
-                                                egui::RichText::new(i18n::t("meet.c_off"))
-                                                    .size(11.0)
-                                                    .color(p.muted),
-                                            );
-                                        }
-                                        if t.mikro_aus {
-                                            ui.label(
-                                                egui::RichText::new(i18n::t("meet.m_off"))
-                                                    .size(11.0)
-                                                    .color(p.muted),
-                                            );
-                                        }
-                                    },
-                                );
-                            });
-                            ui.add_space(3.0);
-                        }
-                    });
-                });
-
-                // Toast: kurzer, sichtbarer Hinweis ("Link kopiert").
-                if let Some((text, seit)) = self.meet_win.toast.clone() {
-                    let alt = seit.elapsed().as_secs_f32();
-                    if alt > 2.4 {
-                        self.meet_win.toast = None;
+                    self.meet_kam_start = if self.meet_win.ohne_video {
+                        None
                     } else {
-                        let deck = if alt > 1.8 {
-                            ((2.4 - alt) / 0.6).clamp(0.0, 1.0)
-                        } else {
-                            1.0
-                        };
-                        egui::Area::new(egui::Id::new("meet_toast"))
-                            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -26.0))
-                            .order(egui::Order::Foreground)
-                            .show(ctx, |ui| {
-                                egui::Frame::NONE
-                                    .fill(p.accent.gamma_multiply(deck))
-                                    .corner_radius(egui::CornerRadius::same(14))
-                                    .inner_margin(egui::Margin::symmetric(16, 8))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(&text)
-                                                .size(13.0)
-                                                .color(p.on_accent.gamma_multiply(deck)),
-                                        );
-                                    });
-                            });
-                        ctx.request_repaint_after(Duration::from_millis(50));
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(600))
+                    };
+                    self.nativ_meet = Some(n);
+                    self.meet_win.beigetreten = true;
+                    self.meet_gelesen = 0;
+                    self.meet_z = meetfenster::Fensterzustand::default();
+                    self.meet_win.tn_next = std::time::Instant::now();
+                }
+                Err(e) => {
+                    self.meet_win.toast = Some((format!("{}", e), std::time::Instant::now()));
+                }
+            }
+        }
+    }
+
+    /// Das laufende Meeting.
+    fn meet_lauf_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
+        let sicht: meetfenster::Sicht;
+        let bilder: meetfenster::Bilder;
+        {
+            let n = match self.nativ_meet.as_mut() {
+                Some(n) => n,
+                None => return,
+            };
+            n.pumpe();
+            // Kamera erst jetzt anwerfen - die Vorschau hat sie gerade
+            // losgelassen und braucht dafuer einen Augenblick.
+            if let Some(wann) = self.meet_kam_start {
+                if std::time::Instant::now() >= wann {
+                    self.meet_kam_start = None;
+                    n.kamera_schalten(true);
+                }
+            }
+            let z = n.zustand();
+            let zahlen = n.zahlen();
+
+            // ---- Texturen nachladen (nur bei wirklich neuem Bild)
+            match n.eigen.as_ref() {
+                Some((w, h, px)) => {
+                    let frisch = self
+                        .nativ_eigen
+                        .as_ref()
+                        .map(|(alt, _)| *alt != n.eigen_stand)
+                        .unwrap_or(true);
+                    if frisch {
+                        let bild = egui::ColorImage::from_rgba_unmultiplied(
+                            [*w as usize, *h as usize],
+                            px,
+                        );
+                        let tex = ctx.load_texture("meeteigen", bild, egui::TextureOptions::LINEAR);
+                        self.nativ_eigen = Some((n.eigen_stand, tex));
                     }
                 }
-            });
+                None => self.nativ_eigen = None,
+            }
+            for (peer, (w, h, px)) in n.bilder.bilder.iter() {
+                let stand = *n.bilder.stand.get(peer).unwrap_or(&0);
+                let frisch = self
+                    .nativ_bilder
+                    .get(peer)
+                    .map(|(alt, _)| *alt != stand)
+                    .unwrap_or(true);
+                if frisch {
+                    let bild =
+                        egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], px);
+                    let tex =
+                        ctx.load_texture(format!("meetcam{}", peer), bild, egui::TextureOptions::LINEAR);
+                    self.nativ_bilder.insert(*peer, (stand, tex));
+                }
+            }
+            self.nativ_bilder
+                .retain(|k, _| n.bilder.bilder.contains_key(k));
+            for (peer, (w, h, px)) in n.schirme.bilder.iter() {
+                let stand = *n.schirme.stand.get(peer).unwrap_or(&0);
+                let frisch = self
+                    .nativ_schirme
+                    .get(peer)
+                    .map(|(alt, _)| *alt != stand)
+                    .unwrap_or(true);
+                if frisch {
+                    let bild =
+                        egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], px);
+                    let tex = ctx.load_texture(
+                        format!("meetschirm{}", peer),
+                        bild,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.nativ_schirme.insert(*peer, (stand, tex));
+                }
+            }
+            self.nativ_schirme
+                .retain(|k, _| n.schirme.bilder.contains_key(k));
+
+            // ---- Sicht zusammenstellen
+            let ich_name = if self.meet_win.name.trim().is_empty() {
+                presence::device_name()
+            } else {
+                self.meet_win.name.trim().to_string()
+            };
+            let mut leute = vec![meetfenster::Person {
+                id: z.ich,
+                name: ich_name,
+                stumm: n.stumm,
+                kamera_aus: !n.kamera_an,
+                hand: n.hand,
+                gastgeber: z.gastgeber != 0 && z.gastgeber == z.ich,
+                fvid: String::new(),
+                ich: true,
+                spricht: !n.stumm && n.pegel > 0.06,
+            }];
+            for t in z.leute.iter() {
+                leute.push(meetfenster::Person {
+                    id: t.id,
+                    name: t.name.clone(),
+                    stumm: t.ton_aus,
+                    kamera_aus: t.bild_aus,
+                    hand: t.hand,
+                    gastgeber: z.gastgeber != 0 && z.gastgeber == t.id,
+                    fvid: t.fvid.clone(),
+                    ich: false,
+                    spricht: n.spricht(t.id),
+                });
+            }
+            let chat: Vec<meetfenster::Chatzeile> = n
+                .chat
+                .iter()
+                .map(|(von, text)| meetfenster::Chatzeile {
+                    von: *von,
+                    name: if *von == 0 {
+                        String::new()
+                    } else {
+                        n.name_von(*von)
+                    },
+                    text: text.clone(),
+                    eigen: *von == z.ich,
+                })
+                .collect();
+            // Chat gilt als gelesen, solange die Seitenleiste ihn zeigt.
+            if self.meet_z.seite_offen && self.meet_z.reiter == meetfenster::Reiter::Chat {
+                self.meet_gelesen = chat.len();
+            }
+            let ungelesen = chat.len().saturating_sub(self.meet_gelesen) as u32;
+
+            let mut protokoll = n.protokoll.clone();
+            for meldung in [&n.meldung, &n.kamera_meldung, &n.schirm_meldung] {
+                if !meldung.is_empty() {
+                    protokoll.push(meldung.clone());
+                }
+            }
+            protokoll.push(format!(
+                "Ton: {} raus / {} rein · Bild: {} raus / {} rein",
+                zahlen.gesendet, zahlen.empfangen, zahlen.bild_gesendet, zahlen.bild_empfangen
+            ));
+            if n.schirm_an {
+                protokoll.push(format!(
+                    "Bildschirm geteilt: {} Bilder gesendet",
+                    n.schirm_gesendet
+                ));
+            }
+            protokoll.push(format!("Meine Nummer: {}", n.meine_fvid()));
+
+            let bandbreite = if n.kbit_rein + n.kbit_raus > 0 {
+                format!("{} kbit/s", n.kbit_rein + n.kbit_raus)
+            } else {
+                String::new()
+            };
+            let tippen: Vec<String> = n.tippen.iter().map(|id| n.name_von(*id)).collect();
+            // Der Servertext zum Warteraum steht in der letzten Meldung.
+            let warte_text = if z.im_warteraum { n.meldung.clone() } else { String::new() };
+            let schirme: Vec<(u64, String)> = self
+                .nativ_schirme
+                .keys()
+                .map(|id| (*id, n.name_von(*id)))
+                .collect();
+
+            sicht = meetfenster::Sicht {
+                raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
+                titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
+                gastgeber: n.bin_gastgeber(),
+                verbindung: if zahlen.verbunden {
+                    "direkt verbunden".to_string()
+                } else if z.verbunden {
+                    "Medien verbinden …".to_string()
+                } else {
+                    "verbinde …".to_string()
+                },
+                verbindung_ton: if zahlen.verbunden {
+                    meetfenster::Ton::Gut
+                } else {
+                    meetfenster::Ton::Warn
+                },
+                // Nativ laeuft noch KEINE Ende-zu-Ende-Schicht (meetsig meldet
+                // caps.e2e=false). Das ehrlich anzeigen statt zu schoenen.
+                e2e: false,
+                bandbreite,
+                leute,
+                wartende: z.wartende.clone(),
+                warteraum_an: z.warteraum_an,
+                chat,
+                protokoll,
+                stumm: n.stumm,
+                kamera_an: n.kamera_an,
+                schirm_an: n.schirm_an,
+                hand: n.hand,
+                steuer_frei: n.steuer_frei,
+                schirme,
+                ungelesen,
+                tippen,
+                im_warteraum: z.im_warteraum,
+                warte_text: warte_text.clone(),
+            };
+            bilder = meetfenster::Bilder {
+                eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
+                kameras: self
+                    .nativ_bilder
+                    .iter()
+                    .map(|(k, (_, t))| (*k, t.clone()))
+                    .collect(),
+                schirme: self
+                    .nativ_schirme
+                    .iter()
+                    .map(|(k, (_, t))| (*k, t.clone()))
+                    .collect(),
+            };
+        }
+
+        // Vor der Tuer: der Warteschirm statt eines leeren Raums. Ohne ihn
+        // saesse der Gast vor einer schwarzen Flaeche und haelt das Programm
+        // fuer kaputt - genau der Fall, der bei der Probe aufgefallen ist.
+        if sicht.im_warteraum {
+            if meetfenster::warteschirm_ui(ctx, &sicht.titel, &sicht.warte_text) {
+                if let Some(n) = self.nativ_meet.take() {
+                    n.verlassen();
+                }
+                self.meet_win.beigetreten = false;
+                self.meet_kam_start = None;
+            }
+            return;
+        }
+        let aktionen = meetfenster::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
+        // Bild im Bild: eigenes kleines Fenster, das oben bleibt - sonst
+        // sieht man beim Teilen des eigenen Bildschirms niemanden mehr.
+        if self.meet_z.pip && !self.headless {
+            let mut zu = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("fv_meet_pip"),
+                egui::ViewportBuilder::default()
+                    .with_title("Meeting")
+                    .with_inner_size([260.0, 300.0])
+                    .with_always_on_top(),
+                |pctx, _class| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.fill(theme::bg()))
+                        .show(pctx, |ui| meetfenster::pip_inhalt(ui, &sicht, &bilder));
+                    if pctx.input(|i| i.viewport().close_requested()) {
+                        zu = true;
+                    }
+                    pctx.request_repaint_after(Duration::from_millis(100));
+                },
+            );
+            if zu {
+                self.meet_z.pip = false;
+            }
+        }
+
+        let mut steuern_zu: Option<(String, String)> = None;
+        let mut verlassen = false;
+        for a in aktionen {
+            let n = match self.nativ_meet.as_mut() {
+                Some(n) => n,
+                None => break,
+            };
+            match a {
+                meetfenster::Aktion::Stumm(v) => n.stumm_schalten(v),
+                meetfenster::Aktion::Kamera(v) => n.kamera_schalten(v),
+                meetfenster::Aktion::Schirm(v) => n.schirm_schalten(v, 0),
+                meetfenster::Aktion::Hand(v) => n.hand_heben(v),
+                meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
+                meetfenster::Aktion::Senden(t) => {
+                    n.eingabe = t;
+                    n.senden();
+                }
+                meetfenster::Aktion::Tippt(v) => n.tippt(v),
+                meetfenster::Aktion::Einlassen(id) => n.einlassen(id),
+                meetfenster::Aktion::Abweisen(id) => n.abweisen(id),
+                meetfenster::Aktion::AlleEinlassen => n.alle_einlassen(),
+                meetfenster::Aktion::Warteraum(v) => n.warteraum(v),
+                meetfenster::Aktion::AlleStumm => n.gastgeber_aktion("mute-all", None),
+                meetfenster::Aktion::Stummschalten(id) => n.gastgeber_aktion("mute", Some(id)),
+                meetfenster::Aktion::Rauswerfen(id) => n.gastgeber_aktion("kick", Some(id)),
+                meetfenster::Aktion::Beenden => {
+                    n.gastgeber_aktion("end", None);
+                    verlassen = true;
+                }
+                meetfenster::Aktion::Verlassen => verlassen = true,
+                meetfenster::Aktion::Steuern(fvid, wer) => steuern_zu = Some((fvid, wer)),
+                meetfenster::Aktion::EinladungKopieren => {
+                    ctx.copy_text(meet::invite(m));
+                    self.meet_win.toast = Some((
+                        i18n::t("meet.toast_copied").to_string(),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+        }
+        if let Some((fvid, wer)) = steuern_zu {
+            // Aus dem Meeting heraus direkt in die Sitzung: Hauptfenster nach
+            // vorn, Start-Seite, verbinden.
+            self.view = View::Start;
+            self.hint = i18n::tf("link.control", &partners::pretty_id(&fvid));
+            self.meet_win.toast = Some((format!("Steuere {}", wer), std::time::Instant::now()));
+            self.connect_to(&fvid);
+        }
+        if verlassen {
+            if let Some(n) = self.nativ_meet.take() {
+                n.verlassen();
+            }
+            self.nativ_bilder.clear();
+            self.nativ_schirme.clear();
+            self.nativ_eigen = None;
+            self.meet_win.beigetreten = false;
+            self.meet_z.pip = false;
+            self.meet_kam_start = None;
+        }
+    }
+
+    /// Bild der eigenen Oberflaeche machen und beenden (--shot).
+    fn shot_ui(&mut self, ctx: &egui::Context) {
+if let Some(path) = self.shot.clone() {
+            self.shot_n += 1;
+            if self.shot_n == 6 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                    egui::UserData::default(),
+                ));
+            }
+            if self.shot_n > 6 {
+                let img = ctx.input(|i| {
+                    i.events.iter().rev().find_map(|e| match e {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    })
+                });
+                if let Some(img) = img {
+                    save_shot(&img, &path);
+                    std::process::exit(0);
+                }
+                if self.shot_n > 150 {
+                    eprintln!("SHOT: kein Bild bekommen");
+                    std::process::exit(2);
+                }
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    /// Nur fuer Bilder: einen Beispielzustand des Meetings zeichnen
+    /// (`--meetdemo N --shot datei.jpg`). Ohne diesen Weg gaebe es nie ein
+    /// echtes Bild der Buehne - der Bauserver hat weder Kamera noch zweiten
+    /// Teilnehmer.
+    fn meet_demo_ui(&mut self, ctx: &egui::Context, nr: usize) {
+        // BEISPIELE+1: der Warteschirm.
+        if nr == meetfenster::BEISPIELE + 1 {
+            meetfenster::warteschirm_ui(
+                ctx,
+                "Wochenbesprechung",
+                "Der Gastgeber wurde benachrichtigt.",
+            );
+            return;
+        }
+        // Ab BEISPIELE: der Beitritts-Schirm.
+        if nr >= meetfenster::BEISPIELE {
+            let bilder = meetfenster::pruefbilder(ctx);
+            let mut b = meetfenster::beispiel_beitritt();
+            meetfenster::beitritt_ui(ctx, &mut b, bilder.eigen.as_ref());
+            return;
+        }
+        let bilder = meetfenster::pruefbilder(ctx);
+        let (_name, sicht, mut z) = meetfenster::beispiel(nr);
+        meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+    }
+
+    /// Kurzer, sichtbarer Hinweis ("Link kopiert").
+    fn meet_toast(&mut self, ctx: &egui::Context) {
+        let p = theme::palette();
+        if let Some((text, seit)) = self.meet_win.toast.clone() {
+            let alt = seit.elapsed().as_secs_f32();
+            if alt > 2.4 {
+                self.meet_win.toast = None;
+                return;
+            }
+            let deck = if alt > 1.8 {
+                ((2.4 - alt) / 0.6).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            egui::Area::new(egui::Id::new("meet_toast"))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -90.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(p.accent.gamma_multiply(deck))
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin::symmetric(16, 8))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&text)
+                                    .size(13.0)
+                                    .color(p.on_accent.gamma_multiply(deck)),
+                            );
+                        });
+                });
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     /// Kopfzeile: Seitenname, Suche, eigener Zustand.
@@ -7085,6 +6886,11 @@ fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(n) = self.meet_demo {
+            self.meet_demo_ui(ctx, n);
+            self.shot_ui(ctx);
+            return;
+        }
         if self.caption_tick.elapsed() > Duration::from_secs(2) {
             self.caption_tick = std::time::Instant::now();
             chrome::paint_from_theme();
@@ -7290,31 +7096,7 @@ impl eframe::App for App {
         }
 
         // --shot: ein paar Frames zeichnen lassen, dann ein Bild anfordern
-        if let Some(path) = self.shot.clone() {
-            self.shot_n += 1;
-            if self.shot_n == 6 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
-                    egui::UserData::default(),
-                ));
-            }
-            if self.shot_n > 6 {
-                let img = ctx.input(|i| {
-                    i.events.iter().rev().find_map(|e| match e {
-                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                        _ => None,
-                    })
-                });
-                if let Some(img) = img {
-                    save_shot(&img, &path);
-                    std::process::exit(0);
-                }
-                if self.shot_n > 150 {
-                    eprintln!("SHOT: kein Bild bekommen");
-                    std::process::exit(2);
-                }
-            }
-            ctx.request_repaint();
-        }
+        self.shot_ui(ctx);
     }
 }
 
@@ -7357,6 +7139,8 @@ struct MeetWin {
     tn_next: std::time::Instant,
     /// Kurzer Hinweis im Fenster ("Link kopiert") und wann er kam.
     toast: Option<(String, std::time::Instant)>,
+    /// Anzeigename im Meeting (Feld "Dein Name" auf dem Beitritts-Schirm).
+    name: String,
 }
 
 impl Default for MeetWin {
@@ -7376,6 +7160,7 @@ impl Default for MeetWin {
             geraete_geladen: false,
             geraete_da: false,
             tn: Arc::new(std::sync::Mutex::new(Vec::new())),
+            name: String::new(),
             tn_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tn_next: std::time::Instant::now(),
             toast: None,
