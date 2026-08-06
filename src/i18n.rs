@@ -174,7 +174,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("dep.used_unlimited", "ohne Limit, {} eingerichtet", "no limit, {} set up"),
     ("dep.copied", "Link in der Zwischenablage.", "Link copied to clipboard."),
     ("upd.auto", "Automatisch aktualisieren", "Update automatically"),
-    ("upd.by_service", "Der Dienst spielt das Update ein. Danach schliesst sich FreeViewer - bitte einmal neu starten.", "The service applies the update. FreeViewer then closes - please start it again."),
+    ("upd.by_service", "Der Dienst spielt das Update ein. Danach schließt sich FreeViewer - bitte einmal neu starten.", "The service applies the update. FreeViewer then closes - please start it again."),
     ("upd.working", "Update läuft", "Updating"),
     ("upd.restart_soon", "FreeViewer wird aktualisiert und startet gleich neu.", "FreeViewer is updating and will restart in a moment."),
     ("setup.auto", "FreeViewer wird auf diesem Gerät eingerichtet …", "Setting up FreeViewer on this device …"),
