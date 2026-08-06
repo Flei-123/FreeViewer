@@ -213,6 +213,69 @@ fn main() -> eframe::Result<()> {
     // up in a build step instead of in front of the user.
     // Kameraliste (Stufe 2d): welche Kameras sieht der Rechner?
     //   freeviewer --kameraliste
+    // BILDSCHIRM-DIAGNOSE: ein Bild GENAU so aufnehmen, wie es ins Meeting
+    // geht (inklusive Zuschnitt und gemaltem Mauszeiger) und als PNG
+    // ablegen. Nur so laesst sich belegen, ob Menues und Zeiger wirklich
+    // mitkommen - im laufenden Meeting sieht man es nur, man misst es nicht.
+    //   freeviewer --schirmshot <datei.png> [schirm-nr] [wartesekunden] [x y b h]
+    if let Some(i) = std::env::args().position(|a| a == "--schirmshot") {
+        let args: Vec<String> = std::env::args().collect();
+        let datei = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "schirm.png".to_string());
+        let nr = args.get(i + 2).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let warte = args.get(i + 3).and_then(|v| v.parse::<u64>().ok()).unwrap_or(3);
+        let zahl = |n: usize, vor: f32| -> f32 {
+            args.get(n).and_then(|v| v.parse::<f32>().ok()).unwrap_or(vor)
+        };
+        let teil = (
+            zahl(i + 4, 0.0),
+            zahl(i + 5, 0.0),
+            zahl(i + 6, 1.0),
+            zahl(i + 7, 1.0),
+        );
+        let auf = match meetschirm::oeffnen(nr, 1920, 1080, 15) {
+            Ok(a) => a,
+            Err(e) => {
+                println!("SCHIRMSHOT FEHLER {}", e);
+                return Ok(());
+            }
+        };
+        println!("SCHIRMSHOT quelle={} ausschnitt={:?}", auf.name, teil);
+        auf.bereich_setzen(teil);
+        // Ein paar Sekunden laufen lassen - so hat man Zeit, ein Menue zu
+        // oeffnen, und der Aufnehmer ist eingeschwungen.
+        let ende = std::time::Instant::now() + std::time::Duration::from_secs(warte);
+        let mut letztes = None;
+        while std::time::Instant::now() < ende {
+            if let Some(b) = auf.neuestes() {
+                letztes = Some(b);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        match letztes {
+            Some(b) => {
+                let mut rgba = Vec::new();
+                if h264::nv12_to_rgba(&b.nv12, b.breite, b.hoehe, b.breite as usize, b.hoehe, &mut rgba)
+                {
+                    match image::RgbaImage::from_raw(b.breite, b.hoehe, rgba) {
+                        Some(img) => match img.save(&datei) {
+                            Ok(_) => println!("SCHIRMSHOT OK {} ({}x{})", datei, b.breite, b.hoehe),
+                            Err(e) => println!("SCHIRMSHOT SCHREIBFEHLER {}", e),
+                        },
+                        None => println!("SCHIRMSHOT PUFFER PASST NICHT"),
+                    }
+                } else {
+                    println!("SCHIRMSHOT NV12 UNVOLLSTAENDIG");
+                }
+            }
+            None => println!("SCHIRMSHOT KEIN BILD ({})", auf.fehler()),
+        }
+        auf.stoppen();
+        return Ok(());
+    }
+
     // KAMERA-DIAGNOSE: was bietet das Geraet an, welches Format bekommen
     // wir wirklich, wie sehen Roh- und Endbild aus. Nur so laesst sich ein
     // Farb- oder Zuschnittfehler BELEGEN statt zu raten.
