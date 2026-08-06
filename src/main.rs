@@ -3607,26 +3607,6 @@ impl App {
                                 } else {
                                     self.nativ_eigen = None;
                                 }
-                                if let Some((_, tex)) = self.nativ_eigen.as_ref() {
-                                    ui.add_space(8.0);
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Du  ·  {} Bilder gesendet",
-                                            n.bild_gesendet
-                                        ))
-                                        .size(10.5)
-                                        .color(p.muted),
-                                    );
-                                    ui.add(
-                                        egui::Image::new(&*tex)
-                                            .uv(egui::Rect::from_min_max(
-                                                egui::pos2(1.0, 0.0),
-                                                egui::pos2(0.0, 1.0),
-                                            ))
-                                            .max_width(260.0)
-                                            .corner_radius(6.0),
-                                    );
-                                }
                                 // Bildkacheln der anderen (Stufe 2)
                                 let neue: Vec<(u64, u64, u32, u32)> = n
                                     .bilder
@@ -3722,38 +3702,135 @@ impl App {
                                         );
                                     }
                                 }
-                                if !self.nativ_bilder.is_empty() {
-                                    ui.add_space(8.0);
-                                    // Mit Bildschirm auf der Buehne werden die
-                                    // Kameras zu Miniaturen NEBENEINANDER.
+                                // ---- Der Call selbst: Kacheln wie im Browser ----
+                                // Jeder im Raum bekommt eine Kachel - auch wer
+                                // die Kamera aus hat (dann Kuerzel statt
+                                // schwarzer Flaeche). Man sieht sich selbst
+                                // gespiegelt, wie im Badezimmerspiegel.
+                                {
+                                    let zk = n.zustand();
+                                    let mut leute: Vec<(u64, String, bool, bool)> =
+                                        vec![(zk.ich, "Du".to_string(), n.stumm, n.hand)];
+                                    for t in zk.leute.iter() {
+                                        leute.push((t.id, t.name.clone(), t.ton_aus, t.hand));
+                                    }
+                                    let bilder: Vec<Option<egui::TextureHandle>> = leute
+                                        .iter()
+                                        .map(|(id, ..)| {
+                                            if *id == zk.ich {
+                                                self.nativ_eigen.as_ref().map(|(_, t)| t.clone())
+                                            } else {
+                                                self.nativ_bilder.get(id).map(|(_, t)| t.clone())
+                                            }
+                                        })
+                                        .collect();
+                                    let anzahl = leute.len().max(1);
                                     let klein = !self.nativ_schirme.is_empty();
-                                    let breite = if klein { 130.0 } else { 260.0 };
-                                    let zeichne = |ui: &mut egui::Ui,
-                                                   peer: &u64,
-                                                   tex: &egui::TextureHandle| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(n.name_von(*peer))
-                                                    .size(10.5)
-                                                    .color(p.muted),
-                                            );
-                                            ui.add(
-                                                egui::Image::new(tex)
-                                                    .max_width(breite)
-                                                    .corner_radius(6.0),
-                                            );
-                                        });
+                                    let spalten = if klein {
+                                        anzahl.min(4)
+                                    } else {
+                                        (anzahl as f32).sqrt().ceil() as usize
+                                    }
+                                    .max(1);
+                                    let abstand = 6.0;
+                                    let voll = ui.available_width().max(160.0);
+                                    let breite = ((voll - abstand * (spalten as f32 - 1.0))
+                                        / spalten as f32)
+                                        .clamp(90.0, 460.0);
+                                    let hoehe = if klein {
+                                        (breite * 9.0 / 16.0).min(110.0)
+                                    } else {
+                                        breite * 9.0 / 16.0
                                     };
-                                    if klein {
-                                        ui.horizontal_wrapped(|ui| {
-                                            for (peer, (_, tex)) in self.nativ_bilder.iter() {
-                                                zeichne(ui, peer, tex);
+                                    ui.add_space(8.0);
+                                    let mut i = 0usize;
+                                    while i < leute.len() {
+                                        ui.horizontal(|ui| {
+                                            for _ in 0..spalten {
+                                                if i >= leute.len() {
+                                                    break;
+                                                }
+                                                let (id, name, stumm, hand) = leute[i].clone();
+                                                let tex = bilder[i].clone();
+                                                i += 1;
+                                                let (rect, _r) = ui.allocate_exact_size(
+                                                    egui::vec2(breite, hoehe),
+                                                    egui::Sense::hover(),
+                                                );
+                                                let maler = ui.painter_at(rect);
+                                                maler.rect_filled(rect, 8.0, p.card);
+                                                match tex {
+                                                    Some(t) => {
+                                                        let ar = t.aspect_ratio().max(0.05);
+                                                        let mut bw = rect.width();
+                                                        let mut bh = bw / ar;
+                                                        if bh > rect.height() {
+                                                            bh = rect.height();
+                                                            bw = bh * ar;
+                                                        }
+                                                        let ziel = egui::Rect::from_center_size(
+                                                            rect.center(),
+                                                            egui::vec2(bw, bh),
+                                                        );
+                                                        // Eigenes Bild spiegeln, fremde nicht.
+                                                        let uv = if id == zk.ich {
+                                                            egui::Rect::from_min_max(
+                                                                egui::pos2(1.0, 0.0),
+                                                                egui::pos2(0.0, 1.0),
+                                                            )
+                                                        } else {
+                                                            egui::Rect::from_min_max(
+                                                                egui::pos2(0.0, 0.0),
+                                                                egui::pos2(1.0, 1.0),
+                                                            )
+                                                        };
+                                                        maler.image(
+                                                            t.id(),
+                                                            ziel,
+                                                            uv,
+                                                            egui::Color32::WHITE,
+                                                        );
+                                                    }
+                                                    None => {
+                                                        let kuerzel: String = name
+                                                            .split_whitespace()
+                                                            .filter_map(|w| w.chars().next())
+                                                            .take(2)
+                                                            .collect::<String>()
+                                                            .to_uppercase();
+                                                        maler.circle_filled(
+                                                            rect.center(),
+                                                            (hoehe * 0.22).max(12.0),
+                                                            p.card_hi,
+                                                        );
+                                                        maler.text(
+                                                            rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            kuerzel,
+                                                            egui::FontId::proportional(
+                                                                (hoehe * 0.2).clamp(11.0, 26.0),
+                                                            ),
+                                                            p.text,
+                                                        );
+                                                    }
+                                                }
+                                                let schild = format!(
+                                                    "{}{}{}",
+                                                    name,
+                                                    if stumm { "  (stumm)" } else { "" },
+                                                    if hand { "  (meldet sich)" } else { "" }
+                                                );
+                                                maler.text(
+                                                    rect.left_bottom() + egui::vec2(8.0, -6.0),
+                                                    egui::Align2::LEFT_BOTTOM,
+                                                    schild,
+                                                    egui::FontId::proportional(11.0),
+                                                    if stumm { p.muted } else { p.text },
+                                                );
+                                                ui.add_space(abstand);
                                             }
                                         });
-                                    } else {
-                                        for (peer, (_, tex)) in self.nativ_bilder.iter() {
-                                            zeichne(ui, peer, tex);
-                                        }
+                                        ui.add_space(abstand);
                                     }
                                 }
 
