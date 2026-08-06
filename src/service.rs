@@ -347,7 +347,10 @@ mod imp {
                 },
             ];
             let fa = SERVICE_FAILURE_ACTIONSW {
-                dwResetPeriod: 86_400,
+                // Frueher 24 Stunden: bei mehreren Updates am Tag war der
+                // Zaehler ausgereizt und Windows half nicht mehr nach. Eine
+                // Stunde reicht voellig, um echte Abstuerze zu erkennen.
+                dwResetPeriod: 3_600,
                 lpRebootMsg: PWSTR::null(),
                 lpCommand: PWSTR::null(),
                 cActions: actions.len() as u32,
@@ -705,6 +708,20 @@ mod imp {
         }
     }
 
+    /// Bittet den Dienst, sich ORDENTLICH zu beenden (wie ein "sc stop").
+    ///
+    /// WARUM das wichtig ist: bisher hat sich der Dienst beim Update per
+    /// `taskkill /f` selbst abgeschossen. Windows zaehlt das als ABSTURZ -
+    /// im Systemprotokoll steht dann "Der Dienst wurde unerwartet beendet.
+    /// Dies ist bereits 3 Mal vorgekommen" (auf HOLO-LAPTOP-3 am 06.08.2026
+    /// nachgelesen). Damit verbraucht jedes Update eine der drei
+    /// Wiederherstellungsmassnahmen - das Sicherheitsnetz war nach drei
+    /// Updates am Tag aufgebraucht. Ein sauberes Ende zaehlt nicht mit.
+    pub fn stop_anfordern() {
+        STOP.store(true, Ordering::Relaxed);
+        WAKE.store(true, Ordering::Relaxed);
+    }
+
     pub fn kill_agent() {
         let h = AGENT.swap(0, Ordering::Relaxed);
         AGENT_PID.store(0, Ordering::Relaxed);
@@ -840,6 +857,7 @@ mod stub {
         Err(anyhow!("nur unter Windows"))
     }
     pub fn kill_agent() {}
+    pub fn stop_anfordern() {}
     pub fn log(_s: &str) {}
     /// Auf welchem Eingabe-Desktop laeuft der Agent? Nur Windows kennt das
     /// Problem (Anmeldebildschirm, UAC), anderswo gibt es genau einen.

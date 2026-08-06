@@ -402,7 +402,10 @@ impl NativMeet {
             Some(b) => b,
             None => return,
         };
-        self.naechstes_schirmbild = jetzt + std::time::Duration::from_millis(66);
+        // 50 ms = 20 Bilder je Sekunde. Mehr als Text und Fenster brauchen,
+        // aber deutlich fluessiger als die frueheren 15 - und ein geteilter
+        // Bildschirm kostet je Bild weniger als eine Kamera (viel bleibt gleich).
+        self.naechstes_schirmbild = jetzt + std::time::Duration::from_millis(50);
         if jetzt.duration_since(self.letztes_schluesselbild) >= std::time::Duration::from_secs(4) {
             self.letztes_schluesselbild = jetzt;
             kod.schluesselbild();
@@ -434,7 +437,7 @@ impl NativMeet {
                 return;
             }
             match crate::meetschirm::oeffnen(index, 1920, 1080, 15) {
-                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 15, 3_500_000) {
+                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, 4_000_000) {
                     Ok(k) => {
                         self.schirm_meldung = format!("Teile {}", a.name);
                         self.schirm = Some(a);
@@ -492,7 +495,10 @@ impl NativMeet {
             Some(b) => b,
             None => return,
         };
-        self.naechstes_bild = jetzt + std::time::Duration::from_millis(66);
+        // 33 ms = 30 Bilder je Sekunde. Vorher waren es 66 ms (15/s) - das
+        // war zusammen mit dem langsamen Neuzeichnen der Grund fuer das
+        // ruckelige Bild. Die Kamera liefert ohnehin 30.
+        self.naechstes_bild = jetzt + std::time::Duration::from_millis(33);
         match kod.nv12_rahmen(&bild.nv12) {
             Ok(teile) => {
                 for t in teile {
@@ -502,9 +508,11 @@ impl NativMeet {
             }
             Err(e) => self.kamera_meldung = format!("Kodierer: {}", e),
         }
-        // Eigene Vorschau (nur 5-mal je Sekunde - mehr braucht kein Mensch
-        // und es spart Rechenzeit).
-        if self.bild_gesendet % 3 == 0 {
+        // Eigene Vorschau. Frueher nur jedes DRITTE Bild - bei 15 Bildern
+        // je Sekunde also 5/s, und die eigene Kachel ruckelte sichtbar
+        // staerker als die der anderen. Das Umrechnen nach RGBA kostet bei
+        // 640x360 kaum etwas; jetzt jedes Bild.
+        {
             let mut rgba = Vec::new();
             if crate::h264::nv12_to_rgba(
                 &bild.nv12,
@@ -537,7 +545,7 @@ impl NativMeet {
                 30,
             ) {
                 Ok(k) => {
-                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 15, 1_500_000) {
+                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 30, 2_000_000) {
                         Ok(c) => {
                             self.kamera_meldung = format!("Kamera: {}", k.name);
                             self.kamera = Some(k);

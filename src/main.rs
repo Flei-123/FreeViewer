@@ -1990,6 +1990,12 @@ fn main() -> eframe::Result<()> {
     }
     autostart::refresh();
     if is_agent {
+        // Nach einem Update: stand vorher ein Fenster offen, wird es hier
+        // wieder geoeffnet. Der Dienst kann das nicht selbst - er sitzt in
+        // Sitzung 0 und wuerde auf einem unsichtbaren Desktop landen.
+        update::gui_wieder_oeffnen();
+    }
+    if is_agent {
         // Zwei gleiche Tablett-Symbole (Agent + Oberflaeche) taugen nichts:
         // der Agent zeigt seins nur, solange keine Oberflaeche laeuft.
         let tray_shared = shared.clone();
@@ -2005,6 +2011,10 @@ fn main() -> eframe::Result<()> {
         });
     } else {
         tray::start(shared.clone());
+        // Dem Dienst (Sitzung 0) mitteilen, dass hier ein Fenster steht.
+        // Ohne diese Marke weiss er nach dem Update nicht, ob er die
+        // Oberflaeche wieder oeffnen soll.
+        update::gui_marke_pflegen();
     }
 
     let options = eframe::NativeOptions {
@@ -3850,7 +3860,9 @@ impl App {
                     if pctx.input(|i| i.viewport().close_requested()) {
                         zu = true;
                     }
-                    pctx.request_repaint_after(Duration::from_millis(100));
+                    // Das kleine Fenster zeigt dieselben Bilder - es darf
+                    // nicht das langsamere von beiden sein.
+                    pctx.request_repaint_after(Duration::from_millis(33));
                 },
             );
             self.meet_z.pip_selbst = selbst;
@@ -7240,11 +7252,22 @@ impl eframe::App for App {
                     .with_inner_size([920.0, 600.0])
                     .with_min_inner_size([560.0, 430.0]),
                 |vctx, _class| {
+                    let im_gespraech = self.nativ_meet.is_some();
                     self.meet_win_ui(vctx);
                     if vctx.input(|i| i.viewport().close_requested()) {
                         closed = true;
                     }
-                    vctx.request_repaint_after(Duration::from_millis(150));
+                    // WARUM zwei Takte: 150 ms waren eine harte Obergrenze
+                    // von rund 7 Bildern je Sekunde - egal wie schnell die
+                    // Kamera lieferte, das Fenster zeichnete nicht oefter.
+                    // Genau das hat Justin als "schlechte Bildrate" gesehen.
+                    // Im Gespraech also fluessig zeichnen; auf dem
+                    // Beitritts-Schirm reicht wenig, da bewegt sich kaum was.
+                    vctx.request_repaint_after(Duration::from_millis(if im_gespraech {
+                        16
+                    } else {
+                        60
+                    }));
                 },
             );
             if closed {

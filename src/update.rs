@@ -440,6 +440,91 @@ pub fn updating_flag() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("updating.flag"))
 }
 
+/// Marke, mit der eine SICHTBARE Oberflaeche sagt: "ich laufe gerade".
+///
+/// Der Dienst sitzt in Sitzung 0 und kann die Fenster des Benutzers nicht
+/// sehen; die vorhandene Mutex-Pruefung ist auf "Local\\" begrenzt und damit
+/// pro Sitzung. Eine Datei mit Zeitstempel ist der einzige Weg, der ueber
+/// Sitzungsgrenzen funktioniert.
+#[cfg(windows)]
+pub fn gui_marke() -> Option<std::path::PathBuf> {
+    Some(crate::ident::machine_config_dir()?.join("gui-laeuft.flag"))
+}
+
+/// Nach dem Update: diese Marke bittet den Agenten, die Oberflaeche wieder
+/// zu oeffnen.
+#[cfg(windows)]
+pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
+    Some(crate::ident::machine_config_dir()?.join("gui-neustart.flag"))
+}
+
+#[cfg(not(windows))]
+pub fn gui_marke() -> Option<std::path::PathBuf> {
+    None
+}
+#[cfg(not(windows))]
+pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Laeuft in der sichtbaren Oberflaeche: haelt die Marke frisch.
+pub fn gui_marke_pflegen() {
+    #[cfg(windows)]
+    std::thread::spawn(|| loop {
+        if let Some(p) = gui_marke() {
+            let _ = std::fs::write(&p, now_text().as_bytes());
+        }
+        std::thread::sleep(Duration::from_secs(15));
+    });
+}
+
+fn now_text() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+/// War in den letzten 90 Sekunden eine sichtbare Oberflaeche offen?
+pub fn gui_war_offen() -> bool {
+    let Some(p) = gui_marke() else { return false };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return false;
+    };
+    let Ok(dann) = text.trim().parse::<u64>() else {
+        return false;
+    };
+    let jetzt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    jetzt.saturating_sub(dann) <= 90
+}
+
+/// Laeuft im Agenten (Sitzung des Benutzers): stand vor dem Update ein
+/// Fenster offen, wird es jetzt wieder geoeffnet.
+///
+/// WARUM hier und nicht im Dienst: der Dienst laeuft als SYSTEM in Sitzung 0.
+/// Ein von dort gestarteter Prozess landet auf einem Desktop, den niemand
+/// sieht. Der Agent sitzt schon im Benutzer-Desktop - er braucht dafuer nur
+/// ein normales `spawn`.
+pub fn gui_wieder_oeffnen() {
+    #[cfg(windows)]
+    {
+        let Some(p) = gui_neustart_marke() else { return };
+        if !p.exists() {
+            return;
+        }
+        let _ = std::fs::remove_file(&p);
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        // Ohne Argumente = ganz normales Fenster, wie ein Doppelklick.
+        let _ = std::process::Command::new(exe).spawn();
+        crate::service::log("Oberflaeche nach dem Update wieder geoeffnet");
+    }
+}
+
 /// Knopf "Update installieren" bei installiertem Dienst: nur die Bitte
 /// hinterlegen, der Dienst macht den Rest (als SYSTEM, ohne Nachfrage).
 #[cfg(windows)]
@@ -501,24 +586,48 @@ pub fn service_watcher() {
                     match ergebnis {
                         Ok(()) => {
                             crate::service::log("Update eingespielt - alle Teile starten neu");
-                            // Neustart-Kette zuerst anwerfen (der cmd-Helfer
-                            // ueberlebt das Beenden der eigenen Exe)...
+                            // Stand ein Fenster offen? Dann soll es nach dem
+                            // Neustart wiederkommen. Ohne diese Marke war der
+                            // Bildschirm nach jedem Update einfach leer - der
+                            // Dienst kam zurueck, das FENSTER nicht.
+                            if gui_war_offen() {
+                                if let Some(p) = gui_neustart_marke() {
+                                    let _ = std::fs::write(&p, b"1");
+                                }
+                                crate::service::log("Oberflaeche war offen - wird neu geoeffnet");
+                            }
+                            // Neustart-Kette anwerfen. Dreimal versuchen: der
+                            // Dienst braucht einen Moment, bis Windows ihn als
+                            // GESTOPPT fuehrt; ein zu frueher Start scheitert
+                            // mit "wird gerade beendet". Ein spaeterer Versuch
+                            // auf einen schon laufenden Dienst schadet nicht.
+                            let name = crate::service::SERVICE_NAME;
                             let _ = std::process::Command::new("cmd")
                                 .args([
                                     "/c",
                                     &format!(
-                                        "ping -n 3 127.0.0.1 >nul & sc start {n}",
-                                        n = crate::service::SERVICE_NAME
+                                        "ping -n 4 127.0.0.1 >nul & sc start {n} >nul 2>&1 &                                          ping -n 6 127.0.0.1 >nul & sc start {n} >nul 2>&1 &                                          ping -n 11 127.0.0.1 >nul & sc start {n} >nul 2>&1",
+                                        n = name
                                     ),
                                 ])
                                 .spawn();
-                            // ... dann ALLE FreeViewer-Prozesse beenden:
-                            // Oberflaeche, Agent und der Dienst selbst. Eine
-                            // alte Oberflaeche wuerde sonst mit altem Stand
-                            // weiterlaufen und das Update weiter versuchen.
+                            // Oberflaeche und Agent beenden - aber NICHT uns
+                            // selbst. Der Dienst geht gleich darunter geordnet
+                            // zu Ende; ein Selbstabschuss zaehlt bei Windows
+                            // als Absturz und verbraucht das Sicherheitsnetz.
+                            let eigen = std::process::id();
                             let _ = std::process::Command::new("taskkill")
-                                .args(["/f", "/im", "freeviewer.exe"])
-                                .spawn();
+                                .args([
+                                    "/f",
+                                    "/im",
+                                    crate::brand::EXE,
+                                    "/fi",
+                                    &format!("PID ne {}", eigen),
+                                ])
+                                .output();
+                            // Jetzt sauber aussteigen: supervise() kehrt
+                            // zurueck, der Dienst meldet ordentlich GESTOPPT.
+                            crate::service::stop_anfordern();
                             return;
                         }
                         Err(e) => {

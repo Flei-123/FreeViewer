@@ -135,6 +135,48 @@ pub fn nv12_zuschneiden_skalieren(
 
     out.clear();
     out.resize(zwu * zhu * 3 / 2, 0);
+
+    // ---- Schneller Weg: genau halbieren ----
+    //
+    // Der haeufigste Fall ist 1280x720 -> 640x360 (die Kamera kann nur
+    // 720p, gebraucht werden 360p). Der allgemeine Weg unten rechnet fuer
+    // JEDEN Zielpunkt die Quellgrenzen neu aus - gemessen 46 ms je Bild im
+    // Debug-Bau, damit waeren 30 Bilder je Sekunde unmoeglich. Beim exakten
+    // Halbieren stehen die vier Quellpunkte aber fest; das spart die ganze
+    // Indexrechnerei.
+    if cw == zwu * 2 && ch == zhu * 2 {
+        let uv_src = swu * shu;
+        let uv_dst = zwu * zhu;
+        for ty in 0..zhu {
+            let z0 = (cy + ty * 2) * swu + cx;
+            let z1 = z0 + swu;
+            let zeile = ty * zwu;
+            for tx in 0..zwu {
+                let a = z0 + tx * 2;
+                let b = z1 + tx * 2;
+                let summe = src[a] as u32 + src[a + 1] as u32 + src[b] as u32 + src[b + 1] as u32;
+                out[zeile + tx] = (summe >> 2) as u8;
+            }
+        }
+        // Farbe: liegt schon in halber Aufloesung vor, also 2x2 Farbpaare.
+        let sw2 = swu; // Bytes je Farbzeile = Breite (je Punktpaar U und V)
+        let (cx2, cy2) = (cx / 2, cy / 2);
+        for ty in 0..zhu / 2 {
+            let z0 = uv_src + (cy2 + ty * 2) * sw2 + cx2 * 2;
+            let z1 = z0 + sw2;
+            let zeile = uv_dst + ty * zwu;
+            for tx in 0..zwu / 2 {
+                let a = z0 + tx * 4;
+                let b = z1 + tx * 4;
+                let u = src[a] as u32 + src[a + 2] as u32 + src[b] as u32 + src[b + 2] as u32;
+                let v = src[a + 1] as u32 + src[a + 3] as u32 + src[b + 1] as u32 + src[b + 3] as u32;
+                out[zeile + tx * 2] = (u >> 2) as u8;
+                out[zeile + tx * 2 + 1] = (v >> 2) as u8;
+            }
+        }
+        return true;
+    }
+
     // --- Y ---
     for ty in 0..zhu {
         let y0 = cy + ty * ch / zhu;
@@ -1444,5 +1486,73 @@ mod tests {
             }
             Err(e) => assert!(!e.to_string().is_empty()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tempo {
+    use super::*;
+
+    /// Wie teuer ist das Verkleinern wirklich? Die Kamera liefert 1280x720,
+    /// gebraucht werden 640x360 - bei 30 Bildern je Sekunde stehen dafuer
+    /// 33 ms zur Verfuegung, und zwar fuer ALLES (Verkleinern, Kodieren,
+    /// Zeichnen). Ist allein das Verkleinern schon zu langsam, nuetzt ein
+    /// hoeherer Sendetakt nichts.
+    #[test]
+    fn verkleinern_ist_schnell_genug() {
+        let (sw, sh) = (1280u32, 720u32);
+        let mut src = vec![0u8; (sw * sh * 3 / 2) as usize];
+        for (i, v) in src.iter_mut().enumerate() {
+            *v = (i % 251) as u8;
+        }
+        let mut out = Vec::new();
+        // Einmal warmlaufen (Speicher anlegen).
+        assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
+        let runden = 30;
+        let start = std::time::Instant::now();
+        for _ in 0..runden {
+            assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
+        }
+        let je = start.elapsed().as_secs_f64() * 1000.0 / runden as f64;
+        println!("1280x720 -> 640x360: {:.2} ms je Bild", je);
+        // 30 Bilder je Sekunde heisst 33 ms fuer ALLES - Verkleinern,
+        // Kodieren, Senden, Zeichnen. Der ausgelieferte Bau ist der
+        // Release-Bau, deshalb gilt dort die scharfe Grenze. Der Debug-Bau
+        // ist um ein Vielfaches langsamer und laeuft auf einem Server, der
+        // nebenher baut - dort wird nur die grobe Entgleisung abgefangen
+        // (der Fehler, den dieser Test gefunden hat, lag bei 46 ms).
+        let grenze = if cfg!(debug_assertions) { 30.0 } else { 3.0 };
+        assert!(
+            je < grenze,
+            "Verkleinern braucht {:.1} ms (Grenze {:.0} ms) - zu langsam",
+            je,
+            grenze
+        );
+    }
+
+    /// Der schnelle Weg muss DASSELBE liefern wie der allgemeine. Sonst
+    /// waere die Beschleunigung ein stiller Bildfehler.
+    #[test]
+    fn schneller_weg_rechnet_wie_der_allgemeine() {
+        let (sw, sh) = (64u32, 36u32);
+        let mut src = vec![0u8; (sw * sh * 3 / 2) as usize];
+        for (i, v) in src.iter_mut().enumerate() {
+            *v = ((i * 37) % 256) as u8;
+        }
+        // 64x36 -> 32x18 ist exakt halbiert (schneller Weg),
+        // 64x36 -> 30x18 nicht (allgemeiner Weg) - beide muessen laufen.
+        let mut halb = Vec::new();
+        assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 32, 18, &mut halb));
+        assert_eq!(halb.len(), 32 * 18 * 3 / 2);
+        // Gegenprobe von Hand: erster Punkt = Mittel der vier oberen links.
+        let erwartet = (src[0] as u32 + src[1] as u32 + src[64] as u32 + src[65] as u32) / 4;
+        assert_eq!(halb[0] as u32, erwartet, "schneller Weg mittelt falsch");
+        // Erste Farbe ebenso.
+        let uv = (sw * sh) as usize;
+        let eu = (src[uv] as u32 + src[uv + 2] as u32 + src[uv + 64] as u32 + src[uv + 66] as u32) / 4;
+        assert_eq!(halb[32 * 18] as u32, eu, "schneller Weg mittelt die Farbe falsch");
+        let mut krumm = Vec::new();
+        assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 30, 18, &mut krumm));
+        assert_eq!(krumm.len(), 30 * 18 * 3 / 2);
     }
 }
