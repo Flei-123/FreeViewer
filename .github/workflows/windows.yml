@@ -33,3 +33,44 @@ jobs:
           name: freeviewer-windows-x64
           path: target/release/freeviewer.exe
           if-no-files-found: error
+
+  # --------------------------------------------------------- X-Remote ---
+  # Dieselbe Software als zweite Marke (Lizenz-Merkmal an, eigenes
+  # Link-Schema). Ohne diesen Job muesste x-remote.exe von Hand auf einem
+  # Rechner gebaut werden - und blieb deshalb schon einmal zurueck.
+  xremote:
+    name: X-Remote bauen (Windows)
+    runs-on: windows-latest
+    env:
+      FV_BRAND_NAME: X-Remote
+      FV_BRAND_EXE: x-remote.exe
+      FV_BRAND_DIR: X-Remote
+      FV_BRAND_PUBLISHER: Xoffi
+      FV_BRAND_SLUG: xoffi
+      FV_BRAND_SCHEME: xremote
+      FV_BRAND_WEB: https://remote.fleitec.com
+      FV_BRAND_FEED: https://remote.fleitec.com/fv/dist/version-xoffi.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Zwischenspeicher
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bauen (mit Lizenz-Merkmal)
+        run: cargo build --release --features license
+
+      - name: Testen
+        run: cargo test --release --features license
+
+      - name: Umbenennen
+        run: Copy-Item target/release/freeviewer.exe target/release/x-remote.exe
+
+      - name: Ergebnis einsammeln
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-remote-windows-x64
+          path: target/release/x-remote.exe
+          if-no-files-found: error
