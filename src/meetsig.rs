@@ -114,6 +114,22 @@ pub enum Ereignis {
         x: f32,
         y: f32,
     },
+    /// Ein Zuschauer bittet um einen Ausschnitt MEINES Bildschirms.
+    Bereichswunsch {
+        peer: u64,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    /// Ein Sender teilt mit, welchen Ausschnitt er gerade schickt.
+    Bereich {
+        peer: u64,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
     /// Wir sitzen im Warteraum.
     Wartet {
         titel: String,
@@ -232,6 +248,20 @@ impl Sitzung {
         let _ = self
             .befehle
             .send(Befehl::Roh(serde_json::json!({"t":"cursor","x":x,"y":y})));
+    }
+
+    /// Als Zuschauer: um einen Ausschnitt des Bildschirms von `an_peer` bitten.
+    pub fn bereichswunsch(&self, an_peer: u64, x: f32, y: f32, w: f32, h: f32) {
+        let _ = self.befehle.send(Befehl::Roh(
+            serde_json::json!({"t":"region-req","to":an_peer,"x":x,"y":y,"w":w,"h":h}),
+        ));
+    }
+
+    /// Als Sender: bekanntgeben, welchen Ausschnitt ich gerade schicke.
+    pub fn bereich(&self, x: f32, y: f32, w: f32, h: f32) {
+        let _ = self.befehle.send(Befehl::Roh(
+            serde_json::json!({"t":"region-on","x":x,"y":y,"w":w,"h":h}),
+        ));
     }
 
     /// Fernsteuerung ueber FreeViewer anbieten (`an`) oder zuruecknehmen.
@@ -523,6 +553,26 @@ fn verarbeiten(
                     peer: u64f("peer"),
                     x,
                     y,
+                });
+            }
+        }
+        "region-req" | "region-on" => {
+            let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(-1.0) as f32;
+            let (x, y, w, h) = (f("x"), f("y"), f("w"), f("h"));
+            // Unsinnige Rechtecke gaeben einen falschen Ausschnitt - lieber
+            // gar nichts melden als etwas Erfundenes.
+            let gut = (0.0..=1.0).contains(&x)
+                && (0.0..=1.0).contains(&y)
+                && w > 0.0
+                && h > 0.0
+                && x + w <= 1.001
+                && y + h <= 1.001;
+            if gut {
+                let peer = u64f("peer");
+                let _ = ev.send(if t == "region-req" {
+                    Ereignis::Bereichswunsch { peer, x, y, w, h }
+                } else {
+                    Ereignis::Bereich { peer, x, y, w, h }
                 });
             }
         }

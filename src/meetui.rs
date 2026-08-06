@@ -63,6 +63,19 @@ pub struct NativMeet {
     pub schirm_meldung: String,
     pub schirm_gesendet: u64,
     naechstes_schirmbild: std::time::Instant,
+    /// Wuensche der Zuschauer: wer will welchen Ausschnitt meines
+    /// Bildschirms? (Teilnehmer -> Bereich, plus wann zuletzt gehoert)
+    wunsch_von: std::collections::HashMap<u64, (crate::meetschirm::Bereich, std::time::Instant)>,
+    /// Welchen Ausschnitt SENDE ich gerade?
+    pub schirm_bereich: crate::meetschirm::Bereich,
+    /// Welchen Ausschnitt senden die ANDEREN gerade (fuer die Zeichnung)?
+    pub bereich_von: std::collections::HashMap<u64, crate::meetschirm::Bereich>,
+    /// Wer kann ueberhaupt Ausschnitte liefern (neuer Client)? Wer sich
+    /// einmal gemeldet hat, kann es - vorher waere "scharf" eine Luege.
+    pub scharf_kann: std::collections::HashSet<u64>,
+    /// Zuletzt gesendeter Wunsch und wann - Wiederholungen sind nutzlos.
+    letzter_wunsch: Option<(u64, crate::meetschirm::Bereich)>,
+    naechster_wunsch: std::time::Instant,
     /// Zeigerpositionen der anderen (0..1 auf IHREM geteilten Bildschirm).
     /// Damit kann ein Zuschauer dorthin zoomen, wohin der andere zeigt.
     pub zeiger_von: std::collections::HashMap<u64, (f32, f32)>,
@@ -154,6 +167,12 @@ impl NativMeet {
             schirm_meldung: String::new(),
             schirm_gesendet: 0,
             naechstes_schirmbild: std::time::Instant::now(),
+            wunsch_von: std::collections::HashMap::new(),
+            schirm_bereich: crate::meetschirm::GANZ,
+            bereich_von: std::collections::HashMap::new(),
+            scharf_kann: std::collections::HashSet::new(),
+            letzter_wunsch: None,
+            naechster_wunsch: std::time::Instant::now(),
             zeiger_von: std::collections::HashMap::new(),
             naechster_zeiger: std::time::Instant::now(),
             letzter_zeiger: None,
@@ -270,6 +289,17 @@ impl NativMeet {
                 meetsig::Ereignis::Zeiger { peer, x, y } => {
                     self.zeiger_von.insert(peer, (x, y));
                 }
+                meetsig::Ereignis::Bereichswunsch { peer, x, y, w, h } => {
+                    // Ein Zuschauer sagt, welchen Teil MEINES Bildschirms er
+                    // gerade ansieht. Merken - angewendet wird es gebuendelt,
+                    // damit mehrere Zuschauer sich nicht gegenseitig jagen.
+                    self.wunsch_von
+                        .insert(peer, ((x, y, w, h), std::time::Instant::now()));
+                }
+                meetsig::Ereignis::Bereich { peer, x, y, w, h } => {
+                    self.scharf_kann.insert(peer);
+                    self.bereich_von.insert(peer, (x, y, w, h));
+                }
                 meetsig::Ereignis::Fehler { code, text } => {
                     self.meldung = format!("{}: {}", code, text);
                 }
@@ -362,6 +392,7 @@ impl NativMeet {
         self.kamera_pumpe();
         self.schirm_pumpe();
         self.zeiger_pumpe();
+        self.bereich_pumpe();
         self.messen();
     }
 
@@ -688,9 +719,92 @@ impl NativMeet {
         }
     }
 
+    /// Als ZUSCHAUER: sagen, welchen Teil des fremden Bildschirms ich
+    /// ansehe. Der Sender schneidet dann genau das aus seiner nativen
+    /// Aufnahme - gleiche Kodiergroesse, also gleiche Bandbreite, aber
+    /// echte Bildpunkte statt hochgerechneter.
+    ///
+    /// `scharf = false` heisst: bitte weiter alles schicken (dann bleibt es
+    /// beim reinen Vergroessern).
+    pub fn zoom_wunsch(&mut self, peer: u64, bereich: crate::meetschirm::Bereich, scharf: bool) {
+        let will = if scharf {
+            bereich
+        } else {
+            crate::meetschirm::GANZ
+        };
+        let jetzt = std::time::Instant::now();
+        let neu = match self.letzter_wunsch {
+            Some((p, alt)) => p != peer || crate::meetschirm::bereich_lohnt_wechsel(alt, will),
+            None => true,
+        };
+        // Auch ohne Aenderung alle 3 s wiederholen: der Sender vergisst
+        // Wuensche, von denen er nichts mehr hoert (sonst bliebe er beim
+        // Ausschnitt eines laengst gegangenen Zuschauers stehen).
+        if !neu && jetzt < self.naechster_wunsch {
+            return;
+        }
+        self.naechster_wunsch = jetzt + std::time::Duration::from_secs(3);
+        self.letzter_wunsch = Some((peer, will));
+        self.sig.bereichswunsch(peer, will.0, will.1, will.2, will.3);
+    }
+
+    /// Als SENDER: aus allen Wuenschen den Ausschnitt bilden und anwenden.
+    ///
+    /// Laeuft in jedem Durchlauf, aendert aber nur bei einem lohnenden
+    /// Unterschied etwas - jeder Wechsel kostet ein Schluesselbild und ist
+    /// als kleiner Sprung sichtbar.
+    fn bereich_pumpe(&mut self) {
+        if !self.schirm_an {
+            if self.schirm_bereich != crate::meetschirm::GANZ {
+                self.schirm_bereich = crate::meetschirm::GANZ;
+            }
+            return;
+        }
+        // Wuensche, von denen wir seit 8 s nichts gehoert haben, zaehlen
+        // nicht mehr - der Zuschauer ist weg oder wieder herausgezoomt.
+        let jetzt = std::time::Instant::now();
+        self.wunsch_von
+            .retain(|_, (_, wann)| jetzt.duration_since(*wann) < std::time::Duration::from_secs(8));
+        let wuensche: Vec<crate::meetschirm::Bereich> =
+            self.wunsch_von.values().map(|(b, _)| *b).collect();
+        let neu = crate::meetschirm::bereich_vereinen(&wuensche);
+        if neu == self.schirm_bereich {
+            return;
+        }
+        if self.schirm_bereich != crate::meetschirm::GANZ
+            && neu != crate::meetschirm::GANZ
+            && !crate::meetschirm::bereich_lohnt_wechsel(self.schirm_bereich, neu)
+        {
+            return;
+        }
+        self.schirm_bereich = neu;
+        if let Some(a) = self.schirm.as_ref() {
+            a.bereich_setzen(neu);
+        }
+        // Der Bildinhalt springt - ohne frisches Schluesselbild saehen die
+        // anderen einen Moment lang Bildsalat.
+        if let Some(k) = self.schirm_koder.as_mut() {
+            k.schluesselbild();
+        }
+        self.letztes_schluesselbild = jetzt;
+        // Und den anderen sagen, WAS jetzt kommt. Ohne diese Meldung wuerden
+        // sie in das schon zugeschnittene Bild noch einmal hineinzoomen.
+        self.sig.bereich(neu.0, neu.1, neu.2, neu.3);
+    }
+
     /// Zeiger dessen, der gerade teilt (0..1). None = kommt (noch) nicht an.
     pub fn zeiger_des_teilers(&self, peer: u64) -> Option<(f32, f32)> {
         self.zeiger_von.get(&peer).copied()
+    }
+
+    /// Welchen Ausschnitt sendet dieser Teilnehmer gerade?
+    pub fn bereich_des_teilers(&self, peer: u64) -> Option<crate::meetschirm::Bereich> {
+        self.bereich_von.get(&peer).copied()
+    }
+
+    /// Kann dieser Teilnehmer ueberhaupt Ausschnitte liefern?
+    pub fn kann_scharf(&self, peer: u64) -> bool {
+        self.scharf_kann.contains(&peer)
     }
 
     pub fn hand_heben(&mut self, an: bool) {

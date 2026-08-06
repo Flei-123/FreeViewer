@@ -171,8 +171,15 @@ pub struct Sicht {
     pub ton_ein: String,
     pub ton_aus: String,
     /// Wo steht der Mauszeiger dessen, der gerade den Bildschirm teilt?
-    /// (0..1 im geteilten Bild). None = der Sender meldet ihn nicht.
+    /// (0..1 auf SEINEM Bildschirm). None = der Sender meldet ihn nicht.
     pub teiler_zeiger: Option<(f32, f32)>,
+    /// Welchen Teil seines Bildschirms sendet er gerade? (Anteile 0..1)
+    /// None oder (0,0,1,1) = den ganzen. Ist er kleiner, ist das Bild
+    /// SCHARF - dann darf die Lupe nicht noch einmal hineinzoomen.
+    pub schirm_bereich: Option<(f32, f32, f32, f32)>,
+    /// Der Sender kann Ausschnitte liefern (neuer Client). Nur dann lohnt
+    /// es, "scharf" anzubieten - sonst waere der Knopf eine Luege.
+    pub scharf_moeglich: bool,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -197,6 +204,14 @@ pub struct Fensterzustand {
     pub zoomanker: Zoomanker,
     /// Mitte des Ausschnitts (0..1) - nur bei Zoomanker::Fest von Hand.
     pub zoommitte: Vec2,
+    /// Der zuletzt gezeichnete Ausschnitt (x, y, b, h) in Bildschirm-
+    /// koordinaten des Senders. Wird nach oben gemeldet, damit er genau
+    /// diesen Teil in voller Schaerfe schicken kann.
+    pub zoomfenster: (f32, f32, f32, f32),
+    /// Soll der Sender wirklich nur diesen Teil schicken (echte Bildpunkte
+    /// statt hochgerechneter)? Kostet ihn etwas Rechenzeit, deshalb ein
+    /// Schalter - aber standardmaessig an, denn scharf ist der Sinn der Sache.
+    pub scharf: bool,
 }
 
 impl Default for Fensterzustand {
@@ -216,6 +231,8 @@ impl Default for Fensterzustand {
             zoom: 1.0,
             zoomanker: Zoomanker::Eigene,
             zoommitte: vec2(0.5, 0.5),
+            zoomfenster: (0.0, 0.0, 1.0, 1.0),
+            scharf: true,
         }
     }
 }
@@ -643,6 +660,30 @@ pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
     let x = mitte.x.clamp(halb, 1.0 - halb);
     let y = mitte.y.clamp(halb, 1.0 - halb);
     Rect::from_min_max(pos2(x - halb, y - halb), pos2(x + halb, y + halb))
+}
+
+/// Welcher Teil des EMPFANGENEN Bildes zeigt das gewuenschte Fenster?
+///
+/// `fenster` und `bereich` sind beide Anteile des GANZEN Bildschirms des
+/// Senders. Sendet er nur einen Ausschnitt (`bereich` kleiner als alles),
+/// enthaelt das ankommende Bild genau diesen Ausschnitt - die Lupe darf dann
+/// nicht noch einmal so weit hineinzoomen, sonst waere es doppelt.
+///
+/// Genau diese Rechnung macht den scharfen Zoom moeglich UND richtig: sobald
+/// der Sender den gewuenschten Bereich liefert, ist das Ergebnis das ganze
+/// Bild (0..1) - also echte Bildpunkte statt hochgerechneter.
+pub fn zoom_uv(fenster: Rect, bereich: Rect) -> Rect {
+    let bw = bereich.width().max(0.0001);
+    let bh = bereich.height().max(0.0001);
+    let x0 = ((fenster.min.x - bereich.min.x) / bw).clamp(0.0, 1.0);
+    let y0 = ((fenster.min.y - bereich.min.y) / bh).clamp(0.0, 1.0);
+    let x1 = ((fenster.max.x - bereich.min.x) / bw).clamp(0.0, 1.0);
+    let y1 = ((fenster.max.y - bereich.min.y) / bh).clamp(0.0, 1.0);
+    // Nie auf null zusammenfallen - eine leere Flaeche waere ein schwarzes
+    // Bild statt eines Ausschnitts.
+    let x1 = x1.max(x0 + 0.001).min(1.0);
+    let y1 = y1.max(y0 + 0.001).min(1.0);
+    Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
 }
 
 /// Wird das Bild abgeschnitten, wenn wir es fuellend zeichnen? Weicht das
@@ -2136,19 +2177,29 @@ fn schirm_kachel(
         }
     }
 
+    // Welchen Teil seines Bildschirms sendet der andere gerade? Alle
+    // folgenden Rechnungen laufen in SEINEN Bildschirmkoordinaten - nur so
+    // stimmt die Lupe auch dann, wenn er schon einen Ausschnitt liefert.
+    let ber = s
+        .schirm_bereich
+        .map(|(x, y, w, h)| Rect::from_min_size(pos2(x, y), vec2(w, h)))
+        .unwrap_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
+
     // --- Wohin schaut die Lupe? ---
     let mut mitte = z.zoommitte;
     if z.zoom > 1.0 {
         match z.zoomanker {
             Zoomanker::Eigene => {
-                // Der Zeiger IM Kachelbereich wird direkt auf das Bild
-                // abgebildet: links oben zeigen heisst links oben sehen.
-                // Kein Nachlaufen, kein Driften - eine echte Lupe.
+                // Der Zeiger IM Kachelbereich wird auf den Bildschirm des
+                // anderen abgebildet: links oben zeigen heisst links oben
+                // sehen. Kein Nachlaufen, kein Driften - eine echte Lupe.
                 if let Some(p) = zeiger {
                     if rect.contains(p) {
+                        let fx = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+                        let fy = ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
                         mitte = vec2(
-                            ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0),
-                            ((p.y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0),
+                            ber.min.x + fx * ber.width(),
+                            ber.min.y + fy * ber.height(),
                         );
                         z.zoommitte = mitte;
                     }
@@ -2163,8 +2214,13 @@ fn schirm_kachel(
             Zoomanker::Fest => {}
         }
     }
-    let ausschnitt = if z.zoom > 1.0 {
-        Some(zoom_ausschnitt(z.zoom, mitte))
+    // Das gewuenschte Fenster - IMMER in Bildschirmkoordinaten des Senders.
+    // Es wird auch nach oben gemeldet, damit der Sender genau diesen Teil
+    // scharf schicken kann.
+    let fenster = zoom_ausschnitt(z.zoom, mitte);
+    z.zoomfenster = (fenster.min.x, fenster.min.y, fenster.width(), fenster.height());
+    let ausschnitt = if z.zoom > 1.0 || s.schirm_bereich.is_some() {
+        Some(zoom_uv(fenster, ber))
     } else {
         None
     };
@@ -2176,10 +2232,9 @@ fn schirm_kachel(
         let d = antwort.drag_delta();
         if d.length_sq() > 0.0 {
             z.zoomanker = Zoomanker::Fest;
-            let a = zoom_ausschnitt(z.zoom, z.zoommitte);
             z.zoommitte = vec2(
-                (z.zoommitte.x - d.x / rect.width().max(1.0) * a.width()).clamp(0.0, 1.0),
-                (z.zoommitte.y - d.y / rect.height().max(1.0) * a.height()).clamp(0.0, 1.0),
+                (z.zoommitte.x - d.x / rect.width().max(1.0) * fenster.width()).clamp(0.0, 1.0),
+                (z.zoommitte.y - d.y / rect.height().max(1.0) * fenster.height()).clamp(0.0, 1.0),
             );
         }
     }
@@ -2213,7 +2268,7 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
     let mal = ui.painter_at(rect);
     // Breite grob aus den Texten schaetzen - genau genug fuer eine Leiste.
     let breite = 30.0 + 54.0 + 30.0 + 14.0 + anker_text.chars().count() as f32 * 6.4 + 16.0
-        + if z.zoom > 1.0 { 62.0 } else { 0.0 };
+        + if z.zoom > 1.0 { 62.0 + 110.0 } else { 0.0 };
     let leiste = Rect::from_min_size(
         pos2(rect.right() - 10.0 - breite.min(rect.width() - 20.0), rect.top() + 10.0),
         vec2(breite.min(rect.width() - 20.0), h),
@@ -2269,10 +2324,31 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
     ) {
         z.zoomanker = z.zoomanker.weiter();
     }
-    if z.zoom > 1.0 && knopf(ui, &mut x, "ganz", 56.0, "Zurueck auf das ganze Bild") {
-        z.zoom = 1.0;
-        z.zoomanker = Zoomanker::Eigene;
-        z.zoommitte = vec2(0.5, 0.5);
+    if z.zoom > 1.0 {
+        // Ehrlich anzeigen, WAS gerade ankommt: echte Bildpunkte oder
+        // hochgerechnete. Das ist der ganze Unterschied.
+        let (text, tip) = if !s.scharf_moeglich {
+            (
+                "unscharf",
+                "Der Sender ist ein aelterer Stand und kann keinen Ausschnitt liefern - vergroessert wird nur gerechnet.",
+            )
+        } else if !z.scharf {
+            ("nur vergroessert", "Klicken: den Sender bitten, diesen Ausschnitt scharf zu schicken")
+        } else if s.schirm_bereich.map(|(_, _, w, _)| w < 0.95).unwrap_or(false) {
+            ("scharf", "Der Sender schickt genau diesen Ausschnitt - echte Bildpunkte. Klicken zum Abschalten.")
+        } else {
+            ("scharf (kommt)", "Angefragt - der Sender stellt gerade um")
+        };
+        if knopf(ui, &mut x, text, text.chars().count() as f32 * 6.4 + 14.0, tip)
+            && s.scharf_moeglich
+        {
+            z.scharf = !z.scharf;
+        }
+        if knopf(ui, &mut x, "ganz", 50.0, "Zurueck auf das ganze Bild") {
+            z.zoom = 1.0;
+            z.zoomanker = Zoomanker::Eigene;
+            z.zoommitte = vec2(0.5, 0.5);
+        }
     }
 }
 
@@ -2584,7 +2660,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 // --------------------------------------------------- Beispiele zum Pruefen
 
 /// Wie viele Beispielzustaende es gibt.
-pub const BEISPIELE: usize = 10;
+pub const BEISPIELE: usize = 11;
 
 /// Beispielzustand des Beitritts-Schirms (fuer --meetdemo).
 pub fn beispiel_beitritt() -> Beitritt {
@@ -2693,6 +2769,9 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             ton_ein: "Mikrofonarray".into(),
             ton_aus: "Lautsprecher (Realtek)".into(),
             teiler_zeiger: if mit_schirm { Some((0.62, 0.41)) } else { None },
+            schirm_bereich: None,
+            scharf_moeglich: mit_schirm,
+            // (Beispiel 10 setzt den Bereich weiter unten von Hand.)
         }
     };
     let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| Fensterzustand {
@@ -2760,6 +2839,23 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 zoom: 2.5,
                 zoomanker: Zoomanker::Teiler,
                 zoommitte: vec2(0.62, 0.41),
+                ..Default::default()
+            },
+        ),
+        // Der SCHARFE Zoom: der Sender schickt schon genau diesen Ausschnitt.
+        // Dann muss das ankommende Bild GANZ gezeigt werden - wuerde hier
+        // noch einmal gezoomt, waere es doppelt.
+        10 => (
+            "Bildschirm scharf gezoomt",
+            {
+                let mut v = mach(3, true, false);
+                v.schirm_bereich = Some((0.47, 0.26, 0.4, 0.4));
+                v
+            },
+            Fensterzustand {
+                zoom: 2.5,
+                zoomanker: Zoomanker::Fest,
+                zoommitte: vec2(0.67, 0.46),
                 ..Default::default()
             },
         ),
@@ -2849,6 +2945,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Sendet der andere schon genau das gewuenschte Fenster, ist das
+    /// ankommende Bild GANZ zu zeigen - dann sind es echte Bildpunkte.
+    #[test]
+    fn scharfer_zoom_zeigt_das_ganze_bild() {
+        let fenster = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
+        let uv = zoom_uv(fenster, fenster);
+        assert!((uv.min.x).abs() < 1e-5 && (uv.min.y).abs() < 1e-5);
+        assert!((uv.max.x - 1.0).abs() < 1e-5 && (uv.max.y - 1.0).abs() < 1e-5);
+    }
+
+    /// Sendet er alles, verhaelt sich die Lupe wie vorher.
+    #[test]
+    fn ohne_ausschnitt_bleibt_die_lupe_wie_gehabt() {
+        let ganz = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let fenster = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
+        assert_eq!(zoom_uv(fenster, ganz), fenster);
+    }
+
+    /// Halbwegs: er sendet mehr als gewuenscht - dann wird der Rest
+    /// weggeschnitten, aber KEIN Stueck doppelt gezoomt.
+    #[test]
+    fn groesserer_ausschnitt_wird_richtig_verrechnet() {
+        let bereich = Rect::from_min_size(pos2(0.2, 0.2), vec2(0.6, 0.6));
+        let fenster = Rect::from_min_size(pos2(0.35, 0.35), vec2(0.3, 0.3));
+        let uv = zoom_uv(fenster, bereich);
+        assert!((uv.min.x - 0.25).abs() < 1e-5, "links falsch: {}", uv.min.x);
+        assert!((uv.width() - 0.5).abs() < 1e-5, "Breite falsch: {}", uv.width());
+    }
+
+    /// Zieht der Zuschauer schneller, als der Sender umstellt, darf nichts
+    /// aus dem Bild laufen - lieber am Rand stehen bleiben.
+    #[test]
+    fn fenster_ausserhalb_bleibt_im_bild() {
+        let bereich = Rect::from_min_size(pos2(0.5, 0.5), vec2(0.2, 0.2));
+        let fenster = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.2, 0.2));
+        let uv = zoom_uv(fenster, bereich);
+        assert!(uv.min.x >= 0.0 && uv.min.y >= 0.0);
+        assert!(uv.max.x <= 1.0 && uv.max.y <= 1.0);
+        assert!(uv.width() > 0.0 && uv.height() > 0.0, "leere Flaeche waere schwarz");
     }
 
     #[test]

@@ -62,6 +62,74 @@ pub fn zielgroesse(sb: u32, sh: u32, max_b: u32, max_h: u32) -> (u32, u32) {
     (b, h)
 }
 
+/// Der Bereich, aus dem gesendet wird - als Anteil des Bildschirms.
+/// (0,0,1,1) = der ganze Schirm.
+pub type Bereich = (f32, f32, f32, f32);
+
+pub const GANZ: Bereich = (0.0, 0.0, 1.0, 1.0);
+
+/// Aus den Wuenschen ALLER Zuschauer einen Bereich machen, der gesendet wird.
+///
+/// WARUM ueberhaupt: zoomt ein Zuschauer hinein, bekommt er sonst nur
+/// hochgerechnete Bildpunkte. Schneidet der SENDER stattdessen genau diesen
+/// Ausschnitt aus seiner nativen Aufnahme und schickt ihn in der GLEICHEN
+/// Kodiergroesse, kostet das keine zusaetzliche Bandbreite - das Bild wird
+/// aber wirklich schaerfer, weil echte Bildpunkte uebertragen werden.
+///
+/// WARUM eine Vereinigung: es koennen mehrere zuschauen. Wuerde man nur
+/// einem folgen, saehen die anderen den falschen Ausschnitt. Die Huelle um
+/// alle Wuensche ist der einzige Bereich, mit dem JEDER richtig liegt.
+///
+/// Das Ergebnis ist im Anteilsraum immer QUADRATISCH (also im echten Bild
+/// seitenverhaeltnisgleich) - sonst waere das gesendete Bild verzerrt - und
+/// bekommt etwas Rand, damit kleine Mausbewegungen nicht dauernd ein neues
+/// Zuschneiden ausloesen.
+pub fn bereich_vereinen(wuensche: &[Bereich]) -> Bereich {
+    let echte: Vec<&Bereich> = wuensche
+        .iter()
+        .filter(|(_, _, w, h)| *w > 0.001 && *h > 0.001)
+        .collect();
+    if echte.is_empty() {
+        return GANZ;
+    }
+    let mut x0 = 1.0f32;
+    let mut y0 = 1.0f32;
+    let mut x1 = 0.0f32;
+    let mut y1 = 0.0f32;
+    for (x, y, w, h) in echte {
+        x0 = x0.min(x.clamp(0.0, 1.0));
+        y0 = y0.min(y.clamp(0.0, 1.0));
+        x1 = x1.max((x + w).clamp(0.0, 1.0));
+        y1 = y1.max((y + h).clamp(0.0, 1.0));
+    }
+    // Rand dazu: 12 % der Kantenlaenge auf jeder Seite.
+    let mut b = (x1 - x0).max(0.02);
+    let mut h = (y1 - y0).max(0.02);
+    let (mx, my) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+    b *= 1.24;
+    h *= 1.24;
+    // Gleiche Kantenlaenge im Anteilsraum = gleiches Seitenverhaeltnis wie
+    // der Bildschirm. Alles andere waere ein verzerrtes Bild.
+    let k = b.max(h).min(1.0);
+    // Lohnt sich nicht: fast der ganze Schirm -> lieber ohne Zuschnitt, dann
+    // greift der schnelle Weg ueber die Grafikkarte.
+    if k > 0.92 {
+        return GANZ;
+    }
+    let x = (mx - k * 0.5).clamp(0.0, 1.0 - k);
+    let y = (my - k * 0.5).clamp(0.0, 1.0 - k);
+    (x, y, k, k)
+}
+
+/// Lohnt ein Wechsel des gesendeten Bereichs? Winzige Verschiebungen sind es
+/// nicht wert - jeder Wechsel kostet ein Schluesselbild.
+pub fn bereich_lohnt_wechsel(alt: Bereich, neu: Bereich) -> bool {
+    let d = (alt.0 - neu.0).abs().max((alt.1 - neu.1).abs());
+    let s = (alt.2 - neu.2).abs();
+    // 4 % Verschiebung oder 6 % Groessenaenderung.
+    d > 0.04 || s > 0.06
+}
+
 /// Ein aufgenommenes Bild (BGRA oder RGBA) auf `zb` x `zh` verkleinern und
 /// nach NV12 wandeln. Flaechenmittel statt Naechster-Nachbar - sonst
 /// flimmert Text beim Verkleinern unlesbar.
@@ -74,21 +142,47 @@ pub fn bild_nach_nv12(
     zh: u32,
     out: &mut Vec<u8>,
 ) -> bool {
+    bild_nach_nv12_teil(px, sb, sh, bgra, GANZ, zb, zh, out)
+}
+
+/// Wie `bild_nach_nv12`, aber nur ein AUSSCHNITT der Aufnahme (Anteile
+/// 0..1). Damit wird beim Hineinzoomen nicht der ganze Bildschirm
+/// verkleinert, sondern der interessante Teil in voller Schaerfe gesendet -
+/// bei gleicher Kodiergroesse und damit gleicher Bandbreite.
+#[allow(clippy::too_many_arguments)]
+pub fn bild_nach_nv12_teil(
+    px: &[u8],
+    sb: u32,
+    sh: u32,
+    bgra: bool,
+    teil: Bereich,
+    zb: u32,
+    zh: u32,
+    out: &mut Vec<u8>,
+) -> bool {
     let (sbu, shu, zbu, zhu) = (sb as usize, sh as usize, zb as usize, zh as usize);
     // Unter 2x2 ist nichts zu holen - lieber ehrlich ablehnen, als aus
     // einem einzigen Punkt ein Bild zu erfinden.
     if sbu < 2 || shu < 2 || zbu < 2 || zhu < 2 || px.len() < sbu * shu * 4 {
         return false;
     }
+    // Ausschnitt in Bildpunkte umrechnen. Alles bleibt im Bild - ein
+    // Ausschnitt, der hinausragt, wuerde am Rand Muell zeigen.
+    let (ax, ay, aw, ah) = teil;
+    let ox = ((ax.clamp(0.0, 1.0) * sbu as f32) as usize).min(sbu.saturating_sub(2));
+    let oy = ((ay.clamp(0.0, 1.0) * shu as f32) as usize).min(shu.saturating_sub(2));
+    let aw = ((aw.clamp(0.0, 1.0) * sbu as f32) as usize).max(2).min(sbu - ox);
+    let ah = ((ah.clamp(0.0, 1.0) * shu as f32) as usize).max(2).min(shu - oy);
+
     // Zwischenschritt RGB, weil rgb_to_nv12 genau das erwartet.
     let mut rgb = vec![0u8; zbu * zhu * 3];
     let (ri, gi, bi) = if bgra { (2usize, 1usize, 0usize) } else { (0usize, 1usize, 2usize) };
     for ty in 0..zhu {
-        let y0 = ty * shu / zhu;
-        let y1 = ((ty + 1) * shu / zhu).max(y0 + 1).min(shu);
+        let y0 = oy + ty * ah / zhu;
+        let y1 = (oy + (ty + 1) * ah / zhu).max(y0 + 1).min(oy + ah);
         for tx in 0..zbu {
-            let x0 = tx * sbu / zbu;
-            let x1 = ((tx + 1) * sbu / zbu).max(x0 + 1).min(sbu);
+            let x0 = ox + tx * aw / zbu;
+            let x1 = (ox + (tx + 1) * aw / zbu).max(x0 + 1).min(ox + aw);
             let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
                 let zeile = y * sbu * 4;
@@ -157,9 +251,23 @@ pub struct Aufnahme {
     zaehler: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     fehler: Arc<Mutex<String>>,
+    /// Welcher Teil des Bildschirms gesendet wird (Anteile). Der
+    /// Aufnahmefaden liest das bei JEDEM Bild - so wirkt ein Wechsel sofort,
+    /// ohne die Aufnahme neu zu oeffnen.
+    bereich: Arc<Mutex<Bereich>>,
 }
 
 impl Aufnahme {
+    /// Nur diesen Ausschnitt senden (Anteile 0..1). GANZ = wieder alles.
+    pub fn bereich_setzen(&self, b: Bereich) {
+        if let Ok(mut g) = self.bereich.lock() {
+            *g = b;
+        }
+    }
+    pub fn bereich(&self) -> Bereich {
+        self.bereich.lock().map(|g| *g).unwrap_or(GANZ)
+    }
+
     /// Das neueste Bild abholen (und aus dem Puffer nehmen).
     pub fn neuestes(&self) -> Option<Bild> {
         self.neu.lock().ok().and_then(|mut b| b.take())
@@ -191,11 +299,13 @@ pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahm
     let zaehler = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let fehler = Arc::new(Mutex::new(String::new()));
+    let bereich = Arc::new(Mutex::new(GANZ));
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(String, u32, u32), String>>();
     let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+    let b2 = bereich.clone();
     std::thread::Builder::new()
         .name("meetschirm".into())
-        .spawn(move || schleife(index, max_b, max_h, fps, tx, n2, z2, s2, f2))
+        .spawn(move || schleife(index, max_b, max_h, fps, tx, n2, z2, s2, f2, b2))
         .map_err(|e| anyhow!("Bildschirmfaden: {}", e))?;
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(Ok((name, b, h))) => Ok(Aufnahme {
@@ -207,6 +317,7 @@ pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahm
             zaehler,
             stop,
             fehler,
+            bereich,
         }),
         Ok(Err(e)) => Err(anyhow!(e)),
         Err(_) => {
@@ -227,6 +338,7 @@ fn schleife(
     zaehler: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     fehler: Arc<Mutex<String>>,
+    bereich: Arc<Mutex<Bereich>>,
 ) {
     let mut backend = match crate::capture::open_index(true, index) {
         Some(b) => b,
@@ -285,17 +397,26 @@ fn schleife(
         if !liefern {
             continue;
         }
-        // Schneller Weg: die Grafikkarte skaliert und wandelt selbst.
-        let fertig = match backend.scaled(zb, zh, true) {
-            Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
-                nv12.clear();
-                nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
-                true
+        let teil = bereich.lock().map(|g| *g).unwrap_or(GANZ);
+        let fertig = if teil == GANZ {
+            // Schneller Weg: die Grafikkarte skaliert und wandelt selbst.
+            match backend.scaled(zb, zh, true) {
+                Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
+                    nv12.clear();
+                    nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
+                    true
+                }
+                _ => {
+                    let (px, sb2, sh2, bgra) = backend.frame();
+                    bild_nach_nv12(px, sb2, sh2, bgra, zb, zh, &mut nv12)
+                }
             }
-            _ => {
-                let (px, sb2, sh2, bgra) = backend.frame();
-                bild_nach_nv12(px, sb2, sh2, bgra, zb, zh, &mut nv12)
-            }
+        } else {
+            // Mit Ausschnitt kann die Grafikkarte nicht helfen - dafuer sind
+            // es WENIGER Quellpunkte als beim ganzen Schirm, der Zuschnitt
+            // kostet also nicht mehr, sondern weniger Rechenzeit.
+            let (px, sb2, sh2, bgra) = backend.frame();
+            bild_nach_nv12_teil(px, sb2, sh2, bgra, teil, zb, zh, &mut nv12)
         };
         if !fertig {
             continue;
@@ -328,6 +449,92 @@ mod tests {
         // 21:9 bleibt 21:9 (auf 1 % genau)
         let v = b as f64 / h as f64;
         assert!((v - 2560.0 / 1080.0).abs() < 0.03, "Verhaeltnis {}", v);
+    }
+
+    #[test]
+    #[test]
+    fn ohne_wunsch_geht_der_ganze_schirm_raus() {
+        assert_eq!(bereich_vereinen(&[]), GANZ);
+        assert_eq!(bereich_vereinen(&[(0.0, 0.0, 1.0, 1.0)]), GANZ);
+        // Fast alles ist auch alles - sonst faellt der schnelle Weg ueber die
+        // Grafikkarte fuer nichts weg.
+        assert_eq!(bereich_vereinen(&[(0.02, 0.02, 0.9, 0.9)]), GANZ);
+    }
+
+    #[test]
+    fn ein_zuschauer_bekommt_seinen_ausschnitt_mit_rand() {
+        // Mitte, ein Viertel der Kante.
+        let (x, y, w, h) = bereich_vereinen(&[(0.375, 0.375, 0.25, 0.25)]);
+        assert!((w - h).abs() < 1e-6, "muss quadratisch bleiben");
+        assert!(w > 0.25 && w < 0.4, "Rand fehlt oder ist zu gross: {}", w);
+        // immer noch mittig
+        assert!((x + w / 2.0 - 0.5).abs() < 0.01);
+        assert!((y + h / 2.0 - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn zwei_zuschauer_bekommen_die_huelle_um_beide() {
+        let a = (0.05, 0.05, 0.1, 0.1);
+        let b = (0.55, 0.55, 0.1, 0.1);
+        let (x, y, w, h) = bereich_vereinen(&[a, b]);
+        assert!((w - h).abs() < 1e-6);
+        // Beide Wuensche muessen wirklich drin liegen - sonst saehe einer
+        // von beiden den falschen Ausschnitt.
+        assert!(x <= a.0 + 1e-6 && y <= a.1 + 1e-6, "erster faellt heraus");
+        assert!(
+            x + w >= b.0 + b.2 - 1e-6 && y + h >= b.1 + b.3 - 1e-6,
+            "zweiter faellt heraus"
+        );
+    }
+
+    #[test]
+    fn bereich_bleibt_immer_im_bild() {
+        for wunsch in [
+            (0.0, 0.0, 0.2, 0.2),
+            (0.9, 0.9, 0.2, 0.2),
+            (-0.5, 0.8, 0.3, 0.3),
+        ] {
+            let (x, y, w, h) = bereich_vereinen(&[wunsch]);
+            assert!(x >= -1e-6 && y >= -1e-6, "links/oben raus: {:?}", (x, y));
+            assert!(x + w <= 1.0 + 1e-6 && y + h <= 1.0 + 1e-6, "rechts/unten raus");
+        }
+    }
+
+    #[test]
+    fn kleine_zuckungen_loesen_keinen_wechsel_aus() {
+        let a = (0.30, 0.30, 0.30, 0.30);
+        assert!(!bereich_lohnt_wechsel(a, (0.31, 0.31, 0.30, 0.30)));
+        assert!(bereich_lohnt_wechsel(a, (0.40, 0.30, 0.30, 0.30)));
+        assert!(bereich_lohnt_wechsel(a, (0.30, 0.30, 0.20, 0.20)));
+    }
+
+    /// Der Kern der Sache: aus einem Ausschnitt kommt WIRKLICH nur dieser
+    /// Ausschnitt - und in voller Zielgroesse, also mit echten Bildpunkten.
+    #[test]
+    fn ausschnitt_sendet_nur_den_ausschnitt() {
+        // 40x40, linke Haelfte schwarz, rechte Haelfte weiss.
+        let (sb, sh) = (40u32, 40u32);
+        let mut px = vec![0u8; (sb * sh * 4) as usize];
+        for y in 0..sh as usize {
+            for x in 20..40usize {
+                let i = (y * sb as usize + x) * 4;
+                px[i] = 255;
+                px[i + 1] = 255;
+                px[i + 2] = 255;
+            }
+        }
+        let mut nv12 = Vec::new();
+        // Nur die RECHTE Haelfte senden -> alles muss hell sein.
+        assert!(bild_nach_nv12_teil(&px, sb, sh, true, (0.5, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
+        let y = &nv12[..16 * 16];
+        assert!(
+            y.iter().all(|v| *v > 200),
+            "der Ausschnitt zeigt nicht die rechte Haelfte"
+        );
+        // Und die LINKE Haelfte -> alles dunkel.
+        assert!(bild_nach_nv12_teil(&px, sb, sh, true, (0.0, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
+        let y = &nv12[..16 * 16];
+        assert!(y.iter().all(|v| *v < 60), "linker Ausschnitt ist nicht dunkel");
     }
 
     #[test]

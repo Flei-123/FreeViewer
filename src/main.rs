@@ -3599,6 +3599,9 @@ impl App {
     fn meet_lauf_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
         let sicht: meetfenster::Sicht;
         let bilder: meetfenster::Bilder;
+        // Wessen Bildschirm gerade gross zu sehen ist - danach richtet sich,
+        // wem wir unseren Zoomwunsch schicken.
+        let mut haupt_schirm_peer: Option<u64> = None;
         {
             let n = match self.nativ_meet.as_mut() {
                 Some(n) => n,
@@ -3762,11 +3765,12 @@ impl App {
 
             let ton_namen = n.ton_namen();
             // Wessen Bildschirm ist der Hauptinhalt? Der erste fremde.
-            let schirm_haupt = schirme
+            let schirm_haupt: Option<u64> = schirme
                 .iter()
                 .map(|(id, _)| *id)
                 .find(|id| *id != z.ich)
                 .or_else(|| schirme.first().map(|(id, _)| *id));
+            haupt_schirm_peer = schirm_haupt;
             sicht = meetfenster::Sicht {
                 raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
                 titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
@@ -3813,6 +3817,8 @@ impl App {
                 ton_aus: ton_namen.1,
                 // Zeiger DESSEN, dessen Bildschirm gerade gross zu sehen ist.
                 teiler_zeiger: schirm_haupt.and_then(|p| n.zeiger_des_teilers(p)),
+                schirm_bereich: schirm_haupt.and_then(|p| n.bereich_des_teilers(p)),
+                scharf_moeglich: schirm_haupt.map(|p| n.kann_scharf(p)).unwrap_or(false),
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
@@ -3878,6 +3884,15 @@ impl App {
             if zu {
                 self.meet_z.pip = false;
             }
+        }
+
+        // Dem Sender sagen, welchen Ausschnitt wir ansehen. Er schneidet dann
+        // genau den aus seiner nativen Aufnahme - gleiche Bandbreite, aber
+        // echte Bildpunkte. Ohne diese Meldung bliebe es beim Hochrechnen.
+        if let (Some(p), Some(n)) = (haupt_schirm_peer, self.nativ_meet.as_mut()) {
+            let f = self.meet_z.zoomfenster;
+            let zoomt = self.meet_z.zoom > 1.001;
+            n.zoom_wunsch(p, f, zoomt && self.meet_z.scharf);
         }
 
         let mut steuern_zu: Option<(String, String)> = None;
