@@ -3375,26 +3375,14 @@ impl App {
                                     .get(self.meet_win.cam_sel - 1)
                                     .map(|s| s.as_str())
                             };
-                            let url = meet::join_url_ex(
-                                &m.id,
-                                &m.passwort,
-                                fvid,
-                                mic,
-                                cam,
-                                self.meet_win.stumm,
-                                self.meet_win.ohne_video,
-                            );
-                            match meet::open_window(&url) {
-                                Ok(()) => {
-                                    self.meet_win.beigetreten = true;
-                                    // Gleich wieder nachsehen, wer im Raum ist.
-                                    self.meet_win.tn_next = std::time::Instant::now();
-                                }
-                                Err(e) => {
-                                    self.meet_win.toast =
-                                        Some((format!("{}", e), std::time::Instant::now()));
-                                }
-                            }
+                            // Kein Browser mehr: der Beitritt passiert IM
+                            // Programm. Der Weg darunter (nativ_start) baut
+                            // die Sitzung auf, sobald dieser Rahmen fertig
+                            // gezeichnet ist.
+                            let _ = (fvid, mic, cam);
+                            self.meet_win.nativ_start = true;
+                            self.meet_win.beigetreten = true;
+                            self.meet_win.tn_next = std::time::Instant::now();
                         }
                         if self.meet_win.beigetreten {
                             ui.add_space(6.0);
@@ -3410,7 +3398,7 @@ impl App {
                         // bis dahin steht der Browser-Knopf daneben.
                         ui.add_space(12.0);
                         if self.nativ_meet.is_none() {
-                            if ghost_button(ui, "Nativ beitreten (Ton, ohne Browser)").clicked() {
+                            if std::mem::take(&mut self.meet_win.nativ_start) {
                                 let me = self.shared.my_id.lock().unwrap().clone();
                                 let name = presence::device_name();
                                 let mic = if self.meet_win.mic_sel == 0 {
@@ -3506,36 +3494,47 @@ impl App {
                                 }
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
-                                    if ghost_button(
+                                    if icons::text_button(
                                         ui,
+                                        if n.stumm { "mic-off" } else { "mic" },
                                         if n.stumm { "Stumm aus" } else { "Stumm" },
+                                        n.stumm,
                                     )
                                     .clicked()
                                     {
                                         stumm_um = Some(!n.stumm);
                                     }
-                                    if ghost_button(
+                                    if icons::text_button(
                                         ui,
+                                        "meet",
                                         if n.kamera_an { "Kamera aus" } else { "Kamera an" },
+                                        n.kamera_an,
                                     )
                                     .clicked()
                                     {
                                         kamera_um = Some(!n.kamera_an);
                                     }
-                                    if ghost_button(
+                                    if icons::text_button(
                                         ui,
+                                        "monitor",
                                         if n.schirm_an {
                                             "Freigabe beenden"
                                         } else {
                                             "Bildschirm teilen"
                                         },
+                                        n.schirm_an,
                                     )
                                     .clicked()
                                     {
                                         schirm_um = Some(!n.schirm_an);
                                     }
-                                    if ghost_button(ui, if n.hand { "Hand runter" } else { "Hand" })
-                                        .clicked()
+                                    if icons::text_button(
+                                        ui,
+                                        "user",
+                                        if n.hand { "Hand runter" } else { "Hand" },
+                                        n.hand,
+                                    )
+                                    .clicked()
                                     {
                                         hand_um = Some(!n.hand);
                                     }
@@ -3544,19 +3543,23 @@ impl App {
                                     // Wer steuern lassen will, gibt hier frei -
                                     // zugelassen wird die Sitzung trotzdem noch
                                     // einmal im Programm selbst.
-                                    if ghost_button(
+                                    if icons::text_button(
                                         ui,
+                                        "keyboard",
                                         if n.steuer_frei {
                                             "Steuerung sperren"
                                         } else {
                                             "Steuerung freigeben"
                                         },
+                                        n.steuer_frei,
                                     )
                                     .clicked()
                                     {
                                         steuer_um = Some(!n.steuer_frei);
                                     }
-                                    if ghost_button(ui, "Verlassen").clicked() {
+                                    if icons::text_button(ui, "power", "Verlassen", false)
+                                        .clicked()
+                                    {
                                         verlassen = true;
                                     }
                                 });
@@ -7256,6 +7259,9 @@ struct MeetWin {
     meeting: Option<meet::Meeting>,
     /// Der Browser mit Bild und Ton laeuft bereits.
     beigetreten: bool,
+    /// Wunsch "beitreten" aus dem grossen Knopf - wird eine Zeile weiter
+    /// unten in eine echte native Sitzung umgesetzt.
+    nativ_start: bool,
     /// Geraetenamen, wie das System sie meldet (Mikrofone, Kameras).
     mics: Vec<String>,
     cams: Vec<String>,
@@ -7282,6 +7288,7 @@ impl Default for MeetWin {
             offen: false,
             meeting: None,
             beigetreten: false,
+            nativ_start: false,
             mics: Vec::new(),
             cams: Vec::new(),
             mic_sel: 0,
