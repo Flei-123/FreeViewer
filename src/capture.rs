@@ -926,6 +926,18 @@ mod dxgi {
                 let (iw, ih) = self.in_size;
                 let (tx, ty, tw, th) = teil;
                 let ganz = tw >= 0.999 && th >= 0.999 && tx <= 0.001 && ty <= 0.001;
+                // Das Ziel IMMER ausdruecklich auf die volle Ausgabe setzen.
+                //
+                // Ohne diese Zeile fuellt der Videoprozessor bei gesetztem
+                // Quell-Rechteck je nach Treiber gar nichts oder nur eine Ecke
+                // - gemessen auf der Intel-Karte im Surface: das Bild kam als
+                // einfarbige Flaeche heraus, ganz ohne Fehlermeldung.
+                let (ow, oh) = self.out_size;
+                let ziel = RECT { left: 0, top: 0, right: ow as i32, bottom: oh as i32 };
+                self.vctx
+                    .VideoProcessorSetStreamDestRect(&self.proc, 0, true, Some(&ziel));
+                self.vctx
+                    .VideoProcessorSetOutputTargetRect(&self.proc, true, Some(&ziel));
                 if ganz {
                     // Kein Ausschnitt: die Einstellung wieder abschalten,
                     // sonst bliebe der letzte Zuschnitt fuer immer stehen.
