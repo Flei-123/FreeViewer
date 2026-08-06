@@ -134,6 +134,10 @@ pub struct Fensterzustand {
     pub kameraplatz: Kameraplatz,
     pub vollbild: bool,
     pub pip: bool,
+    /// Was zuletzt als "schreibt gerade" gemeldet wurde. Ohne das ginge bei
+    /// JEDEM Tastendruck eine Nachricht raus - der Server bekaeme Dutzende
+    /// Meldungen je Wort.
+    pub tippt_gemeldet: bool,
 }
 
 impl Default for Fensterzustand {
@@ -145,6 +149,7 @@ impl Default for Fensterzustand {
             kameraplatz: Kameraplatz::Seite,
             vollbild: false,
             pip: false,
+            tippt_gemeldet: false,
         }
     }
 }
@@ -1511,8 +1516,10 @@ fn reiter_chat(
                 .margin(egui::Margin::symmetric(11, 7)),
         );
         let enter = feld.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if feld.changed() {
-            aktionen.push(Aktion::Tippt(!z.eingabe.trim().is_empty()));
+        let tippt = !z.eingabe.trim().is_empty();
+        if tippt != z.tippt_gemeldet {
+            z.tippt_gemeldet = tippt;
+            aktionen.push(Aktion::Tippt(tippt));
         }
         let senden = rund(ui, f, "send", 34.0, false, true)
             .on_hover_text("Senden")
@@ -1520,6 +1527,7 @@ fn reiter_chat(
         if (enter || senden) && !z.eingabe.trim().is_empty() {
             aktionen.push(Aktion::Senden(z.eingabe.trim().to_string()));
             z.eingabe.clear();
+            z.tippt_gemeldet = false;
             if enter {
                 feld.request_focus();
             }
