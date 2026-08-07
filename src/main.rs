@@ -214,6 +214,32 @@ fn main() -> eframe::Result<()> {
     // up in a build step instead of in front of the user.
     // Kameraliste (Stufe 2d): welche Kameras sieht der Rechner?
     //   freeviewer --kameraliste
+    // E2E-PRUEFVEKTOREN: dieselben Zahlen, die der Browser rechnen muss.
+    // Ohne diesen Abgleich merkt man erst im Meeting, dass Browser und
+    // Programm sich gegenseitig nur als Bildsalat sehen.
+    //   freeviewer --e2evektor
+    if std::env::args().any(|a| a == "--e2evektor") {
+        let roh: [u8; 32] = std::array::from_fn(|i| (i * 7 % 251) as u8);
+        let k = meete2e::Schluessel::aus_roh(roh);
+        println!("SCHLUESSEL {}", k.als_text());
+        for (spur, name, zaehler, key, klar) in [
+            (meete2e::Spur::Ton, "ton", 0u32, false, "Hallo Ton"),
+            (meete2e::Spur::Bild, "bild", 1, true, "Ein Schluesselbild"),
+            (meete2e::Spur::Bild, "bild", 4294967295, false, "Zaehler am Anschlag"),
+        ] {
+            let g = k.schuetzen(spur, zaehler, key, klar.as_bytes());
+            println!(
+                "VEKTOR {} {} {} {} {}",
+                name,
+                zaehler,
+                key,
+                hex::encode(klar.as_bytes()),
+                hex::encode(&g)
+            );
+        }
+        return Ok(());
+    }
+
     // BILDSCHIRM-DIAGNOSE: ein Bild GENAU so aufnehmen, wie es ins Meeting
     // geht (inklusive Zuschnitt und gemaltem Mauszeiger) und als PNG
     // ablegen. Nur so laesst sich belegen, ob Menues und Zeiger wirklich
