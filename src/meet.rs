@@ -28,6 +28,13 @@ pub struct Meeting {
     /// Bei der Liste leer - die gibt es bewusst nicht heraus.
     pub passwort: String,
     pub termin_text: String,
+    /// Ende-zu-Ende-Schluessel als Text (43 Zeichen), leer = keiner.
+    ///
+    /// WICHTIG: Der geht NIE an den Server. Er entsteht hier im Programm und
+    /// reist nur im Fragment des Links (hinter dem #). Browser schicken das
+    /// Fragment grundsaetzlich nicht mit - deshalb ist genau dort der
+    /// richtige Platz dafuer.
+    pub e2e: String,
 }
 
 fn from_json(v: &serde_json::Value) -> Meeting {
@@ -42,6 +49,8 @@ fn from_json(v: &serde_json::Value) -> Meeting {
         titel: s("titel"),
         passwort: s("passwort"),
         termin_text: s("termin_text"),
+        // Nur aus der EIGENEN Liste; vom Server kommt der Schluessel nie.
+        e2e: s("e2e"),
     }
 }
 
@@ -72,10 +81,13 @@ pub fn create(titel: &str) -> Result<Meeting> {
         .read_to_string()
         .map_err(|e| anyhow!("{}", e))?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| anyhow!("{}", e))?;
-    let m = from_json(&v);
+    let mut m = from_json(&v);
     if m.id.is_empty() {
         return Err(anyhow!("Server hat keine Meeting-ID geliefert"));
     }
+    // Ende-zu-Ende-Schluessel HIER wuerfeln, nicht am Server. Er geht nur
+    // im Fragment des Links weiter - der Server bekommt ihn nie zu sehen.
+    m.e2e = crate::meete2e::Schluessel::neu().als_text();
     Ok(m)
 }
 
@@ -173,6 +185,34 @@ pub fn join_url(id: &str, pass: &str) -> String {
     )
 }
 
+/// Den Ende-zu-Ende-Schluessel an einen Link haengen - IMMER als Fragment.
+///
+/// Alles hinter dem # bleibt im Browser: es steht in keiner Anfrage, in
+/// keinem Server-Protokoll und in keinem Verlauf beim Anbieter. Genau
+/// deshalb kann der Server den Schluessel nicht kennen - und genau deshalb
+/// darf er auch NIE in die Abfrage (?...) wandern.
+pub fn mit_schluessel(url: &str, e2e: &str) -> String {
+    let k = e2e.trim();
+    if k.is_empty() {
+        return url.to_string();
+    }
+    format!("{}#k={}", url, k)
+}
+
+/// Den Schluessel aus einem Link holen (Fragment ODER "k=" darin).
+pub fn schluessel_aus_link(link: &str) -> Option<String> {
+    let teil = link.split('#').nth(1)?;
+    for kv in teil.split('&') {
+        if let Some(v) = kv.strip_prefix("k=") {
+            let v = v.trim();
+            if crate::meete2e::Schluessel::aus_text(v).is_some() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Wie join_url, aber mit der eigenen FreeViewer-ID.
 pub fn join_url_with_id(id: &str, pass: &str, fvid: &str) -> String {
     let ziffern: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -194,7 +234,7 @@ pub fn invite(m: &Meeting) -> String {
         titel,
         m.id,
         m.passwort,
-        join_url(&m.id, &m.passwort)
+        mit_schluessel(&join_url(&m.id, &m.passwort), &m.e2e)
     )
 }
 
@@ -352,6 +392,7 @@ mod tests {
             titel: "Testrunde".into(),
             passwort: "geheim22".into(),
             termin_text: String::new(),
+            e2e: String::new(),
         };
         let t = invite(&m);
         assert!(t.contains("Testrunde"));
@@ -602,5 +643,60 @@ mod tests_meetwin {
         let t = tn_aus_json(&leer);
         assert_eq!(t.len(), 1);
         assert!(!t[0].host && !t[0].mikro_aus && !t[0].fv);
+    }
+}
+
+#[cfg(test)]
+mod e2e_link_tests {
+    use super::*;
+
+    /// Der Schluessel MUSS im Fragment stehen - alles andere landet in den
+    /// Protokollen des Servers und waere damit kein Ende-zu-Ende mehr.
+    #[test]
+    fn der_schluessel_steht_hinter_der_raute() {
+        let k = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+        let u = mit_schluessel(&join_url("1-2-3", "pw"), k);
+        let (vorn, hinten) = u.split_once('#').expect("kein Fragment");
+        assert!(!vorn.contains(k), "Schluessel steht in der Abfrage: {}", vorn);
+        assert_eq!(hinten, format!("k={}", k));
+    }
+
+    #[test]
+    fn ohne_schluessel_bleibt_der_link_unveraendert() {
+        let u = join_url("1-2-3", "pw");
+        assert_eq!(mit_schluessel(&u, ""), u);
+        assert_eq!(mit_schluessel(&u, "   "), u);
+    }
+
+    #[test]
+    fn schluessel_kommt_aus_dem_link_zurueck() {
+        let k = crate::meete2e::Schluessel::neu().als_text();
+        let u = mit_schluessel(&join_url("1-2-3", "pw"), &k);
+        assert_eq!(schluessel_aus_link(&u).as_deref(), Some(k.as_str()));
+    }
+
+    /// Unsinn im Fragment darf NICHT als Schluessel durchgehen - sonst
+    /// entschluesselt der Client mit Muell und zeigt Bildsalat.
+    #[test]
+    fn unsinn_im_fragment_wird_abgewiesen() {
+        assert!(schluessel_aus_link("https://x/?room=1#k=zukurz").is_none());
+        assert!(schluessel_aus_link("https://x/?room=1#k=").is_none());
+        assert!(schluessel_aus_link("https://x/?room=1").is_none());
+        assert!(schluessel_aus_link("https://x/?room=1#anderes=1").is_none());
+    }
+
+    /// Die Einladung enthaelt den Link MIT Schluessel.
+    #[test]
+    fn die_einladung_traegt_den_schluessel() {
+        let m = Meeting {
+            id: "482-913-770".into(),
+            titel: "Test".into(),
+            passwort: "geheim".into(),
+            termin_text: String::new(),
+            e2e: crate::meete2e::Schluessel::neu().als_text(),
+        };
+        let text = invite(&m);
+        assert!(text.contains("#k="), "kein Schluessel in der Einladung:\n{}", text);
+        assert_eq!(schluessel_aus_link(&text).as_deref(), Some(m.e2e.as_str()));
     }
 }

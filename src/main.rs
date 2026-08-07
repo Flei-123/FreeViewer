@@ -28,6 +28,7 @@ mod license;
 mod link;
 mod meet;
 mod meetsig;
+mod meete2e;
 mod meetrtc;
 mod meetaudio;
 mod meetui;
@@ -1305,6 +1306,7 @@ fn main() -> eframe::Result<()> {
             titel: "Wochenbesprechung".to_string(),
             passwort: "test1234".to_string(),
             termin_text: String::new(),
+            e2e: String::new(),
         });
         let meetschirm = |b: f32, h: f32| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2001,6 +2003,7 @@ fn main() -> eframe::Result<()> {
                         titel: "Fenster-Test".to_string(),
                         passwort: if echt { a3.clone() } else { "test1234".to_string() },
                         termin_text: String::new(),
+                        e2e: String::new(),
                     });
                     app.meet_shot_join = echt;
                     // Mit echtem Beitritt muss die Verbindung erst stehen.
@@ -2597,6 +2600,7 @@ impl App {
                     titel: String::new(),
                     passwort: pass.clone(),
                     termin_text: String::new(),
+                    e2e: String::new(),
                 });
             }
         }
@@ -3366,6 +3370,7 @@ impl App {
                             titel: String::new(),
                             passwort: self.meet_pw.clone(),
                             termin_text: String::new(),
+                            e2e: String::new(),
                         });
                     }
                 }
