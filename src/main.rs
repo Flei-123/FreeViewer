@@ -222,6 +222,18 @@ fn main() -> eframe::Result<()> {
         let roh: [u8; 32] = std::array::from_fn(|i| (i * 7 % 251) as u8);
         let k = meete2e::Schluessel::aus_roh(roh);
         println!("SCHLUESSEL {}", k.als_text());
+        // H.264-Vektor: derselbe Rahmen, den der Browser rechnen muss.
+        {
+            let mut f: Vec<u8> = Vec::new();
+            f.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96, 0x54]);
+            f.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80]);
+            f.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+            f.extend((0..200u32).map(|i| (i * 13 % 256) as u8));
+            f.extend_from_slice(&[0, 0, 1, 0x41]);
+            f.extend((0..120u32).map(|i| (i * 29 % 256) as u8));
+            let g = k.schuetzen_h264(42, &f);
+            println!("H264 42 {} {}", hex::encode(&f), hex::encode(&g));
+        }
         for (spur, name, zaehler, key, klar) in [
             (meete2e::Spur::Ton, "ton", 0u32, false, "Hallo Ton"),
             (meete2e::Spur::Bild, "bild", 1, true, "Ein Schluesselbild"),

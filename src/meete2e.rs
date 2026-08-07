@@ -166,6 +166,200 @@ impl Schluessel {
     }
 }
 
+// ------------------------------------------------------- H.264 (Bild) ----
+//
+// WARUM Bild anders behandelt wird als Ton:
+//
+// Der Medienserver ist KEIN reiner Weiterleiter. Er bekommt entpackte Bilder
+// und setzt sie neu zu RTP-Paketen zusammen - dafuer MUSS er die Struktur
+// des Bildes verstehen (NAL-Einheiten, STAP-A). Gemessen am 07.08.2026:
+// verschluesselt man den ganzen Rahmen, scheitert er mit
+// "NaluTypeIsNotHandled" und beim Gegenueber kommt kein Bild an.
+//
+// Deshalb bleibt die STRUKTUR sichtbar und nur der INHALT wird verschluesselt:
+//   * Startcodes und das Kopfbyte jeder NAL-Einheit bleiben im Klartext,
+//   * SPS (7), PPS (8) und AUD (9) bleiben ganz unangetastet - darin steht
+//     nur, wie gross das Bild ist, kein Bildinhalt; der Packer braucht sie,
+//   * alles andere wird verschluesselt.
+//
+// Denselben Kompromiss geht SFrame bei H.264 ein: der Server sieht die
+// Rahmenstruktur und die Groessen, aber KEINE Inhalte.
+//
+// Zusaetzlich noetig: der Geheimtext darf zufaellig "00 00 01" enthalten -
+// das waere ein falscher Startcode und wuerde das Bild zerlegen. Deshalb
+// wird derselbe Schutz eingesetzt, den H.264 selbst benutzt (eine 0x03
+// dazwischen, "emulation prevention").
+
+/// Wo faengt die naechste NAL-Einheit an? Liefert (Beginn des Startcodes,
+/// Beginn der Daten).
+fn naechster_startcode(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
+    let mut i = ab;
+    while i + 3 <= daten.len() {
+        if daten[i] == 0 && daten[i + 1] == 0 {
+            if daten[i + 2] == 1 {
+                return Some((i, i + 3));
+            }
+            if i + 4 <= daten.len() && daten[i + 2] == 0 && daten[i + 3] == 1 {
+                return Some((i, i + 4));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Einen Annex-B-Rahmen in seine NAL-Einheiten zerlegen: (Startcode-Beginn,
+/// Daten-Beginn, Daten-Ende).
+pub fn nal_einheiten(daten: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut aus = Vec::new();
+    let mut suche = 0usize;
+    let mut offen: Option<(usize, usize)> = None;
+    while let Some((sc, db)) = naechster_startcode(daten, suche) {
+        if let Some((osc, odb)) = offen {
+            aus.push((osc, odb, sc));
+        }
+        offen = Some((sc, db));
+        suche = db;
+    }
+    if let Some((osc, odb)) = offen {
+        aus.push((osc, odb, daten.len()));
+    }
+    aus
+}
+
+/// Muss diese NAL-Einheit im Klartext bleiben?
+///
+/// SPS/PPS beschreiben nur Groesse und Kodierparameter - kein Bildinhalt -
+/// und der Packer im Server braucht sie. AUD ist ein reiner Trenner.
+fn nal_bleibt_klar(typ: u8) -> bool {
+    matches!(typ, 7 | 8 | 9)
+}
+
+/// Den Schutz gegen falsche Startcodes einfuegen (wie H.264 selbst).
+fn epb_ein(daten: &[u8]) -> Vec<u8> {
+    let mut aus = Vec::with_capacity(daten.len() + daten.len() / 64 + 4);
+    let mut nullen = 0usize;
+    for &b in daten {
+        if nullen >= 2 && b <= 3 {
+            aus.push(3);
+            nullen = 0;
+        }
+        aus.push(b);
+        if b == 0 {
+            nullen += 1;
+        } else {
+            nullen = 0;
+        }
+    }
+    aus
+}
+
+/// Den Schutz wieder herausnehmen.
+fn epb_raus(daten: &[u8]) -> Vec<u8> {
+    let mut aus = Vec::with_capacity(daten.len());
+    let mut nullen = 0usize;
+    let mut i = 0usize;
+    while i < daten.len() {
+        let b = daten[i];
+        if nullen >= 2 && b == 3 && i + 1 < daten.len() && daten[i + 1] <= 3 {
+            nullen = 0;
+            i += 1;
+            continue;
+        }
+        aus.push(b);
+        if b == 0 {
+            nullen += 1;
+        } else {
+            nullen = 0;
+        }
+        i += 1;
+    }
+    aus
+}
+
+impl Schluessel {
+    fn bild_nonce(&self, zaehler: u32, nal_nr: u8) -> [u8; 12] {
+        let mut n = [0u8; 12];
+        n[0] = 2; // Bildspur
+        n[7] = nal_nr; // je NAL eigener Wert - sonst waere der Zufallswert doppelt
+        n[8..12].copy_from_slice(&zaehler.to_be_bytes());
+        n
+    }
+
+    /// Einen H.264-Rahmen schuetzen: Struktur bleibt, Inhalt wird geheim.
+    pub fn schuetzen_h264(&self, zaehler: u32, rahmen: &[u8]) -> Vec<u8> {
+        let teile = nal_einheiten(rahmen);
+        if teile.is_empty() {
+            return rahmen.to_vec(); // kein Annex-B: unveraendert lassen
+        }
+        let mut aus = Vec::with_capacity(rahmen.len() + teile.len() * 24);
+        for (nr, (sc, db, ende)) in teile.iter().enumerate() {
+            let kopf_byte = rahmen[*db];
+            let typ = kopf_byte & 0x1f;
+            // Startcode und Kopfbyte immer im Klartext.
+            aus.extend_from_slice(&rahmen[*sc..*db + 1]);
+            let inhalt = &rahmen[*db + 1..*ende];
+            if nal_bleibt_klar(typ) || inhalt.is_empty() {
+                aus.extend_from_slice(inhalt);
+                continue;
+            }
+            let nr8 = (nr & 0xff) as u8;
+            // Zaehler und NAL-Nummer gehen in die Pruefsumme ein - wer sie
+            // vertauscht, macht den Rahmen ungueltig.
+            let aad = [kopf_byte, nr8, (zaehler >> 24) as u8, (zaehler >> 16) as u8,
+                       (zaehler >> 8) as u8, zaehler as u8];
+            let geheim = self
+                .bild
+                .encrypt(
+                    Nonce::from_slice(&self.bild_nonce(zaehler, nr8)),
+                    Payload { msg: inhalt, aad: &aad },
+                )
+                .unwrap_or_default();
+            let mut roh = Vec::with_capacity(5 + geheim.len());
+            roh.push(nr8);
+            roh.extend_from_slice(&zaehler.to_be_bytes());
+            roh.extend_from_slice(&geheim);
+            aus.extend_from_slice(&epb_ein(&roh));
+        }
+        aus
+    }
+
+    /// Einen geschuetzten H.264-Rahmen wieder oeffnen.
+    pub fn oeffnen_h264(&self, rahmen: &[u8]) -> Option<Vec<u8>> {
+        let teile = nal_einheiten(rahmen);
+        if teile.is_empty() {
+            return None;
+        }
+        let mut aus = Vec::with_capacity(rahmen.len());
+        for (sc, db, ende) in teile {
+            let kopf_byte = rahmen[db];
+            let typ = kopf_byte & 0x1f;
+            aus.extend_from_slice(&rahmen[sc..db + 1]);
+            let inhalt = &rahmen[db + 1..ende];
+            if nal_bleibt_klar(typ) || inhalt.is_empty() {
+                aus.extend_from_slice(inhalt);
+                continue;
+            }
+            let roh = epb_raus(inhalt);
+            if roh.len() < 5 + 16 {
+                return None;
+            }
+            let nr8 = roh[0];
+            let zaehler = u32::from_be_bytes([roh[1], roh[2], roh[3], roh[4]]);
+            let aad = [kopf_byte, nr8, roh[1], roh[2], roh[3], roh[4]];
+            let klar = self
+                .bild
+                .decrypt(
+                    Nonce::from_slice(&self.bild_nonce(zaehler, nr8)),
+                    Payload { msg: &roh[5..], aad: &aad },
+                )
+                .ok()?;
+            aus.extend_from_slice(&klar);
+        }
+        Some(aus)
+    }
+}
+
 /// Sieht das nach einem geschuetzten Rahmen aus? (Auch der Server fragt das.)
 pub fn ist_geschuetzt(rahmen: &[u8]) -> bool {
     rahmen.len() > KOPF + 16 && rahmen[0] == KENNUNG
@@ -276,6 +470,136 @@ pub fn base64_url_zurueck(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ein Rahmen wie ihn der Kodierer liefert: SPS, PPS, dann ein Bild.
+    fn beispielrahmen() -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96, 0x54]); // SPS (7)
+        f.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80]); // PPS (8)
+        f.extend_from_slice(&[0, 0, 0, 1, 0x65]); // IDR (5)
+        f.extend((0..400u32).map(|i| (i * 13 % 256) as u8));
+        f.extend_from_slice(&[0, 0, 1, 0x41]); // Nicht-IDR (1), 3-Byte-Startcode
+        f.extend((0..250u32).map(|i| (i * 29 % 256) as u8));
+        f
+    }
+
+    #[test]
+    fn h264_hin_und_zurueck() {
+        let k = Schluessel::neu();
+        let f = beispielrahmen();
+        let g = k.schuetzen_h264(11, &f);
+        assert_ne!(g, f, "nichts verschluesselt");
+        assert_eq!(k.oeffnen_h264(&g).as_deref(), Some(&f[..]), "kommt nicht heil zurueck");
+    }
+
+    /// DER Punkt, an dem es beim ersten Anlauf gescheitert ist: der Server
+    /// muss die Struktur weiter lesen koennen.
+    #[test]
+    fn die_struktur_bleibt_lesbar() {
+        let k = Schluessel::neu();
+        let f = beispielrahmen();
+        let g = k.schuetzen_h264(3, &f);
+        let vorher: Vec<u8> = nal_einheiten(&f).iter().map(|(_, d, _)| f[*d] & 0x1f).collect();
+        let nachher: Vec<u8> = nal_einheiten(&g).iter().map(|(_, d, _)| g[*d] & 0x1f).collect();
+        assert_eq!(vorher, nachher, "NAL-Typen haben sich geaendert");
+        assert_eq!(vorher, vec![7, 8, 5, 1]);
+    }
+
+    /// SPS und PPS muessen WORTGLEICH bleiben - der Packer im Server liest sie.
+    #[test]
+    fn sps_und_pps_bleiben_unangetastet() {
+        let k = Schluessel::neu();
+        let f = beispielrahmen();
+        let g = k.schuetzen_h264(4, &f);
+        for (sc, db, ende) in nal_einheiten(&f) {
+            let typ = f[db] & 0x1f;
+            if typ == 7 || typ == 8 {
+                let stueck = &f[sc..ende];
+                assert!(
+                    g.windows(stueck.len()).any(|w| w == stueck),
+                    "NAL-Typ {} wurde veraendert",
+                    typ
+                );
+            }
+        }
+    }
+
+    /// Der Bildinhalt darf NICHT mehr im Rahmen stehen.
+    #[test]
+    fn h264_inhalt_ist_wirklich_weg() {
+        let k = Schluessel::neu();
+        let mut f = vec![0, 0, 0, 1, 0x65];
+        let geheim: Vec<u8> = b"GEHEIMERBILDINHALT".repeat(6);
+        f.extend_from_slice(&geheim);
+        let g = k.schuetzen_h264(1, &f);
+        assert!(
+            !g.windows(geheim.len()).any(|w| w == &geheim[..]),
+            "der Bildinhalt liegt offen im Rahmen"
+        );
+    }
+
+    /// Falsche Startcodes wuerden das Bild zerlegen. Das darf NIE passieren -
+    /// auch nicht, wenn der Geheimtext zufaellig 00 00 01 enthaelt.
+    #[test]
+    fn es_entstehen_keine_falschen_startcodes() {
+        let k = Schluessel::neu();
+        for runde in 0..300u32 {
+            let mut f = vec![0, 0, 0, 1, 0x41];
+            f.extend((0..64u32).map(|i| ((i * runde + 7) % 256) as u8));
+            let g = k.schuetzen_h264(runde, &f);
+            // Genau EIN Startcode - naemlich der am Anfang.
+            assert_eq!(
+                nal_einheiten(&g).len(),
+                1,
+                "Runde {}: es sind falsche Startcodes entstanden",
+                runde
+            );
+            assert_eq!(k.oeffnen_h264(&g).as_deref(), Some(&f[..]), "Runde {}", runde);
+        }
+    }
+
+    #[test]
+    fn h264_fremder_schluessel_oeffnet_nichts() {
+        let a = Schluessel::neu();
+        let b = Schluessel::neu();
+        let g = a.schuetzen_h264(2, &beispielrahmen());
+        assert!(b.oeffnen_h264(&g).is_none());
+    }
+
+    #[test]
+    fn h264_verfaelschung_faellt_auf() {
+        let k = Schluessel::neu();
+        let g = k.schuetzen_h264(6, &beispielrahmen());
+        // Eine Stelle mitten im verschluesselten Teil umdrehen.
+        let mut kaputt = g.clone();
+        let mitte = g.len() - 40;
+        kaputt[mitte] ^= 0x01;
+        assert!(k.oeffnen_h264(&kaputt).is_none(), "Verfaelschung blieb unbemerkt");
+    }
+
+    /// Das Schluesselbild bleibt am NAL-Typ 5 erkennbar - der Server findet
+    /// es also wieder ohne unser Zutun.
+    #[test]
+    fn schluesselbild_bleibt_erkennbar() {
+        let k = Schluessel::neu();
+        let g = k.schuetzen_h264(8, &beispielrahmen());
+        let hat_idr = nal_einheiten(&g).iter().any(|(_, d, _)| g[*d] & 0x1f == 5);
+        assert!(hat_idr, "der Server kann das Schluesselbild nicht mehr finden");
+    }
+
+    #[test]
+    fn schutz_vor_falschen_startcodes_ist_umkehrbar() {
+        for muster in [
+            vec![0u8, 0, 1, 2, 3],
+            vec![0, 0, 0, 0, 0, 0],
+            vec![0, 0, 3, 0, 0, 1],
+            vec![1, 2, 3, 4, 5],
+            vec![0, 0, 2],
+        ] {
+            let ein = epb_ein(&muster);
+            assert_eq!(epb_raus(&ein), muster, "Muster {:?}", muster);
+        }
+    }
 
     #[test]
     fn hin_und_zurueck() {
