@@ -451,7 +451,7 @@ fn main() -> eframe::Result<()> {
             .unwrap_or_else(|| "497628420".to_string());
         // Absichtlich OHNE Nummer beitreten: so laesst sich messen, dass der
         // Knopf beim anderen erst durch die Freigabe entsteht.
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("STEUERTEST FEHLER Signalisierung: {}", e);
@@ -535,7 +535,7 @@ fn main() -> eframe::Result<()> {
             .cloned()
             .unwrap_or_else(|| "NativAuge".to_string());
         let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("EMPFANGSTEST FEHLER Signalisierung: {}", e);
@@ -666,7 +666,7 @@ fn main() -> eframe::Result<()> {
                 return Ok(());
             }
         };
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("SCHIRMTEST FEHLER Signalisierung: {}", e);
@@ -819,7 +819,7 @@ fn main() -> eframe::Result<()> {
                 return Ok(());
             }
         };
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("KAMERATEST FEHLER Signalisierung: {}", e);
@@ -947,7 +947,7 @@ fn main() -> eframe::Result<()> {
             }
         };
         let mut muster = meetvideo::Muster::neu(meetvideo::BREITE, meetvideo::HOEHE);
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("BILDTEST FEHLER Signalisierung: {}", e);
@@ -1043,7 +1043,7 @@ fn main() -> eframe::Result<()> {
             }
         };
         println!("EINGANG {} / AUSGANG {}", geraete.eingang, geraete.ausgang);
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("MIKROTEST FEHLER Signalisierung: {}", e);
@@ -1131,7 +1131,7 @@ fn main() -> eframe::Result<()> {
         let pass = args.get(i + 2).cloned().unwrap_or_default();
         let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativTon".to_string());
         let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(20);
-        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
                 println!("TONTEST FEHLER Signalisierung: {}", e);
@@ -1237,7 +1237,7 @@ fn main() -> eframe::Result<()> {
         let pass = args.get(i + 2).cloned().unwrap_or_default();
         let name = args.get(i + 3).cloned().unwrap_or_else(|| "Nativ".to_string());
         let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(12);
-        match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "") {
+        match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => {
                 let start = std::time::Instant::now();
                 let mut chat_geschickt = false;
@@ -2234,6 +2234,9 @@ struct App {
     link_check: std::time::Instant,
     /// Meet: Eingaben und was der Server zuletzt gesagt hat.
     meet_title: String,
+    /// Haken "Ende-zu-Ende verschluesseln" beim Anlegen. Standard aus:
+    /// mit Haken kommt nur herein, wer einen aktuellen Stand hat.
+    meet_e2e: bool,
     meet_id: String,
     meet_pw: String,
     meet_last: Option<meet::Meeting>,
@@ -2387,6 +2390,7 @@ impl App {
             install_service: true,
             link_check: std::time::Instant::now() - Duration::from_secs(2),
             meet_title: String::new(),
+            meet_e2e: false,
             meet_id: String::new(),
             meet_pw: String::new(),
             meet_last: None,
@@ -3330,8 +3334,19 @@ impl App {
                         .margin(egui::Margin::symmetric(8, 5)),
                 );
                 ui.add_space(8.0);
+                check(ui, &mut self.meet_e2e, i18n::t("meet.e2e"));
+                ui.add_space(4.0);
+                label_small(
+                    ui,
+                    if self.meet_e2e {
+                        i18n::t("meet.e2e_on")
+                    } else {
+                        i18n::t("meet.e2e_off")
+                    },
+                );
+                ui.add_space(8.0);
                 if ghost_button(ui, i18n::t("meet.start")).clicked() {
-                    match meet::create(&self.meet_title) {
+                    match meet::create(&self.meet_title, self.meet_e2e) {
                         Ok(m) => {
                             self.meet_id = m.id.clone();
                             self.meet_pw = m.passwort.clone();

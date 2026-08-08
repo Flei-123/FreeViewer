@@ -64,7 +64,7 @@ fn get_json(url: &str) -> Result<serde_json::Value> {
 }
 
 /// Legt ein Meeting an und liefert ID + Passwort zurueck.
-pub fn create(titel: &str) -> Result<Meeting> {
+pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
     let url = format!("{}/api/meeting", base());
     let payload = serde_json::json!({
         "titel": titel,
@@ -85,10 +85,28 @@ pub fn create(titel: &str) -> Result<Meeting> {
     if m.id.is_empty() {
         return Err(anyhow!("Server hat keine Meeting-ID geliefert"));
     }
-    // Ende-zu-Ende-Schluessel HIER wuerfeln, nicht am Server. Er geht nur
-    // im Fragment des Links weiter - der Server bekommt ihn nie zu sehen.
-    m.e2e = crate::meete2e::Schluessel::neu().als_text();
+    // Ende-zu-Ende ist eine BEWUSSTE Wahl beim Anlegen, kein Automatismus:
+    // ein verschluesseltes Meeting weist jeden ab, dessen Programm das noch
+    // nicht kann. Wuerde jedes neue Meeting verschluesselt, saessen aeltere
+    // Staende ploetzlich vor der Tuer.
+    //
+    // Der Schluessel wird HIER gewuerfelt, nicht am Server. Er geht nur im
+    // Fragment des Links weiter - der Server bekommt ihn nie zu sehen.
+    m.e2e = schluessel_fuer(e2e);
     Ok(m)
+}
+
+/// Ein frischer Schluessel - oder gar keiner.
+///
+/// Eigene Funktion, damit die Entscheidung pruefbar ist: ohne Haken darf
+/// NICHTS entstehen, sonst traegt der Einladungslink stillschweigend einen
+/// Schluessel und das Meeting weist aeltere Staende ab.
+pub fn schluessel_fuer(e2e: bool) -> String {
+    if e2e {
+        crate::meete2e::Schluessel::neu().als_text()
+    } else {
+        String::new()
+    }
 }
 
 /// Wo die EIGENEN Meetings liegen.
@@ -683,6 +701,55 @@ mod e2e_link_tests {
         assert!(schluessel_aus_link("https://x/?room=1#k=").is_none());
         assert!(schluessel_aus_link("https://x/?room=1").is_none());
         assert!(schluessel_aus_link("https://x/?room=1#anderes=1").is_none());
+    }
+
+    /// OHNE Haken beim Anlegen entsteht kein Schluessel - und damit traegt
+    /// auch die Einladung keinen. Sonst waere jedes neue Meeting still
+    /// verschluesselt und aeltere Staende staenden vor der Tuer.
+    #[test]
+    fn ohne_haken_kein_schluessel() {
+        assert_eq!(schluessel_fuer(false), "");
+        let m = Meeting {
+            id: "482-913-770".into(),
+            titel: "Test".into(),
+            passwort: "geheim".into(),
+            termin_text: String::new(),
+            e2e: schluessel_fuer(false),
+        };
+        let text = invite(&m);
+        assert!(!text.contains("#k="), "Schluessel ohne Haken:\n{}", text);
+        assert!(schluessel_aus_link(&text).is_none());
+    }
+
+    /// LIVE gegen den echten Server - laeuft nur auf Zuruf:
+    ///     cargo test -- --ignored anlegen_mit_und_ohne_haken --nocapture
+    /// Beweist am echten Meeting, dass der Haken wirklich ueber den
+    /// Schluessel im Einladungslink entscheidet.
+    #[test]
+    #[ignore]
+    fn anlegen_mit_und_ohne_haken() {
+        let ohne = create("Probe ohne Haken", false).expect("Server nicht erreichbar");
+        assert!(ohne.e2e.is_empty(), "Schluessel ohne Haken: {}", ohne.e2e);
+        let l1 = invite(&ohne);
+        assert!(!l1.contains("#k="), "{}", l1);
+        println!("OHNE Haken: {}", l1.lines().last().unwrap_or(""));
+
+        let mit = create("Probe mit Haken", true).expect("Server nicht erreichbar");
+        assert!(crate::meete2e::Schluessel::aus_text(&mit.e2e).is_some());
+        let l2 = invite(&mit);
+        assert!(l2.contains("#k="), "{}", l2);
+        println!("MIT Haken:  {}", l2.lines().last().unwrap_or(""));
+        println!("RAUM_OHNE={} PASS_OHNE={}", ohne.id, ohne.passwort);
+        println!("RAUM_MIT={} PASS_MIT={} KEY={}", mit.id, mit.passwort, mit.e2e);
+    }
+
+    /// MIT Haken entsteht ein gueltiger Schluessel - und jedes Mal ein anderer.
+    #[test]
+    fn mit_haken_ein_frischer_schluessel() {
+        let a = schluessel_fuer(true);
+        let b = schluessel_fuer(true);
+        assert!(crate::meete2e::Schluessel::aus_text(&a).is_some());
+        assert_ne!(a, b, "zweimal derselbe Schluessel");
     }
 
     /// Die Einladung enthaelt den Link MIT Schluessel.

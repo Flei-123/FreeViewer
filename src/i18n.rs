@@ -276,6 +276,17 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("meet.new", "Neues Meeting", "New meeting"),
     ("meet.title_hint", "Titel (freiwillig)", "Title (optional)"),
     ("meet.start", "Meeting starten", "Start meeting"),
+    ("meet.e2e", "Ende-zu-Ende verschlüsseln", "End-to-end encrypted"),
+    (
+        "meet.e2e_on",
+        "Der Server sieht nur Kauderwelsch. Alle Teilnehmer brauchen einen aktuellen Stand - ältere Versionen werden abgewiesen.",
+        "The server only sees gibberish. Everyone needs an up-to-date version - older ones are turned away.",
+    ),
+    (
+        "meet.e2e_off",
+        "Übertragung bleibt verschlüsselt, der Server kann die Medien aber sehen. Jeder kann beitreten.",
+        "Transport stays encrypted, but the server can see the media. Anyone can join.",
+    ),
     ("meet.join_head", "Einem Meeting beitreten", "Join a meeting"),
     ("meet.join", "Beitreten", "Join"),
     ("meet.id", "Meeting-ID", "Meeting ID"),

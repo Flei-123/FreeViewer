@@ -322,7 +322,18 @@ fn umschlag(mut v: serde_json::Value) -> String {
 
 /// Einem Meeting beitreten. Laeuft im Hintergrund weiter, bis `verlassen()`
 /// gerufen wird oder die Sitzung fallengelassen wird.
-pub fn beitreten(basis: &str, raum: &str, pass: &str, name: &str, fvid: &str) -> Result<Sitzung> {
+/// `e2e` sagt dem Server, ob WIR Ende-zu-Ende koennen. Das muss schon in der
+/// Beitrittsnachricht stehen: der Server handelt daraus aus, ob der Raum
+/// verschluesselt ist, und weist ab, wer nicht mithalten kann.
+#[allow(clippy::too_many_arguments)]
+pub fn beitreten(
+    basis: &str,
+    raum: &str,
+    pass: &str,
+    name: &str,
+    fvid: &str,
+    e2e: bool,
+) -> Result<Sitzung> {
     let url = ws_adresse(basis);
     let (bef_tx, bef_rx) = unbounded_channel::<Befehl>();
     let (ev_tx, ev_rx) = channel::<Ereignis>();
@@ -356,7 +367,8 @@ pub fn beitreten(basis: &str, raum: &str, pass: &str, name: &str, fvid: &str) ->
                 }
             };
             rt.block_on(async move {
-                if let Err(e) = lauf(&url, &raum, &pass, &name, &fvid, bef_rx, &ev_tx, &z2).await {
+                if let Err(e) = lauf(&url, &raum, &pass, &name, &fvid, e2e, bef_rx, &ev_tx, &z2).await
+                {
                     if let Ok(mut z) = z2.lock() {
                         z.verbunden = false;
                         z.letzter_fehler = e.to_string();
@@ -386,6 +398,7 @@ async fn lauf(
     pass: &str,
     name: &str,
     fvid: &str,
+    e2e: bool,
     mut befehle: UnboundedReceiver<Befehl>,
     ev: &Sender<Ereignis>,
     zustand: &Arc<Mutex<Zustand>>,
@@ -395,16 +408,18 @@ async fn lauf(
         z.verbunden = true;
     }
 
-    // Beitritt. Die Faehigkeiten sind ehrlich: heute kann der native Client
-    // noch KEIN Simulcast und keine E2E-Schicht. Ton/Bild kommen in Stufe 2,
-    // dann wandert "opus"/"h264" hier hinein.
+    // Beitritt. Die Faehigkeiten sind ehrlich: Simulcast kann der native
+    // Client noch nicht. Ende-zu-Ende meldet er genau dann, wenn ein
+    // Schluessel aus dem Link vorliegt - der Server entscheidet daraus, ob
+    // der Raum verschluesselt laeuft. Stuende hier hart "false", waere der
+    // eigene Client aus seinem eigenen verschluesselten Meeting ausgesperrt.
     let join = umschlag(json!({
         "t": "join",
         "room": raum,
         "name": name,
         "pass": pass,
         "fvid": fvid,
-        "caps": { "simulcast": false, "codecs": [], "e2e": false }
+        "caps": { "simulcast": false, "codecs": [], "e2e": e2e }
     }));
     ws.send(Message::Text(join.into())).await?;
 

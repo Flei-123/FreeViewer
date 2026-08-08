@@ -46,6 +46,8 @@ pub struct NativMeet {
     /// im Fenster gruen werden - eine gruene Marke ohne echte
     /// Verschluesselung waere die schlimmste Sorte Luege.
     pub e2e_an: bool,
+    /// Ein Rauswurf/Abweis hat den Grund schon gesetzt - nicht ueberschreiben.
+    pub grund_steht: bool,
     pub kamera_geraet: Option<String>,
     pub mikro_geraet: Option<String>,
     pub lautsprecher_geraet: Option<String>,
@@ -132,14 +134,22 @@ impl NativMeet {
         // Die eigene Nummer merken wir uns IMMER (sonst liesse sich die
         // Freigabe spaeter nicht mehr einschalten) - bekanntgegeben wird sie
         // aber nur, wenn "Fernsteuerung anbieten" wirklich an ist.
-        let sig = meetsig::beitreten(basis, raum, pass, name, if steuerung { fvid } else { "" })?;
-        // Ende-zu-Ende: der Schluessel kommt aus dem Link (Fragment) und wird
-        // hier in die Verbindung gegeben. Ohne Schluessel bleibt alles wie
-        // bisher - der Server sieht die Medien dann weiterhin.
+        // Ende-zu-Ende: der Schluessel kommt aus dem Link (Fragment). Er muss
+        // VOR dem Beitritt feststehen - der Server erfaehrt in der
+        // Beitrittsnachricht, ob wir verschluesseln, und handelt daraus aus,
+        // wer in den Raum darf. Ohne Schluessel bleibt alles wie bisher.
         let schluessel = e2e
             .as_deref()
             .and_then(crate::meete2e::Schluessel::aus_text);
         let e2e_an = schluessel.is_some();
+        let sig = meetsig::beitreten(
+            basis,
+            raum,
+            pass,
+            name,
+            if steuerung { fvid } else { "" },
+            e2e_an,
+        )?;
         let ton = meetrtc::starten_mit(schluessel)?;
         // Ohne Soundkarte (Server, Testrechner) laeuft das Meeting trotzdem -
         // man hoert dann nur nichts. Ehrlich melden statt abbrechen.
@@ -171,6 +181,7 @@ impl NativMeet {
             koder: None,
             kamera_an: false,
             e2e_an,
+            grund_steht: false,
             kamera_geraet: None,
             mikro_geraet: mikro_merk,
             lautsprecher_geraet: lautsprecher_merk,
@@ -293,7 +304,11 @@ impl NativMeet {
                 meetsig::Ereignis::Rausgeworfen(m)
                 | meetsig::Ereignis::Beendet(m)
                 | meetsig::Ereignis::Abgewiesen(m) => {
+                    // Der GRUND ist das Wertvolle ("Meeting ist Ende-zu-Ende
+                    // verschluesselt - bitte aktualisieren"). Er muss stehen
+                    // bleiben; gleich danach kommt der Abbruch der Leitung.
                     self.meldung = m;
+                    self.grund_steht = true;
                 }
                 meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
                     // Nicht ueber die eigene Freigabe selbst berichten.
@@ -337,11 +352,15 @@ impl NativMeet {
                         .push(format!("Im Raum {} - Server {}", raum, server));
                 }
                 meetsig::Ereignis::Getrennt(m) => {
-                    self.meldung = if m.is_empty() {
-                        "Verbindung beendet".into()
-                    } else {
-                        format!("Verbindung weg: {}", m)
-                    };
+                    // Steht schon ein echter Grund da, bleibt er stehen -
+                    // "Verbindung beendet" waere die schlechtere Auskunft.
+                    if !self.grund_steht {
+                        self.meldung = if m.is_empty() {
+                            "Verbindung beendet".into()
+                        } else {
+                            format!("Verbindung weg: {}", m)
+                        };
+                    }
                 }
                 _ => {}
             }
