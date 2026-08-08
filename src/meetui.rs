@@ -42,6 +42,10 @@ pub struct NativMeet {
     /// Welche Geraete gerade benutzt werden (leer = Standard des Systems).
     /// WARUM gemerkt: nur so laesst sich im laufenden Meeting umschalten,
     /// ohne den Raum zu verlassen - genau wie im Browser-Client.
+    /// Laeuft die Ende-zu-Ende-Verschluesselung? Nur dann darf die Marke
+    /// im Fenster gruen werden - eine gruene Marke ohne echte
+    /// Verschluesselung waere die schlimmste Sorte Luege.
+    pub e2e_an: bool,
     pub kamera_geraet: Option<String>,
     pub mikro_geraet: Option<String>,
     pub lautsprecher_geraet: Option<String>,
@@ -123,12 +127,20 @@ impl NativMeet {
         steuerung: bool,
         mikro: Option<String>,
         lautsprecher: Option<String>,
+        e2e: Option<String>,
     ) -> Result<NativMeet> {
         // Die eigene Nummer merken wir uns IMMER (sonst liesse sich die
         // Freigabe spaeter nicht mehr einschalten) - bekanntgegeben wird sie
         // aber nur, wenn "Fernsteuerung anbieten" wirklich an ist.
         let sig = meetsig::beitreten(basis, raum, pass, name, if steuerung { fvid } else { "" })?;
-        let ton = meetrtc::starten()?;
+        // Ende-zu-Ende: der Schluessel kommt aus dem Link (Fragment) und wird
+        // hier in die Verbindung gegeben. Ohne Schluessel bleibt alles wie
+        // bisher - der Server sieht die Medien dann weiterhin.
+        let schluessel = e2e
+            .as_deref()
+            .and_then(crate::meete2e::Schluessel::aus_text);
+        let e2e_an = schluessel.is_some();
+        let ton = meetrtc::starten_mit(schluessel)?;
         // Ohne Soundkarte (Server, Testrechner) laeuft das Meeting trotzdem -
         // man hoert dann nur nichts. Ehrlich melden statt abbrechen.
         let (mikro_merk, lautsprecher_merk) = (mikro.clone(), lautsprecher.clone());
@@ -158,6 +170,7 @@ impl NativMeet {
             kamera: None,
             koder: None,
             kamera_an: false,
+            e2e_an,
             kamera_geraet: None,
             mikro_geraet: mikro_merk,
             lautsprecher_geraet: lautsprecher_merk,
@@ -1142,7 +1155,7 @@ mod tests {
     fn kamera_schalten_ohne_kamera_meldet_sauber() {
         // Server ohne Kamera: der Schalter muss eine Meldung setzen und
         // aus bleiben - kein Absturz, kein haengender Faden.
-        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None);
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None, None,);
         if let Ok(mut m) = r {
             m.kamera_schalten(true);
             #[cfg(not(windows))]
@@ -1159,7 +1172,7 @@ mod tests {
     #[test]
     fn schirm_schalten_ohne_bildschirm_meldet_sauber() {
         // Server ohne Bildschirm: sauber melden, nicht abstuerzen.
-        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None);
+        let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None, None,);
         if let Ok(mut m) = r {
             m.schirm_schalten(true, 0);
             if !m.schirm_an {
@@ -1183,8 +1196,7 @@ mod tests {
             "",
             true,
             None,
-            None,
-        );
+            None, None,);
         if let Ok(mut m) = r {
             assert!(!m.steuer_frei, "ohne Nummer darf nichts freigegeben sein");
             m.steuerung_freigeben(true);
@@ -1204,8 +1216,7 @@ mod tests {
             "497628420",
             false,
             None,
-            None,
-        );
+            None, None,);
         if let Ok(mut m) = r {
             assert!(!m.steuer_frei, "beim Beitreten war die Freigabe aus");
             m.steuerung_freigeben(true);
@@ -1232,8 +1243,7 @@ mod tests {
             "",
             false,
             None,
-            None,
-        );
+            None, None,);
         match r {
             Ok(m) => {
                 // Verbindung laeuft im Hintergrund - nach kurzer Zeit muss

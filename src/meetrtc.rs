@@ -172,6 +172,18 @@ static ANTWORT_RAUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Startet den Ton-Teil: baut das Angebot und laeuft danach im Hintergrund.
 pub fn starten() -> Result<Ton> {
+    starten_mit(None)
+}
+
+/// Wie `starten`, aber mit Ende-zu-Ende-Schluessel.
+///
+/// Ohne Schluessel bleibt alles wie bisher (nur auf dem Weg verschluesselt).
+/// MIT Schluessel wird die Nutzlast schon HIER geheim gemacht - der Server
+/// verteilt dann nur Kauderwelsch. Bild und Ton werden unterschiedlich
+/// behandelt: beim Bild bleibt die H.264-Struktur lesbar (sonst kann der
+/// Server die Pakete nicht packen, gemessen am 07.08.2026), beim Ton wird
+/// der ganze Opus-Rahmen verschluesselt.
+pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
     // Krypto-Anbieter einmalig setzen (reines Rust, s. Cargo.toml).
     static EINMAL: std::sync::Once = std::sync::Once::new();
     EINMAL.call_once(|| {
@@ -229,7 +241,7 @@ pub fn starten() -> Result<Ton> {
         .spawn(move || {
             let r = lauf(
                 rtc, offen, socket, mid, vid, vid2, raus_rx, bild_rx, schirm_rx, sdp_rx, &ev_tx,
-                &z2, &s2, &e2, &sp2,
+                &z2, &s2, &e2, &sp2, e2e,
             );
             let text = match r {
                 Ok(()) => String::new(),
@@ -290,6 +302,7 @@ fn lauf(
     stumm: &Arc<AtomicBool>,
     ende: &Arc<AtomicBool>,
     spuren: &Arc<Mutex<HashMap<String, (u64, bool)>>>,
+    e2e: Option<crate::meete2e::Schluessel>,
 ) -> Result<()> {
     // Auf die Antwort warten (kommt ueber die Signalisierung herein).
     let mut offen = Some(offen);
@@ -301,6 +314,13 @@ fn lauf(
     )
     .map_err(|e| anyhow!("Opus-Kodierer: {:?}", e))?;
     let mut dekodierer: HashMap<u64, audiopus::coder::Decoder> = HashMap::new();
+    // Ende-zu-Ende: je Spur ein eigener, streng steigender Zaehler. Doppelte
+    // Zaehler waeren bei AES-GCM fatal, deshalb wird nie zurueckgesetzt.
+    let mut e2e_ton_zaehler: u32 = 0;
+    let mut e2e_bild_zaehler: u32 = 0;
+    let mut e2e_schirm_zaehler: u32 = 0;
+    // Und je eingehender Spur eine Wache gegen Wiedereinspielen.
+    let mut e2e_wachen: HashMap<String, crate::meete2e::Wache> = HashMap::new();
     let mut puffer = vec![0u8; 4000];
     let mut aus_puffer = vec![0u8; 2000];
     // Welche m-line gehoert zu wem? Das sagt uns der Server ueber die
@@ -384,7 +404,18 @@ fn lauf(
                     let n = kodierer
                         .encode(&pcm, &mut aus_puffer)
                         .map_err(|e| anyhow!("Opus: {:?}", e))?;
-                    let paket = aus_puffer[..n].to_vec();
+                    let mut paket = aus_puffer[..n].to_vec();
+                    if let Some(k) = &e2e {
+                        // Ton ganz verschluesseln - Opus wird vom Server
+                        // nicht inhaltlich angefasst.
+                        paket = k.schuetzen(
+                            crate::meete2e::Spur::Ton,
+                            e2e_ton_zaehler,
+                            false,
+                            &paket,
+                        );
+                        e2e_ton_zaehler = e2e_ton_zaehler.wrapping_add(1);
+                    }
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(rtp_zeit, str0m::media::Frequency::FORTY_EIGHT_KHZ);
                     if let Some(mut w) = rtc.writer(mid) {
@@ -423,6 +454,17 @@ fn lauf(
                 if let (Some(p), Some(mut w)) = (vpt, rtc.writer(vid)) {
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(bild_zeit, str0m::media::Frequency::NINETY_KHZ);
+                    // Bild: nur die INHALTE der NAL-Einheiten werden geheim,
+                    // die Struktur bleibt lesbar - sonst kann der Server die
+                    // Pakete nicht packen.
+                    let daten = match &e2e {
+                        Some(k) => {
+                            let g = k.schuetzen_h264(e2e_bild_zaehler, &daten);
+                            e2e_bild_zaehler = e2e_bild_zaehler.wrapping_add(1);
+                            g
+                        }
+                        None => daten,
+                    };
                     let laenge = daten.len() as u64;
                     if let Err(e) = w.write(p, wanduhr, zeit, daten) {
                         let _ = ev.send(TonEreignis::Fehler(format!("Bild senden: {}", e)));
@@ -457,6 +499,14 @@ fn lauf(
                 if let (Some(p), Some(mut w)) = (spt, rtc.writer(vid2)) {
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(schirm_zeit, str0m::media::Frequency::NINETY_KHZ);
+                    let daten = match &e2e {
+                        Some(k) => {
+                            let g = k.schuetzen_h264(e2e_schirm_zaehler, &daten);
+                            e2e_schirm_zaehler = e2e_schirm_zaehler.wrapping_add(1);
+                            g
+                        }
+                        None => daten,
+                    };
                     let laenge = daten.len() as u64;
                     if let Err(e) = w.write(p, wanduhr, zeit, daten) {
                         let _ = ev.send(TonEreignis::Fehler(format!("Bildschirm senden: {}", e)));
@@ -498,7 +548,24 @@ fn lauf(
                             z.bild_empfangen += 1;
                             z.bytes_rein += d.data.len() as u64;
                         }
+                        // Ende-zu-Ende: aufmachen, BEVOR irgendetwas mit dem
+                        // Inhalt passiert. Der Schluesselbild-Merker liest
+                        // sich auch am verschluesselten Rahmen (NAL-Typ 5
+                        // bleibt lesbar) - dafuer braucht es den Schluessel
+                        // also nicht.
                         let schluessel = ist_schluesselbild(&d.data);
+                        let inhalt: Vec<u8> = match &e2e {
+                            Some(k) => match k.oeffnen_h264(&d.data) {
+                                Some(klar) => klar,
+                                None => {
+                                    // Falscher Schluessel oder verfaelscht:
+                                    // NICHT anzeigen. Lieber kein Bild als
+                                    // ein Bild, dem man nicht trauen kann.
+                                    continue;
+                                }
+                            },
+                            None => d.data.to_vec(),
+                        };
                         // Solange kein Schluesselbild kam: hoeflich, aber
                         // beharrlich eines anfordern (hoechstens jede Sekunde).
                         let mid_txt = d.mid.to_string();
@@ -528,7 +595,7 @@ fn lauf(
                         let _ = ev.send(TonEreignis::Bild {
                             quelle: peer,
                             bildschirm,
-                            daten: d.data.to_vec(),
+                            daten: inhalt,
                             schluesselbild: schluessel,
                             codec,
                         });
@@ -547,9 +614,23 @@ fn lauf(
                             )
                             .expect("Opus-Dekodierer")
                         });
+                        // Ende-zu-Ende: erst aufmachen, dann dekodieren.
+                        // Wiedereinspielen wird je Spur abgewehrt - sonst
+                        // koennte jemand alte Tonschnipsel erneut einspeisen.
+                        let ton_inhalt: Vec<u8> = match &e2e {
+                            Some(k) => {
+                                let z = crate::meete2e::zaehler_von(&d.data);
+                                let wache = e2e_wachen.entry(d.mid.to_string()).or_default();
+                                match (z, k.oeffnen(crate::meete2e::Spur::Ton, &d.data)) {
+                                    (Some(zz), Some(klar)) if wache.pruefen(zz) => klar,
+                                    _ => continue,
+                                }
+                            }
+                            None => d.data.to_vec(),
+                        };
                         let mut pcm = vec![0i16; RAHMEN];
                         {
-                            if let Ok(n) = dek.decode(Some(&d.data[..]), &mut pcm[..], false) {
+                            if let Ok(n) = dek.decode(Some(&ton_inhalt[..]), &mut pcm[..], false) {
                                 pcm.truncate(n);
                                 let pegel = pcm
                                     .iter()

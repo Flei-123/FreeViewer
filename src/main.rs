@@ -349,6 +349,13 @@ fn main() -> eframe::Result<()> {
     //   freeviewer --meetalles <raum> <passwort> [name] [sekunden]
     if let Some(i) = std::env::args().position(|a| a == "--meetalles") {
         let args: Vec<String> = std::env::args().collect();
+        // Optionaler Ende-zu-Ende-Schluessel als letztes Argument - damit
+        // laesst sich der native Client gegen den Browser gegenpruefen.
+        let e2e_arg = args
+            .iter()
+            .skip(i + 1)
+            .find(|a| a.len() == 43 && crate::meete2e::Schluessel::aus_text(a).is_some())
+            .cloned();
         let raum = args.get(i + 1).cloned().unwrap_or_default();
         let pass = args.get(i + 2).cloned().unwrap_or_default();
         let name = args
@@ -369,6 +376,7 @@ fn main() -> eframe::Result<()> {
             false,
             None,
             None,
+            e2e_arg.clone(),
         ) {
             Ok(m) => m,
             Err(e) => {
@@ -376,6 +384,7 @@ fn main() -> eframe::Result<()> {
                 return Ok(());
             }
         };
+        println!("ALLES E2E {}", m.e2e_an);
         println!("ALLES START {}", m.meldung);
         let start = std::time::Instant::now();
         let (mut kamera_an, mut schirm_an, mut frei) = (false, false, false);
@@ -3712,6 +3721,9 @@ impl App {
                 self.meet_offer_control,
                 mic,
                 None,
+                // Ende-zu-Ende: der Schluessel steht im Meeting (aus dem
+                // Link oder beim Anlegen gewuerfelt). Leer = wie bisher.
+                if m.e2e.trim().is_empty() { None } else { Some(m.e2e.clone()) },
             ) {
                 Ok(mut n) => {
                     if self.meet_win.stumm {
@@ -3956,9 +3968,10 @@ impl App {
                 } else {
                     meetfenster::Ton::Warn
                 },
-                // Nativ laeuft noch KEINE Ende-zu-Ende-Schicht (meetsig meldet
-                // caps.e2e=false). Das ehrlich anzeigen statt zu schoenen.
-                e2e: false,
+                // Gruen nur, wenn WIRKLICH verschluesselt wird - also ein
+                // Schluessel da ist. Eine gruene Marke ohne Verschluesselung
+                // waere die schlimmste Sorte Luege.
+                e2e: n.e2e_an,
                 bandbreite,
                 leute,
                 wartende: z.wartende.clone(),
