@@ -2167,6 +2167,14 @@ struct App {
     pw_fixed: bool,
     /// Everyone we connected to before.
     book: partners::Book,
+    /// Freundesliste samt Abgleich mit dem Relay. Erst beim ersten Blick
+    /// auf die Seite gestartet - wer sie nie oeffnet, soll auch keinen
+    /// Hintergrundverkehr erzeugen.
+    freunde: Option<std::sync::Arc<freunde::Dienst>>,
+    /// Eingabefeld "FreeViewer-Nummer des Freundes".
+    freunde_id: String,
+    /// Letzte Rueckmeldung zum Freunde-System (Fehler oder Erfolg).
+    freunde_meldung: String,
     /// Store the password of the next connection?
     remember_pw: bool,
     /// Entry currently being renamed: (id, buffer).
@@ -2359,6 +2367,9 @@ impl App {
             hint: String::new(),
             pw_fixed: ident::has_fixed_password(),
             book: partners::Book::load(),
+            freunde: None,
+            freunde_id: String::new(),
+            freunde_meldung: String::new(),
             remember_pw: false,
             renaming: None,
             session: None,
@@ -2913,12 +2924,25 @@ impl App {
                 );
             });
             ui.add_space(10.0);
+            // Der Zaehler an "Freunde" ist wichtig: eine Freundschafts-
+            // anfrage, die niemand sieht, ist keine Anfrage.
+            let offen = self
+                .freunde
+                .as_ref()
+                .map(|d| d.eingehende().len())
+                .unwrap_or(0);
+            let freunde_text = if offen > 0 {
+                format!("Freunde ({})", offen)
+            } else {
+                "Freunde".to_string()
+            };
             for (v, name) in [
-                (View::Start, i18n::t("nav.start")),
-                (View::Devices, i18n::t("nav.devices")),
-                (View::Settings, i18n::t("nav.settings")),
+                (View::Start, i18n::t("nav.start").to_string()),
+                (View::Devices, i18n::t("nav.devices").to_string()),
+                (View::Freunde, freunde_text),
+                (View::Settings, i18n::t("nav.settings").to_string()),
             ] {
-                if tab(ui, name, self.view == v).clicked() {
+                if tab(ui, &name, self.view == v).clicked() {
                     self.view = v;
                 }
             }
@@ -2940,6 +2964,7 @@ impl App {
         match self.view {
             View::Start => self.start_view(ui),
             View::Devices => self.devices_view(ui),
+            View::Freunde => self.freunde_view(ui),
             View::Meet => self.meet_view(ui),
             View::Settings => self.settings_view(ui),
 
@@ -4451,6 +4476,7 @@ if let Some(path) = self.shot.clone() {
                         View::Start => i18n::t("nav.start"),
                         View::Devices => i18n::t("nav.devices"),
                         View::Meet => i18n::t("nav.meet"),
+                        View::Freunde => "Freunde",
                         View::Settings => i18n::t("nav.settings"),
                     };
                     ui.label(egui::RichText::new(title).size(16.0).strong().color(p.text));
@@ -4496,6 +4522,303 @@ if let Some(path) = self.shot.clone() {
 
     /// Geräte: links die Ordner, in der Mitte die Liste, rechts das gewählte
     /// Gerät mit allem, was man daran einstellen kann.
+    /// Den Freunde-Dienst holen (und beim ersten Mal starten).
+    ///
+    /// Warum nicht schon beim Programmstart: das kostet alle 20 Sekunden
+    /// eine Anfrage an den Relay. Wer die Seite nie oeffnet, soll damit
+    /// auch nicht belastet werden.
+    fn freunde_dienst(&mut self) -> std::sync::Arc<freunde::Dienst> {
+        if let Some(d) = &self.freunde {
+            return d.clone();
+        }
+        let d = freunde::Dienst::vom_geraet(self.shared.relay_url.clone());
+        // Mit Konto ist die Liste geraeteuebergreifend, ohne Konto lokal -
+        // beides muss gehen, deshalb ist das Zeichen nur eine Zugabe.
+        if let Some(sess) = &self.acc {
+            d.konto_setzen(Some(&sess.token));
+        }
+        d.starten();
+        self.freunde = Some(d.clone());
+        d
+    }
+
+    /// Freunde: anfragen, bestaetigen, und dann mit EINEM Klick ins
+    /// Meeting oder in die Fernwartung.
+    ///
+    /// WARUM beidseitig: eine Freundschaft, die einer allein herstellen
+    /// kann, ist keine - sie waere nur eine Liste, in die sich jeder selbst
+    /// eintraegt. Der Relay setzt das durch, nicht dieses Fenster.
+    fn freunde_view(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette();
+        let d = self.freunde_dienst();
+        while let Some(m) = d.meldung() {
+            // Nur die Meldungen zeigen, die den Nutzer wirklich angehen.
+            self.freunde_meldung = match m {
+                // Der Abgleich laeuft alle 20 Sekunden - daraus jedes Mal
+                // eine Meldung zu machen waere reines Rauschen.
+                freunde::Meldung::Abgeglichen { .. } => continue,
+                freunde::Meldung::Angefragt(w) => {
+                    format!("Anfrage an {} ist raus.", w)
+                }
+                freunde::Meldung::SofortBefreundet(w) => {
+                    format!("{} hatte dich auch gefragt - ihr seid jetzt Freunde.", w)
+                }
+                freunde::Meldung::Angenommen(w) => format!("{} ist jetzt dein Freund.", w),
+                freunde::Meldung::Abgelehnt(w) => format!("Anfrage von {} abgelehnt.", w),
+                freunde::Meldung::Entfernt(w) => format!("{} entfernt.", w),
+                freunde::Meldung::Fehlgeschlagen(t) => t,
+            };
+        }
+
+        let mut verbinden: Option<String> = None;
+        let mut meeting_mit: Option<(String, String)> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Freunde")
+                    .size(19.0)
+                    .strong()
+                    .color(p.text),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (text, farbe) = if !d.verbunden() {
+                    ("Relay nicht erreicht", p.muted)
+                } else if d.angemeldet() {
+                    ("mit Konto – auf allen Geräten", p.accent)
+                } else {
+                    ("ohne Konto – nur dieses Gerät", p.muted)
+                };
+                ui.label(egui::RichText::new(text).size(11.0).color(farbe));
+            });
+        });
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(
+                "Eine Freundschaft gilt erst, wenn BEIDE zugestimmt haben. Danach genügt ein Klick.",
+            )
+            .size(11.0)
+            .color(p.muted),
+        );
+        ui.add_space(10.0);
+
+        // ------------------------------------------------ neue Anfrage
+        egui::Frame::NONE
+            .fill(p.card)
+            .stroke(egui::Stroke::new(1.0, p.line))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                label_small(ui, "FreeViewer-Nummer des Freundes");
+                ui.horizontal(|ui| {
+                    let feld = ui.add(
+                        egui::TextEdit::singleline(&mut self.freunde_id)
+                            .desired_width(190.0)
+                            .hint_text("497 628 420"),
+                    );
+                    let senden = ui.button("Anfrage senden").clicked()
+                        || (feld.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if senden {
+                        match d.anfragen(&self.freunde_id) {
+                            Ok(()) => {
+                                self.freunde_meldung = format!(
+                                    "Anfrage an {} unterwegs - sie gilt erst, wenn er zustimmt.",
+                                    partners::pretty_id(&freunde::normalisieren(&self.freunde_id))
+                                );
+                                self.freunde_id.clear();
+                            }
+                            Err(e) => self.freunde_meldung = format!("{}", e),
+                        }
+                    }
+                });
+                if !self.freunde_meldung.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(&self.freunde_meldung)
+                            .size(11.0)
+                            .color(p.muted),
+                    );
+                }
+            });
+        ui.add_space(10.0);
+
+        // ------------------------------------------------ offene Anfragen
+        let eingehend = d.eingehende();
+        let ausgehend = d.ausgehende();
+        if !eingehend.is_empty() || !ausgehend.is_empty() {
+            label_small(ui, "Anfragen");
+            for a in eingehend.iter() {
+                egui::Frame::NONE
+                    .fill(p.card_hi)
+                    .stroke(egui::Stroke::new(1.0, p.accent))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} möchte dein Freund sein", a.anzeige()))
+                                    .size(12.5)
+                                    .color(p.text),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Ablehnen").clicked() {
+                                        if let Err(e) = d.ablehnen(a.gegenueber()) {
+                                            self.freunde_meldung = format!("{}", e);
+                                        }
+                                    }
+                                    if ui.button("Annehmen").clicked() {
+                                        match d.annehmen(a.gegenueber()) {
+                                            Ok(()) => {
+                                                self.freunde_meldung =
+                                                    format!("{} ist jetzt dein Freund.", a.anzeige())
+                                            }
+                                            Err(e) => self.freunde_meldung = format!("{}", e),
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                        if !a.nachricht.is_empty() {
+                            ui.label(
+                                egui::RichText::new(if a.nachricht.chars().count() > 90 {
+                                    format!(
+                                        "{}…",
+                                        a.nachricht.chars().take(89).collect::<String>()
+                                    )
+                                } else {
+                                    a.nachricht.clone()
+                                })
+                                    .size(11.0)
+                                    .color(p.muted),
+                            );
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+            for a in ausgehend.iter() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("an {} – wartet auf Zustimmung", a.anzeige()))
+                            .size(11.5)
+                            .color(p.muted),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Zurücknehmen").clicked() {
+                            if let Err(e) = d.ablehnen(a.gegenueber()) {
+                                self.freunde_meldung = format!("{}", e);
+                            }
+                        }
+                    });
+                });
+            }
+            ui.add_space(10.0);
+        }
+
+        // ------------------------------------------------ die Liste
+        let liste = d.liste();
+        label_small(ui, "Deine Freunde");
+        if liste.is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Noch niemand. Schick oben eine Anfrage.")
+                    .size(12.0)
+                    .color(p.muted),
+            );
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for fr in liste.iter() {
+                egui::Frame::NONE
+                    .fill(p.card)
+                    .stroke(egui::Stroke::new(1.0, p.line))
+                    .corner_radius(10)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.painter().circle_filled(
+                                ui.cursor().min + egui::vec2(4.0, 9.0),
+                                4.0,
+                                if fr.online { p.accent } else { p.muted },
+                            );
+                            ui.add_space(14.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(fr.anzeige()).size(13.0).color(p.text),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} · {}",
+                                        partners::pretty_id(&fr.fvid),
+                                        fr.zuletzt()
+                                    ))
+                                    .size(10.5)
+                                    .color(p.muted),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("Entfernen").clicked() {
+                                        if let Err(e) = d.entfernen(&fr.fvid) {
+                                            self.freunde_meldung = format!("{}", e);
+                                        }
+                                    }
+                                    // Nur anbieten, was auch wirklich geht:
+                                    // eine Fernwartung zu einem offline
+                                    // Rechner waere ein Knopf ins Leere.
+                                    ui.add_enabled_ui(fr.erreichbar(), |ui| {
+                                        if ui
+                                            .button("Fernwartung")
+                                            .on_hover_text("Sofort verbinden – zulassen muss er es trotzdem")
+                                            .clicked()
+                                        {
+                                            verbinden = Some(fr.fvid.clone());
+                                        }
+                                    });
+                                    if ui
+                                        .button("Meeting")
+                                        .on_hover_text("Meeting anlegen und den Link in die Zwischenablage legen")
+                                        .clicked()
+                                    {
+                                        meeting_mit = Some((fr.fvid.clone(), fr.anzeige()));
+                                    }
+                                },
+                            );
+                        });
+                    });
+                ui.add_space(5.0);
+            }
+        });
+
+        if let Some(id) = verbinden {
+            self.view = View::Start;
+            self.hint = i18n::tf("link.control", &partners::pretty_id(&id));
+            self.connect_to(&id);
+        }
+        if let Some((_id, wer)) = meeting_mit {
+            // Ehrlich: der Link geht NICHT von selbst zum Freund - dafuer
+            // gaebe es heute keinen Weg im Relay. Er landet in der
+            // Zwischenablage, und das steht auch so da.
+            match meet::create(&format!("Mit {}", wer), false) {
+                Ok(m) => {
+                    let link = meet::invite(&m);
+                    ui.ctx().copy_text(link);
+                    meet::merken(&m);
+                    self.freunde_meldung = format!(
+                        "Meeting angelegt, Einladung kopiert - schick sie {} (z. B. per Chat).",
+                        wer
+                    );
+                    self.meet_win.meeting = Some(m);
+                    self.view = View::Meet;
+                }
+                Err(e) => self.freunde_meldung = format!("Meeting geht nicht: {}", e),
+            }
+        }
+    }
+
     fn devices_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         let all = self.book.sorted();
@@ -7642,6 +7965,9 @@ enum View {
     Meet,
     Start,
     Devices,
+    /// Freunde: beidseitig bestaetigt, danach ein Klick zu Meeting oder
+    /// Fernwartung.
+    Freunde,
     Settings,
 }
 
