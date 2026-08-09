@@ -39,6 +39,17 @@ pub struct NativMeet {
     kamera: Option<crate::meetcam::Kamera>,
     koder: Option<crate::meetvideo::Kodierer>,
     pub kamera_an: bool,
+    /// Statt der Kamera einen gezeichneten Avatar senden.
+    pub avatar_an: bool,
+    pub avatar: crate::avatar::Aussehen,
+    /// Geglaettete Mundstellung (0..1) - der rohe Pegel zappelt zu sehr.
+    avatar_mund: f32,
+    /// Zaehlt Bilder, daraus werden Blinzeln und Atmen abgeleitet.
+    avatar_takt: u64,
+    /// Bei welchem Takt das naechste Blinzeln faellig ist.
+    avatar_blinzelt: u64,
+    avatar_rgb: Vec<u8>,
+    avatar_nv12: Vec<u8>,
     /// Welche Geraete gerade benutzt werden (leer = Standard des Systems).
     /// WARUM gemerkt: nur so laesst sich im laufenden Meeting umschalten,
     /// ohne den Raum zu verlassen - genau wie im Browser-Client.
@@ -204,6 +215,13 @@ impl NativMeet {
             kamera: None,
             koder: None,
             kamera_an: false,
+            avatar_an: false,
+            avatar: crate::avatar::Aussehen::default(),
+            avatar_mund: 0.0,
+            avatar_takt: 0,
+            avatar_blinzelt: 90,
+            avatar_rgb: Vec::new(),
+            avatar_nv12: Vec::new(),
             e2e_an,
             grund_steht: false,
             kamera_geraet: None,
@@ -808,6 +826,10 @@ impl NativMeet {
         if jetzt < self.naechstes_bild {
             return;
         }
+        if self.avatar_an {
+            self.avatar_pumpe(jetzt);
+            return;
+        }
         let (kam, kod) = match (self.kamera.as_ref(), self.koder.as_mut()) {
             (Some(k), Some(c)) => (k, c),
             _ => return,
@@ -853,8 +875,119 @@ impl NativMeet {
         }
     }
 
+    /// Den Avatar zeichnen und wie ein Kamerabild verschicken.
+    ///
+    /// Der Mund folgt dem eigenen Mikrofonpegel, den das Meeting ohnehin
+    /// misst. Blinzeln kommt in unregelmaessigen Abstaenden, dazu eine
+    /// leichte Atembewegung - ohne das wirkt ein Standbild wie ein
+    /// Abwesenheitsschild.
+    fn avatar_pumpe(&mut self, jetzt: std::time::Instant) {
+        let Some(kod) = self.koder.as_mut() else { return };
+        // 20 Bilder je Sekunde reichen: der Avatar hat wenig Bewegung, und
+        // er soll keine Rechenzeit fressen.
+        self.naechstes_bild = jetzt + std::time::Duration::from_millis(50);
+        self.avatar_takt += 1;
+        let t = self.avatar_takt;
+        self.avatar_mund = crate::avatar::mundstellung(self.pegel, self.avatar_mund);
+        // Ein Blinzeln dauert drei Bilder, danach kommt das naechste in
+        // 2 bis 6 Sekunden - regelmaessiges Blinzeln wirkt mechanisch.
+        let blinzeln = if t >= self.avatar_blinzelt && t < self.avatar_blinzelt + 3 {
+            let i = (t - self.avatar_blinzelt) as f32;
+            1.0 - (i - 1.0).abs()
+        } else {
+            if t >= self.avatar_blinzelt + 3 {
+                // Aus dem Takt selbst einen unregelmaessigen Abstand
+                // ableiten - dafuer braucht es keine Zufallskiste.
+                let streu = (t.wrapping_mul(2654435761) % 80) as u64;
+                self.avatar_blinzelt = t + 40 + streu;
+            }
+            0.0
+        };
+        let atmen = (t as f32 * 0.06).sin();
+        let (b, h) = (crate::meetvideo::BREITE, crate::meetvideo::HOEHE);
+        crate::avatar::zeichnen(
+            &self.avatar,
+            b,
+            h,
+            self.avatar_mund,
+            blinzeln.clamp(0.0, 1.0),
+            atmen,
+            &mut self.avatar_rgb,
+        );
+        if !crate::meetcam::rgb_nach_nv12(&self.avatar_rgb, b, h, b, h, &mut self.avatar_nv12) {
+            return;
+        }
+        match kod.nv12_rahmen(&self.avatar_nv12) {
+            Ok(teile) => {
+                for teil in teile {
+                    self.ton.bild_senden(teil.data);
+                }
+                self.bild_gesendet += 1;
+            }
+            Err(e) => self.kamera_meldung = format!("Kodierer: {}", e),
+        }
+        // Eigene Vorschau: der Avatar ist genau das, was die anderen sehen.
+        let mut rgba = Vec::with_capacity((b * h * 4) as usize);
+        for p in self.avatar_rgb.chunks_exact(3) {
+            rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
+        }
+        self.eigen = Some((b, h, rgba));
+        self.eigen_stand += 1;
+    }
+
+    /// Avatar statt Kamera. Schaltet die Kamera dabei wirklich ab - sonst
+    /// liefe sie unsichtbar weiter, und die Leuchte daneben auch.
+    pub fn avatar_schalten(&mut self, an: bool) {
+        if an == self.avatar_an {
+            return;
+        }
+        if an {
+            if self.kamera.is_some() {
+                if let Some(k) = self.kamera.take() {
+                    k.stoppen();
+                }
+            }
+            if self.koder.is_none() {
+                match crate::meetvideo::Kodierer::neu(
+                    crate::meetvideo::BREITE,
+                    crate::meetvideo::HOEHE,
+                    20,
+                    1_200_000,
+                ) {
+                    Ok(c) => self.koder = Some(c),
+                    Err(e) => {
+                        self.kamera_meldung = format!("Kein Kodierer: {}", e);
+                        return;
+                    }
+                }
+            }
+            self.avatar_an = true;
+            self.kamera_an = true;
+            self.kamera_meldung = "Avatar statt Kamera".into();
+        } else {
+            self.avatar_an = false;
+            self.koder = None;
+            self.eigen = None;
+            self.eigen_stand += 1;
+            self.kamera_an = false;
+            self.kamera_meldung = String::new();
+        }
+        if self.video_gemeldet {
+            self.sig.stumm("video", !self.kamera_an);
+        }
+    }
+
+    /// Aussehen des Avatars aendern (wirkt beim naechsten Bild).
+    pub fn avatar_setzen(&mut self, a: crate::avatar::Aussehen) {
+        self.avatar = a;
+    }
+
     /// Kamera an- oder ausschalten.
     pub fn kamera_schalten(&mut self, an: bool) {
+        // Kamera und Avatar schliessen sich aus - es gibt nur eine Bildspur.
+        if an && self.avatar_an {
+            self.avatar_schalten(false);
+        }
         if an {
             if self.kamera.is_some() {
                 return;

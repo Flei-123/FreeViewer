@@ -38,6 +38,7 @@ mod meetvideo;
 #[cfg(windows)]
 mod camdshow;
 mod meetcam;
+mod avatar;
 mod fenster;
 mod meetschirm;
 mod input;
@@ -4083,6 +4084,8 @@ impl App {
                 monitore: self.meet_win.monitore.clone(),
                 fenster: self.meet_win.fenster.clone(),
                 rahmen_an: n.rahmen_an,
+                avatar_an: n.avatar_an,
+                avatar: n.avatar,
                 sperre_an: n.sperre_an,
                 sperre_staerke: n.sperre_staerke,
                 sperre_offen: n.sperre_offen(),
@@ -4204,6 +4207,8 @@ impl App {
                 }
                 meetfenster::Aktion::Rahmen(v) => n.rahmen_schalten(v),
                 meetfenster::Aktion::Rauschsperre(an, st) => n.rauschsperre_setzen(an, st),
+                meetfenster::Aktion::Avatar(v) => n.avatar_schalten(v),
+                meetfenster::Aktion::AvatarAussehen(a) => n.avatar_setzen(a),
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
                 meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
                 meetfenster::Aktion::SteuerungAnfragen => n.steuerung_anfragen(),

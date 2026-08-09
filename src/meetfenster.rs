@@ -207,6 +207,9 @@ pub struct Sicht {
     pub sperre_grund: f32,
     /// Ausschlag des eigenen Mikrofons (0..1) - fuer den Pegelbalken.
     pub eigener_pegel: f32,
+    /// Avatar statt Kamerabild - an und wie er aussieht.
+    pub avatar_an: bool,
+    pub avatar: crate::avatar::Aussehen,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -321,6 +324,10 @@ pub enum Aktion {
     Rahmen(bool),
     /// Rauschsperre: an/aus und Strenge (0..100).
     Rauschsperre(bool, u8),
+    /// Avatar statt Kamera an/aus.
+    Avatar(bool),
+    /// Aussehen des Avatars aendern.
+    AvatarAussehen(crate::avatar::Aussehen),
     /// Als Zuschauer den Teilenden um die Steuerung bitten.
     SteuerungAnfragen,
     /// Als Teilender ueber eine Anfrage entscheiden.
@@ -668,6 +675,25 @@ fn rund(
 }
 
 /// Kleiner Knopf in Listen ("Einlassen", "Steuern").
+/// Ein kleiner Farbfleck zum Anklicken. Der Gewaehlte bekommt einen Ring -
+/// ohne den weiss niemand, welcher gerade gilt.
+fn farbtupfer(ui: &mut egui::Ui, farbe: [u8; 3], gewaehlt: bool, f: &Farben) -> bool {
+    let (r, antwort) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::click());
+    let c = Color32::from_rgb(farbe[0], farbe[1], farbe[2]);
+    ui.painter().circle_filled(r.center(), 8.0, c);
+    if gewaehlt {
+        ui.painter()
+            .circle_stroke(r.center(), 9.5, egui::Stroke::new(2.0, f.p.accent));
+    } else if antwort.hovered() {
+        ui.painter()
+            .circle_stroke(r.center(), 9.5, egui::Stroke::new(1.0, f.p.line));
+    }
+    if antwort.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    antwort.clicked()
+}
+
 fn mini(ui: &mut egui::Ui, f: &Farben, text: &str, betont: bool) -> egui::Response {
     let knopf = egui::Button::new(
         egui::RichText::new(text)
@@ -1811,6 +1837,88 @@ fn einstellungen(
                         kurz(&s.ton_aus, 20)
                     ))
                     .size(10.5)
+                    .color(f.p.muted),
+                );
+            }
+            ui.add_space(10.0);
+
+            // ---------------------------------------------------- Avatar
+            feld_beschriftung(ui, f, Some("user"), "Avatar statt Kamera");
+            let mut av = s.avatar_an;
+            if ui
+                .checkbox(&mut av, "Gezeichnetes Gesicht senden (Mund folgt der Stimme)")
+                .changed()
+            {
+                aktionen.push(Aktion::Avatar(av));
+            }
+            if s.avatar_an {
+                let mut a = s.avatar;
+                let mut geaendert = false;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Haut").size(11.0).color(f.p.muted));
+                    for i in 0..crate::avatar::HAUTTOENE.len() as u8 {
+                        if farbtupfer(ui, crate::avatar::HAUTTOENE[i as usize], a.haut == i, f) {
+                            a.haut = i;
+                            geaendert = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Haare").size(11.0).color(f.p.muted));
+                    for i in 0..crate::avatar::HAARFARBEN.len() as u8 {
+                        if farbtupfer(ui, crate::avatar::HAARFARBEN[i as usize], a.haar == i, f) {
+                            a.haar = i;
+                            geaendert = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Frisur").size(11.0).color(f.p.muted));
+                    for (i, name) in crate::avatar::HAARFORMEN.iter().enumerate() {
+                        if mini(ui, f, name, a.form == i as u8).clicked() {
+                            a.form = i as u8;
+                            geaendert = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Augen").size(11.0).color(f.p.muted));
+                    for i in 0..crate::avatar::AUGENFARBEN.len() as u8 {
+                        if farbtupfer(ui, crate::avatar::AUGENFARBEN[i as usize], a.augen == i, f) {
+                            a.augen = i;
+                            geaendert = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Hintergrund").size(11.0).color(f.p.muted));
+                    for i in 0..crate::avatar::GRUNDFARBEN.len() as u8 {
+                        if farbtupfer(ui, crate::avatar::GRUNDFARBEN[i as usize], a.grund == i, f) {
+                            a.grund = i;
+                            geaendert = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let mut brille = a.brille;
+                    if ui.checkbox(&mut brille, "Brille").changed() {
+                        a.brille = brille;
+                        geaendert = true;
+                    }
+                    let mut bart = a.bart;
+                    if ui.checkbox(&mut bart, "Bart").changed() {
+                        a.bart = bart;
+                        geaendert = true;
+                    }
+                });
+                if geaendert {
+                    aktionen.push(Aktion::AvatarAussehen(a));
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Die Lippen folgen der Lautstärke, nicht dem Wortlaut - mehr kann ohne Modell niemand.",
+                    )
+                    .size(10.0)
                     .color(f.p.muted),
                 );
             }
@@ -3107,6 +3215,8 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             sperre_offen: true,
             sperre_grund: 0.004,
             eigener_pegel: 0.2,
+            avatar_an: false,
+            avatar: crate::avatar::Aussehen::default(),
             steuer_anfragen: Vec::new(),
             steuer_erlaubt: Vec::new(),
             steuer_gefragt: false,
