@@ -266,7 +266,22 @@ impl Drop for Kamera {
 pub fn liste() -> Vec<Geraet> {
     #[cfg(windows)]
     {
-        win::liste()
+        // Media Foundation ist der Hauptweg und steht deshalb vorn.
+        // Danach kommt DirectShow: die OBS-Virtualkamera meldet sich NUR
+        // dort an und fehlte bisher komplett in der Liste. Was Media
+        // Foundation schon kennt, wird nicht doppelt aufgefuehrt - sonst
+        // stuenden Webcams zweimal da, und man waehlte den schlechteren
+        // der beiden Wege.
+        let mut aus = win::liste();
+        for g in crate::camdshow::liste() {
+            let doppelt = aus
+                .iter()
+                .any(|x| x.name.eq_ignore_ascii_case(&g.name));
+            if !doppelt {
+                aus.push(g);
+            }
+        }
+        aus
     }
     #[cfg(target_os = "macos")]
     {
@@ -294,9 +309,20 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
         let fehler = Arc::new(Mutex::new(String::new()));
         let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
         let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+        // Traegt die Kennung das DirectShow-Praefix, gehoert sie einer
+        // Quelle, die Media Foundation gar nicht kennt (OBS & Co.).
+        let ueber_dshow = id
+            .as_deref()
+            .is_some_and(|x| x.starts_with(crate::camdshow::PRAEFIX));
         std::thread::Builder::new()
             .name("kamera".into())
-            .spawn(move || win::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2))
+            .spawn(move || {
+                if ueber_dshow {
+                    crate::camdshow::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2)
+                } else {
+                    win::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2)
+                }
+            })
             .map_err(|e| anyhow!("Kamerafaden: {}", e))?;
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Ok(name)) => Ok(Kamera {

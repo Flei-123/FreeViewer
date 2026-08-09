@@ -101,6 +101,17 @@ pub struct NativMeet {
     ich_fvid: String,
     /// Stufe 4: Fernsteuerung fuer die anderen freigegeben?
     pub steuer_frei: bool,
+    /// Offene Steuerungsanfragen AN MICH: (Teilnehmer, Name). Kommen nur
+    /// an, solange ich wirklich teile - das prueft der Server.
+    steuer_anfragen: Vec<(u64, String)>,
+    /// Wem ich die Steuerung meines geteilten Bildschirms erlaubt habe.
+    /// GENAU diese Leute, nicht der ganze Raum.
+    steuer_erlaubt: Vec<u64>,
+    /// Ich habe selbst angefragt und warte auf die Entscheidung.
+    pub steuer_gefragt: bool,
+    /// Zusage bekommen: (Teilnehmer, FreeViewer-Nummer des Teilenden).
+    /// Erst damit laesst sich eine echte FreeViewer-Sitzung aufbauen.
+    steuer_zusage: Option<(u64, String)>,
     /// Wen der Server gerade als Sprecher meldet.
     pub sprecher: Option<u64>,
     /// Wie laut jeder andere gerade ist (0..1). Daraus wird die gruene
@@ -211,6 +222,10 @@ impl NativMeet {
             letztes_schluesselbild: std::time::Instant::now(),
             ich_fvid: fvid.to_string(),
             steuer_frei: steuerung && fvid.chars().any(|c| c.is_ascii_digit()),
+            steuer_anfragen: Vec::new(),
+            steuer_erlaubt: Vec::new(),
+            steuer_gefragt: false,
+            steuer_zusage: None,
             sprecher: None,
             pegel_von: std::collections::HashMap::new(),
             tippen: std::collections::HashSet::new(),
@@ -280,6 +295,12 @@ impl NativMeet {
                 meetsig::Ereignis::Weg(id) => {
                     self.bilder.vergessen(id);
                     self.schirme.vergessen(id);
+                    // Wer weg ist, fragt nichts mehr und darf nichts mehr.
+                    self.steuer_anfragen.retain(|(p, _)| *p != id);
+                    self.steuer_erlaubt.retain(|p| *p != id);
+                    if self.steuer_zusage.as_ref().map(|(p, _)| *p) == Some(id) {
+                        self.steuer_zusage = None;
+                    }
                     let name = self
                         .sig
                         .zustand()
@@ -320,6 +341,47 @@ impl NativMeet {
                         let wer = self.name_von(peer);
                         self.chat
                             .push((0, format!("{} erlaubt Fernsteuerung ({})", wer, fvid)));
+                    }
+                }
+                meetsig::Ereignis::SteuerungAngefragt { peer, name } => {
+                    // Doppelt gefragt ist nicht zweimal gefragt.
+                    if !self.steuer_anfragen.iter().any(|(id, _)| *id == peer) {
+                        self.steuer_anfragen.push((peer, name.clone()));
+                    }
+                    self.chat
+                        .push((0, format!("{} bittet um die Steuerung", name)));
+                }
+                meetsig::Ereignis::SteuerungBeantwortet {
+                    von,
+                    gewaehrt,
+                    fvid,
+                } => {
+                    self.steuer_gefragt = false;
+                    let wer = self.name_von(von);
+                    if gewaehrt {
+                        // Ohne Nummer ist die Zusage wertlos - dann lieber
+                        // ehrlich melden, statt einen Knopf anzubieten, der
+                        // ins Leere greift.
+                        if fvid.chars().any(|c| c.is_ascii_digit()) {
+                            self.steuer_zusage = Some((von, fvid));
+                            self.chat
+                                .push((0, format!("{} erlaubt dir die Steuerung", wer)));
+                        } else {
+                            self.meldung =
+                                format!("{} hat zugesagt, hat aber keine FreeViewer-Nummer", wer);
+                        }
+                    } else {
+                        self.steuer_zusage = None;
+                        self.chat
+                            .push((0, format!("{} hat die Steuerung abgelehnt", wer)));
+                    }
+                }
+                meetsig::Ereignis::SteuerungZurueck { .. } => {
+                    // Der Server schickt das nur an den Betroffenen - es
+                    // geht also immer um MEINE Freigabe.
+                    if self.steuer_zusage.take().is_some() {
+                        self.chat
+                            .push((0, "Die Steuerungsfreigabe wurde zurueckgenommen".into()));
                     }
                 }
                 meetsig::Ereignis::Zeiger { peer, x, y } => {
@@ -624,6 +686,14 @@ impl NativMeet {
             self.eigen_schirm = None;
             self.eigen_schirm_stand += 1;
             self.schirm_meldung = String::new();
+            // Wer nicht mehr teilt, gibt auch nichts mehr frei. Offene
+            // Anfragen sind gegenstandslos, erteilte Freigaben muessen weg -
+            // sonst bliebe eine Erlaubnis stehen, die niemand mehr sieht.
+            if !self.steuer_erlaubt.is_empty() {
+                self.steuer_erlaubt.clear();
+                self.sig.steuerung_zuruecknehmen(None);
+            }
+            self.steuer_anfragen.clear();
             self.sig.roh(serde_json::json!({"t":"screen","on":false}));
         }
     }
@@ -965,6 +1035,83 @@ impl NativMeet {
             self.chat
                 .push((0, "Du erlaubst jetzt Fernsteuerung".to_string()));
         }
+    }
+
+    /// Als Zuschauer: den Teilenden um die Steuerung bitten.
+    ///
+    /// Wir behaupten NICHT, wer teilt - das entscheidet der Server anhand
+    /// der Spuren. Teilt gerade niemand, kommt ein Fehler zurueck
+    /// ("kein-teilender"), und der landet in `meldung`.
+    pub fn steuerung_anfragen(&mut self) {
+        self.steuer_gefragt = true;
+        self.sig.steuerung_anfragen();
+        self.chat.push((0, "Du hast um die Steuerung gebeten".into()));
+    }
+
+    /// Als Teilender: eine Anfrage annehmen oder ablehnen.
+    pub fn steuerung_antworten(&mut self, peer: u64, ja: bool) {
+        self.steuer_anfragen.retain(|(p, _)| *p != peer);
+        // Ohne eigene Nummer kann der andere mit der Zusage nichts
+        // anfangen - dann lieber gleich sagen, woran es liegt, statt eine
+        // Freigabe vorzugaukeln.
+        if ja && self.ich_fvid.chars().filter(|c| c.is_ascii_digit()).count() == 0 {
+            self.meldung = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
+            self.sig.steuerung_beantworten(peer, false, "");
+            return;
+        }
+        self.sig.steuerung_beantworten(peer, ja, &self.ich_fvid);
+        if ja {
+            if !self.steuer_erlaubt.contains(&peer) {
+                self.steuer_erlaubt.push(peer);
+            }
+            let wer = self.name_von(peer);
+            self.chat.push((
+                0,
+                format!(
+                    "{} darf jetzt steuern - die Sitzung selbst musst du hier im Programm trotzdem zulassen",
+                    wer
+                ),
+            ));
+        }
+    }
+
+    /// Als Teilender: eine erteilte Freigabe wieder einziehen (None = alle).
+    pub fn steuerung_zuruecknehmen(&mut self, peer: Option<u64>) {
+        match peer {
+            Some(p) => self.steuer_erlaubt.retain(|x| *x != p),
+            None => self.steuer_erlaubt.clear(),
+        }
+        self.sig.steuerung_zuruecknehmen(peer);
+        self.chat
+            .push((0, "Steuerungsfreigabe zurueckgenommen".into()));
+    }
+
+    /// Offene Anfragen an mich (Teilnehmer, Name).
+    pub fn steuer_anfragen(&self) -> Vec<(u64, String)> {
+        self.steuer_anfragen.clone()
+    }
+
+    /// Wem ich es erlaubt habe (Teilnehmer, Name).
+    pub fn steuer_erlaubt(&self) -> Vec<(u64, String)> {
+        self.steuer_erlaubt
+            .iter()
+            .map(|p| (*p, self.name_von(*p)))
+            .collect()
+    }
+
+    /// Meine Zusage: (Name des Teilenden, seine FreeViewer-Nummer).
+    pub fn steuer_zusage(&self) -> Option<(String, String)> {
+        self.steuer_zusage
+            .as_ref()
+            .map(|(p, f)| (self.name_von(*p), f.clone()))
+    }
+
+    /// Teilt gerade jemand ANDERES? Nur dann lohnt der Anfrage-Knopf - sonst
+    /// waere er ein Versprechen, das der Server sofort mit "kein-teilender"
+    /// zurueckweist.
+    pub fn fremder_teilt(&self) -> bool {
+        let ich = self.sig.zustand().ich;
+        self.schirme.bilder.keys().any(|id| *id != ich)
     }
 
     /// Wer im Raum laesst sich fernsteuern? (Teilnehmer, Name, FreeViewer-Nr.)

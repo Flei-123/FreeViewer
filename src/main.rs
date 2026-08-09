@@ -34,6 +34,8 @@ mod meetaudio;
 mod meetui;
 mod meetfenster;
 mod meetvideo;
+#[cfg(windows)]
+mod camdshow;
 mod meetcam;
 mod meetschirm;
 mod input;
@@ -3998,6 +4000,11 @@ impl App {
                 schirm_an: n.schirm_an,
                 hand: n.hand,
                 steuer_frei: n.steuer_frei,
+                steuer_anfragen: n.steuer_anfragen(),
+                steuer_erlaubt: n.steuer_erlaubt(),
+                steuer_gefragt: n.steuer_gefragt,
+                steuer_zusage: n.steuer_zusage(),
+                fremd_schirm: n.fremder_teilt(),
                 schirme,
                 ungelesen,
                 tippen,
@@ -4143,6 +4150,9 @@ impl App {
                 }
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
                 meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
+                meetfenster::Aktion::SteuerungAnfragen => n.steuerung_anfragen(),
+                meetfenster::Aktion::SteuerungAntwort(id, ja) => n.steuerung_antworten(id, ja),
+                meetfenster::Aktion::SteuerungZurueck(p) => n.steuerung_zuruecknehmen(p),
                 meetfenster::Aktion::Senden(t) => {
                     n.eingabe = t;
                     n.senden();

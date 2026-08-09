@@ -107,6 +107,27 @@ pub enum Ereignis {
         peer: u64,
         fvid: String,
     },
+    /// Jemand bittet MICH um die Steuerung meines geteilten Bildschirms.
+    /// Kommt nur beim Teilenden an; der Server prueft anhand der Spuren,
+    /// wer wirklich teilt.
+    SteuerungAngefragt {
+        peer: u64,
+        name: String,
+    },
+    /// Antwort auf MEINE Anfrage. `von` = wer entschieden hat.
+    /// `fvid` ist bei einer Zusage die FreeViewer-Nummer des Teilenden -
+    /// ohne sie waere die Zusage folgenlos, weil der Client nicht wuesste,
+    /// wohin er sich verbinden soll. Bei einer Absage leer.
+    SteuerungBeantwortet {
+        von: u64,
+        gewaehrt: bool,
+        fvid: String,
+    },
+    /// Eine Freigabe wurde zurueckgenommen - entweder vom Teilenden oder
+    /// weil er das Teilen beendet hat.
+    SteuerungZurueck {
+        peer: u64,
+    },
     /// Wo steht der Mauszeiger dessen, der gerade teilt (0..1 in SEINEM
     /// Bild)? Damit kann ein Zuschauer genau dorthin zoomen.
     Zeiger {
@@ -262,6 +283,36 @@ impl Sitzung {
         let _ = self.befehle.send(Befehl::Roh(
             serde_json::json!({"t":"region-on","x":x,"y":y,"w":w,"h":h}),
         ));
+    }
+
+    /// Als Zuschauer: den Teilenden um die Steuerung bitten. Der Server
+    /// sucht sich selbst heraus, wer gerade teilt - wir muessen (und
+    /// koennen) das nicht behaupten.
+    pub fn steuerung_anfragen(&self) {
+        let _ = self
+            .befehle
+            .send(Befehl::Roh(serde_json::json!({"t":"control-request"})));
+    }
+
+    /// Als Teilender: eine Anfrage beantworten. `gewaehrt=false` lehnt ab.
+    /// `fvid` ist die EIGENE FreeViewer-Nummer; der Server reicht sie nur
+    /// an den Genehmigten weiter, nicht in den Raum.
+    pub fn steuerung_beantworten(&self, peer: u64, gewaehrt: bool, fvid: &str) {
+        let _ = self.befehle.send(Befehl::Roh(serde_json::json!({
+            "t": "control-answer",
+            "peer": peer,
+            "grant": gewaehrt,
+            "fvid": if gewaehrt { fvid } else { "" },
+        })));
+    }
+
+    /// Als Teilender: eine erteilte Freigabe wieder einziehen. `None` = alle.
+    pub fn steuerung_zuruecknehmen(&self, peer: Option<u64>) {
+        let mut v = serde_json::json!({"t":"control-revoke"});
+        if let (Some(p), Some(o)) = (peer, v.as_object_mut()) {
+            o.insert("peer".into(), serde_json::json!(p));
+        }
+        let _ = self.befehle.send(Befehl::Roh(v));
     }
 
     /// Fernsteuerung ueber FreeViewer anbieten (`an`) oder zuruecknehmen.
@@ -636,6 +687,22 @@ fn verarbeiten(
             }
             let _ = ev.send(Ereignis::Fernsteuerung { peer, fvid });
         }
+        "control-requested" => {
+            let _ = ev.send(Ereignis::SteuerungAngefragt {
+                peer: u64f("peer"),
+                name: strf("name"),
+            });
+        }
+        "control-answered" => {
+            let _ = ev.send(Ereignis::SteuerungBeantwortet {
+                von: u64f("by"),
+                gewaehrt: boolf("grant"),
+                fvid: strf("fvid"),
+            });
+        }
+        "control-revoked" => {
+            let _ = ev.send(Ereignis::SteuerungZurueck { peer: u64f("peer") });
+        }
         "waiting" => {
             if let Ok(mut z) = zustand.lock() {
                 z.im_warteraum = true;
@@ -811,6 +878,62 @@ mod tests {
         assert_eq!(v["v"], 1);
         assert_eq!(v["t"], "hand");
         assert_eq!(v["on"], true);
+    }
+
+    #[test]
+    fn steuerungsanfrage_kommt_als_ereignis_an() {
+        let (tx, rx) = channel();
+        let z = Arc::new(Mutex::new(Zustand::default()));
+        let v = json!({"v":1,"t":"control-requested","peer":9,"name":"Ben"});
+        assert!(!verarbeiten(&v, &tx, &z));
+        match rx.try_recv().unwrap() {
+            Ereignis::SteuerungAngefragt { peer, name } => {
+                assert_eq!(peer, 9);
+                assert_eq!(name, "Ben");
+            }
+            x => panic!("falsches Ereignis: {:?}", x),
+        }
+    }
+
+    #[test]
+    fn zusage_bringt_die_nummer_mit() {
+        // Ohne die Nummer waere eine Zusage folgenlos - der Client wuesste
+        // nicht, wohin er sich verbinden soll. Genau das muss ankommen.
+        let (tx, rx) = channel();
+        let z = Arc::new(Mutex::new(Zustand::default()));
+        let v = json!({"v":1,"t":"control-answered","by":4,"grant":true,"fvid":"497628420"});
+        assert!(!verarbeiten(&v, &tx, &z));
+        match rx.try_recv().unwrap() {
+            Ereignis::SteuerungBeantwortet { von, gewaehrt, fvid } => {
+                assert_eq!(von, 4);
+                assert!(gewaehrt);
+                assert_eq!(fvid, "497628420");
+            }
+            x => panic!("falsches Ereignis: {:?}", x),
+        }
+    }
+
+    #[test]
+    fn absage_kommt_ohne_nummer_an() {
+        let (tx, rx) = channel();
+        let z = Arc::new(Mutex::new(Zustand::default()));
+        let v = json!({"v":1,"t":"control-answered","by":4,"grant":false});
+        assert!(!verarbeiten(&v, &tx, &z));
+        match rx.try_recv().unwrap() {
+            Ereignis::SteuerungBeantwortet { gewaehrt, fvid, .. } => {
+                assert!(!gewaehrt);
+                assert!(fvid.is_empty(), "bei einer Absage darf keine Nummer kommen");
+            }
+            x => panic!("falsches Ereignis: {:?}", x),
+        }
+    }
+
+    #[test]
+    fn ruecknahme_kommt_an() {
+        let (tx, rx) = channel();
+        let z = Arc::new(Mutex::new(Zustand::default()));
+        assert!(!verarbeiten(&json!({"v":1,"t":"control-revoked","peer":3}), &tx, &z));
+        assert_eq!(rx.try_recv().unwrap(), Ereignis::SteuerungZurueck { peer: 3 });
     }
 
     #[test]

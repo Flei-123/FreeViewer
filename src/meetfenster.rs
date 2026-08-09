@@ -147,6 +147,16 @@ pub struct Sicht {
     pub schirm_an: bool,
     pub hand: bool,
     pub steuer_frei: bool,
+    /// Offene Steuerungsanfragen AN MICH: (Teilnehmer, Name).
+    pub steuer_anfragen: Vec<(u64, String)>,
+    /// Wem ich die Steuerung erlaubt habe: (Teilnehmer, Name).
+    pub steuer_erlaubt: Vec<(u64, String)>,
+    /// Meine eigene Anfrage laeuft noch.
+    pub steuer_gefragt: bool,
+    /// Zusage bekommen: (Name des Teilenden, seine FreeViewer-Nummer).
+    pub steuer_zusage: Option<(String, String)>,
+    /// Teilt gerade jemand ANDERES? Nur dann lohnt der Anfrage-Knopf.
+    pub fremd_schirm: bool,
     /// Wer teilt gerade einen Bildschirm: (Teilnehmer, Name).
     pub schirme: Vec<(u64, String)>,
     /// Ungelesene Chatnachrichten (Zaehler am Chat-Knopf).
@@ -284,6 +294,12 @@ pub enum Aktion {
     GeraeteNeuLesen,
     /// Diesen Bildschirm teilen (Index aus `Sicht::monitore`).
     SchirmWaehlen(usize),
+    /// Als Zuschauer den Teilenden um die Steuerung bitten.
+    SteuerungAnfragen,
+    /// Als Teilender ueber eine Anfrage entscheiden.
+    SteuerungAntwort(u64, bool),
+    /// Erteilte Freigabe zuruecknehmen (None = alle).
+    SteuerungZurueck(Option<u64>),
 }
 
 /// Der Beitritts-Schirm braucht Schreibzugriff (Name, Geraetewahl).
@@ -1326,6 +1342,9 @@ pub fn meeting_ui(
     if !s.wartende.is_empty() {
         lobby_leiste(ctx, s, z, &f, &mut aktionen);
     }
+    if !s.steuer_anfragen.is_empty() {
+        steuer_leiste(ctx, s, &f, &mut aktionen);
+    }
     if z.einstellungen_offen {
         einstellungen(ctx, s, z, &f, &mut aktionen);
     }
@@ -1504,17 +1523,57 @@ fn kopf(
                     {
                         z.pip = !z.pip;
                     }
-                    if ctl_klein(
-                        ui,
-                        f,
-                        "keyboard",
-                        "Andere dürfen diesen PC mit FreeViewer steuern",
-                        if s.steuer_frei { Ctl::An } else { Ctl::Normal },
-                        None,
-                    )
-                    .clicked()
+                    // Steuerung gibt es NUR auf Anfrage. Der alte Knopf
+                    // "fuer alle freigeben" ist weg: er hat den ganzen Raum
+                    // freigeschaltet, obwohl fast immer genau eine Person
+                    // gemeint war. Jetzt fragt, wer zusieht - und wer teilt,
+                    // entscheidet fuer genau diese eine Person.
+                    if let Some((wer, fvid)) = s.steuer_zusage.clone() {
+                        if ctl_klein(
+                            ui,
+                            f,
+                            "keyboard",
+                            &format!("{} jetzt steuern (FreeViewer {})", wer, fvid),
+                            Ctl::An,
+                            None,
+                        )
+                        .clicked()
+                        {
+                            aktionen.push(Aktion::Steuern(fvid, wer));
+                        }
+                    } else if s.fremd_schirm
+                        && ctl_klein(
+                            ui,
+                            f,
+                            "gamepad",
+                            if s.steuer_gefragt {
+                                "Anfrage läuft – warte auf Antwort"
+                            } else {
+                                "Steuerung des geteilten Bildschirms anfragen"
+                            },
+                            if s.steuer_gefragt { Ctl::An } else { Ctl::Normal },
+                            None,
+                        )
+                        .clicked()
+                        && !s.steuer_gefragt
                     {
-                        aktionen.push(Aktion::Steuerung(!s.steuer_frei));
+                        aktionen.push(Aktion::SteuerungAnfragen);
+                    }
+                    if !s.steuer_erlaubt.is_empty() {
+                        let namen: Vec<&str> =
+                            s.steuer_erlaubt.iter().map(|(_, n)| n.as_str()).collect();
+                        if ctl_klein(
+                            ui,
+                            f,
+                            "shield",
+                            &format!("{} darf steuern – Freigabe zurücknehmen", namen.join(", ")),
+                            Ctl::Gefahr,
+                            Some(s.steuer_erlaubt.len() as u32),
+                        )
+                        .clicked()
+                        {
+                            aktionen.push(Aktion::SteuerungZurueck(None));
+                        }
                     }
                     if ctl_klein(
                         ui,
@@ -2140,6 +2199,54 @@ fn reiter_info(ui: &mut egui::Ui, s: &Sicht, f: &Farben) {
 }
 
 /// Der Balken, der meldet, dass jemand vor der Tuer wartet.
+/// Die Frage beim TEILENDEN: "X moechte deinen Bildschirm steuern".
+///
+/// Warum eine eigene Leiste und kein Fenster: sie darf das Bild nicht
+/// verdecken, muss aber sofort ins Auge fallen - genau wie #ctrlLeiste im
+/// Browser. Sie bleibt stehen, bis entschieden ist; eine Anfrage, die von
+/// selbst verschwindet, waere schlimmer als keine.
+fn steuer_leiste(
+    ctx: &egui::Context,
+    s: &Sicht,
+    f: &Farben,
+    aktionen: &mut Vec<Aktion>,
+) {
+    // Unter die Warteraum-Leiste, sonst liegen beide uebereinander.
+    let oben = if s.wartende.is_empty() { 56.0 } else { 100.0 };
+    egui::Area::new(egui::Id::new("meet_steuerfrage"))
+        .anchor(egui::Align2::CENTER_TOP, vec2(0.0, oben))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            for (id, name) in s.steuer_anfragen.iter() {
+                egui::Frame::NONE
+                    .fill(f.p.card_hi)
+                    .stroke(egui::Stroke::new(1.0, f.p.accent))
+                    .corner_radius(20)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            symbol_klein(ui, "gamepad", f.p.accent);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} möchte deinen Bildschirm steuern",
+                                    name
+                                ))
+                                .size(12.5)
+                                .color(f.p.text),
+                            );
+                            if mini(ui, f, "Erlauben", true).clicked() {
+                                aktionen.push(Aktion::SteuerungAntwort(*id, true));
+                            }
+                            if mini(ui, f, "Ablehnen", false).clicked() {
+                                aktionen.push(Aktion::SteuerungAntwort(*id, false));
+                            }
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+        });
+}
+
 fn lobby_leiste(
     ctx: &egui::Context,
     s: &Sicht,
@@ -2783,6 +2890,11 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             });
         }
         Sicht {
+            steuer_anfragen: Vec::new(),
+            steuer_erlaubt: Vec::new(),
+            steuer_gefragt: false,
+            steuer_zusage: None,
+            fremd_schirm: false,
             raum: "482-913-770".into(),
             titel: "Wochenbesprechung".into(),
             gastgeber: true,
