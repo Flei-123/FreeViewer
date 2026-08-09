@@ -2261,6 +2261,9 @@ struct App {
     /// Geteilte Bildschirme: Teilnehmer -> (Stand, Textur). Eigener Speicher,
     /// weil ein Teilnehmer Kamera UND Bildschirm gleichzeitig schickt.
     nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
+    /// Ob im letzten Bild schon geteilt wurde - daran haengt das
+    /// automatische Minimieren und das kleine Fenster.
+    meet_teilt_war: bool,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
     /// Das eigene GETEILTE Bild - damit man selbst sieht, was man teilt.
@@ -2408,6 +2411,7 @@ impl App {
             nativ_meet: None,
             nativ_bilder: std::collections::HashMap::new(),
             nativ_schirme: std::collections::HashMap::new(),
+            meet_teilt_war: false,
             nativ_eigen: None,
             nativ_eigen_schirm: None,
             vorprobe: meetui::Vorprobe::default(),
@@ -4263,6 +4267,46 @@ impl App {
         if let Some(m) = schirm_fehler {
             self.meet_win.toast = Some((m, std::time::Instant::now()));
         }
+        // Beim Start der Freigabe: kleines Fenster auf, grosses Fenster
+        // aus dem Weg. Sonst teilt man sein eigenes Meetingfenster mit -
+        // der beruehmte Spiegelkabinett-Effekt - und sieht selbst niemanden
+        // mehr. Beim Beenden geht beides zurueck, aber NUR wenn wir es
+        // auch selbst veranlasst haben.
+        //
+        // WICHTIG: das grosse Fenster wird nur minimiert, nicht versteckt.
+        // Damit das kleine Fenster (ein Unterfenster desselben Programms)
+        // weiterlaeuft, wird waehrend der Freigabe ausdruecklich weiter
+        // neu gezeichnet - ein minimiertes Fenster bekommt von Windows
+        // sonst keine Zeichenauftraege mehr.
+        let teilt_jetzt = self.nativ_meet.as_ref().map(|n| n.schirm_an).unwrap_or(false);
+        if teilt_jetzt != self.meet_teilt_war {
+            self.meet_teilt_war = teilt_jetzt;
+            if teilt_jetzt {
+                if !self.meet_z.pip {
+                    self.meet_z.pip = true;
+                    self.meet_z.pip_auto = true;
+                }
+                if !self.headless {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    self.meet_z.minimiert_auto = true;
+                }
+            } else {
+                if self.meet_z.pip_auto {
+                    self.meet_z.pip = false;
+                    self.meet_z.pip_auto = false;
+                }
+                if self.meet_z.minimiert_auto {
+                    self.meet_z.minimiert_auto = false;
+                    if !self.headless {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                }
+            }
+        }
+        if teilt_jetzt {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        }
         if let Some((fvid, wer)) = steuern_zu {
             // Aus dem Meeting heraus direkt in die Sitzung: Hauptfenster nach
             // vorn, Start-Seite, verbinden.
@@ -4280,6 +4324,17 @@ impl App {
             self.nativ_eigen = None;
             self.meet_win.beigetreten = false;
             self.meet_z.pip = false;
+            self.meet_z.pip_auto = false;
+            // Wer waehrend der Freigabe auflegt, saesse sonst vor einem
+            // minimierten Fenster und wuesste nicht, wohin das Programm ist.
+            if self.meet_z.minimiert_auto {
+                self.meet_z.minimiert_auto = false;
+                if !self.headless {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
+            self.meet_teilt_war = false;
             self.meet_kam_start = None;
         }
     }

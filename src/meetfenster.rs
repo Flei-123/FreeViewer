@@ -228,6 +228,12 @@ pub struct Fensterzustand {
     pub schirmwahl_offen: bool,
     /// Im Bild-im-Bild auch die EIGENE Kamera zeigen.
     pub pip_selbst: bool,
+    /// Das kleine Fenster wurde beim Teilen AUTOMATISCH geoeffnet - dann
+    /// darf es beim Beenden auch von selbst wieder zugehen. Ein von Hand
+    /// geoeffnetes Fenster bleibt dagegen stehen.
+    pub pip_auto: bool,
+    /// Beim Teilen wurde das grosse Fenster automatisch minimiert.
+    pub minimiert_auto: bool,
     /// Vergroesserung im geteilten Bildschirm (1.0 = alles).
     pub zoom: f32,
     pub zoomanker: Zoomanker,
@@ -258,6 +264,8 @@ impl Default for Fensterzustand {
             // Sich selbst im kleinen Fenster sehen ist der Normalfall - beim
             // Bildschirmteilen will man ja pruefen, ob die Kamera laeuft.
             pip_selbst: true,
+            pip_auto: false,
+            minimiert_auto: false,
             zoom: 1.0,
             zoomanker: Zoomanker::Eigene,
             zoommitte: vec2(0.5, 0.5),
@@ -2936,8 +2944,87 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
         x += gr + luecke;
     }
 
+    // --- Hinweise rechts unten, ueber der Leiste ---
+    //
+    // WARUM hier und nicht im grossen Fenster: wer teilt, hat das grosse
+    // Fenster minimiert (sonst teilt er sich selbst). Ohne diese Hinweise
+    // bekaeme er weder Chatnachrichten noch Steuerungs- oder
+    // Beitrittsanfragen mit - die Anfrage liefe ins Leere.
+    //
+    // WICHTIG: sie stehen im MINI-Fenster, nicht ueber dem geteilten Bild.
+    // Sonst laese der halbe Raum die private Chatnachricht mit.
+    let mut hinweise: Vec<(String, Option<(Aktion, Aktion)>)> = Vec::new();
+    for (id, name) in s.steuer_anfragen.iter() {
+        hinweise.push((
+            format!("{} möchte steuern", kurz(name, 18)),
+            Some((
+                Aktion::SteuerungAntwort(*id, true),
+                Aktion::SteuerungAntwort(*id, false),
+            )),
+        ));
+    }
+    for (id, name) in s.wartende.iter() {
+        hinweise.push((
+            format!("{} wartet vor der Tür", kurz(name, 16)),
+            Some((Aktion::Einlassen(*id), Aktion::Abweisen(*id))),
+        ));
+    }
+    if s.ungelesen > 0 {
+        if let Some(z) = s.chat.iter().rev().find(|z| !z.eigen) {
+            hinweise.push((
+                format!("{}: {}", kurz(&z.name, 12), kurz(&z.text, 26)),
+                None,
+            ));
+        }
+    }
+    // Hoechstens drei - mehr wuerde das kleine Fenster zumauern.
+    hinweise.truncate(3);
+    let mut hin_hoehe = 0.0;
+    if !hinweise.is_empty() {
+        let zeile = 46.0;
+        hin_hoehe = hinweise.len() as f32 * zeile + 6.0;
+        let bereich = Rect::from_min_max(
+            pos2(flaeche.left() + 6.0, leiste.top() - hin_hoehe),
+            pos2(flaeche.right() - 6.0, leiste.top() - 4.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(bereich)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                for (text, knoepfe) in hinweise.iter() {
+                    egui::Frame::NONE
+                        .fill(f.p.card_hi)
+                        .stroke(egui::Stroke::new(1.0, f.p.accent))
+                        .corner_radius(9)
+                        .inner_margin(egui::Margin::symmetric(7, 4))
+                        .show(ui, |ui| {
+                            ui.set_width(bereich.width() - 14.0);
+                            ui.label(
+                                egui::RichText::new(text).size(10.5).color(f.p.text),
+                            );
+                            if let Some((ja, nein)) = knoepfe {
+                                ui.horizontal(|ui| {
+                                    if mini(ui, &f, "Erlauben", true).clicked() {
+                                        aktionen.push(ja.clone());
+                                    }
+                                    if mini(ui, &f, "Ablehnen", false).clicked() {
+                                        aktionen.push(nein.clone());
+                                    }
+                                });
+                            }
+                        });
+                }
+            },
+        );
+    }
+
     // --- Kacheln darueber ---
-    let oben = Rect::from_min_max(flaeche.min, pos2(flaeche.right(), leiste.top()));
+    let oben = Rect::from_min_max(
+        flaeche.min,
+        pos2(flaeche.right(), leiste.top() - hin_hoehe),
+    );
     if zeigen.is_empty() {
         ui.painter().text(
             oben.center(),
