@@ -264,6 +264,135 @@ impl Echo {
 /// Jeder Teilnehmer bekommt eine eigene Warteschlange - Pakete kommen nie
 /// gleichmaessig an. Der Mischer nimmt, was da ist, und fuellt fehlende
 /// Stellen mit Stille auf, statt zu knacksen.
+/// Rauschsperre fuers Mikrofon ("noise gate").
+///
+/// WARUM ueberhaupt: bisher ging JEDES Geraeusch raus - Luefter, Tastatur,
+/// die Strasse. In einer Runde mit acht Leuten summiert sich das zu einem
+/// Rauschteppich, durch den niemand mehr angenehm reden kann.
+///
+/// Das Grundrauschen wird SELBST geschaetzt, nicht vom Nutzer erfragt:
+/// jeder Raum ist anders, und niemand kann in Dezibel angeben, wie laut
+/// sein Kuehlschrank ist. Die Schaetzung faellt schnell (leiser Raum wird
+/// sofort erkannt) und steigt sehr langsam - sonst wuerde eine lange
+/// Wortmeldung nach und nach als "Grundrauschen" durchgehen und die Sperre
+/// wuerde sich selbst zudrehen.
+///
+/// Zwei Dinge, die den Unterschied zwischen "brauchbar" und "unbenutzbar"
+/// machen:
+/// * **Nachlaufzeit.** Nach dem letzten lauten Rahmen bleibt das Tor noch
+///   rund 300 ms offen. Ohne das schneidet die Sperre die leisen Ausklaenge
+///   von Woertern ab, und man klingt abgehackt.
+/// * **Weiche Rampen.** Auf- und Zublenden ueber ein paar Millisekunden.
+///   Ein hartes Umschalten erzeugt ein hoerbares Knacken.
+#[derive(Debug, Clone)]
+pub struct Rauschsperre {
+    /// Geschaetztes Grundrauschen als Effektivwert (0..1).
+    grund: f32,
+    /// Aktuelle Durchlassstaerke (0 = zu, 1 = offen).
+    verstaerkung: f32,
+    /// Wie viele Rahmen das Tor noch offen bleibt.
+    nachlauf: u32,
+    /// Die ersten Rahmen dienen nur dem Einmessen.
+    einmessen: u32,
+    /// Stand fuer die Anzeige.
+    offen: bool,
+}
+
+impl Default for Rauschsperre {
+    fn default() -> Self {
+        Self::neu()
+    }
+}
+
+impl Rauschsperre {
+    /// So viele 20-ms-Rahmen bleibt das Tor nach dem letzten Ton offen.
+    const NACHLAUF: u32 = 15; // 300 ms
+    /// So lange (Rahmen) wird nur gemessen und alles durchgelassen.
+    const EINMESSEN: u32 = 25; // 500 ms
+
+    pub fn neu() -> Rauschsperre {
+        Rauschsperre {
+            grund: 0.0,
+            verstaerkung: 1.0,
+            nachlauf: 0,
+            einmessen: Self::EINMESSEN,
+            offen: true,
+        }
+    }
+
+    /// Einen Rahmen durchlassen, daempfen oder sperren - an Ort und Stelle.
+    ///
+    /// `staerke` 0..100: 0 laesst fast alles durch, 100 ist streng.
+    /// Rueckgabe: ob gerade durchgelassen wird (fuer die Anzeige).
+    pub fn rahmen(&mut self, pcm: &mut [f32], staerke: u8) -> bool {
+        if pcm.is_empty() {
+            return self.offen;
+        }
+        let quadrat: f32 = pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32;
+        let pegel = quadrat.sqrt();
+
+        // Grundrauschen nachfuehren: schnell nach unten, sehr langsam nach
+        // oben. Beim ersten Rahmen einfach uebernehmen, sonst braeuchte die
+        // Schaetzung Sekunden, um von 0 hochzukommen.
+        if self.einmessen == Self::EINMESSEN {
+            self.grund = pegel;
+        } else if pegel < self.grund {
+            self.grund = self.grund * 0.85 + pegel * 0.15;
+        } else {
+            self.grund = self.grund * 0.9995 + pegel * 0.0005;
+        }
+        if self.einmessen > 0 {
+            self.einmessen -= 1;
+            self.offen = true;
+            return true;
+        }
+
+        let s = (staerke.min(100) as f32) / 100.0;
+        // Abstand zum Grundrauschen: das Doppelte bis das Achtfache.
+        let faktor = 2.0 + s * 6.0;
+        // Absolute Untergrenze - in einem voellig stillen Raum ginge der
+        // Faktor sonst gegen null und die Sperre waere wirkungslos.
+        let mindest = 0.0015 + s * 0.010;
+        let schwelle = (self.grund * faktor).max(mindest);
+
+        if pegel > schwelle {
+            self.nachlauf = Self::NACHLAUF;
+        } else if self.nachlauf > 0 {
+            self.nachlauf -= 1;
+        }
+        let ziel = if self.nachlauf > 0 { 1.0 } else { 0.0 };
+        self.offen = ziel > 0.5;
+
+        // Weiche Rampe je Abtastwert: aufblenden schneller als zublenden.
+        let schritt = if ziel > self.verstaerkung {
+            1.0 / (0.008 * 48000.0) // ~8 ms
+        } else {
+            1.0 / (0.040 * 48000.0) // ~40 ms
+        };
+        for v in pcm.iter_mut() {
+            if (self.verstaerkung - ziel).abs() > f32::EPSILON {
+                if ziel > self.verstaerkung {
+                    self.verstaerkung = (self.verstaerkung + schritt).min(ziel);
+                } else {
+                    self.verstaerkung = (self.verstaerkung - schritt).max(ziel);
+                }
+            }
+            *v *= self.verstaerkung;
+        }
+        self.offen
+    }
+
+    /// Geschaetztes Grundrauschen (0..1) - fuer die Anzeige.
+    pub fn grundrauschen(&self) -> f32 {
+        self.grund
+    }
+
+    /// Laesst die Sperre gerade durch?
+    pub fn durchlass(&self) -> bool {
+        self.offen
+    }
+}
+
 #[derive(Default)]
 pub struct Mischer {
     puffer: HashMap<u64, std::collections::VecDeque<i16>>,
@@ -368,6 +497,14 @@ pub struct Geraete {
     /// Was der Lautsprecher spielen soll (wird gemischt).
     pub lautsprecher: Arc<Mutex<Mischer>>,
     pub stumm: Arc<AtomicBool>,
+    /// Rauschsperre an? Wird im laufenden Betrieb umgeschaltet.
+    pub sperre_an: Arc<AtomicBool>,
+    /// Strenge der Rauschsperre, 0..100.
+    pub sperre_staerke: Arc<std::sync::atomic::AtomicU32>,
+    /// Nur Anzeige: laesst die Sperre gerade durch?
+    pub sperre_offen: Arc<AtomicBool>,
+    /// Nur Anzeige: geschaetztes Grundrauschen * 10000.
+    pub sperre_grund: Arc<std::sync::atomic::AtomicU32>,
     ende: Arc<AtomicBool>,
     pub eingang: String,
     pub ausgang: String,
@@ -387,6 +524,13 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     let mischer = Arc::new(Mutex::new(Mischer::neu()));
     let stumm = Arc::new(AtomicBool::new(false));
     let ende = Arc::new(AtomicBool::new(false));
+    // Standardmaessig AN: ein Rauschteppich faellt jedem auf, eine leicht
+    // zu streng eingestellte Sperre nur dem Sprecher selbst - und der kann
+    // sie in den Einstellungen sofort abschalten.
+    let sperre_an = Arc::new(AtomicBool::new(true));
+    let sperre_staerke = Arc::new(std::sync::atomic::AtomicU32::new(45));
+    let sperre_offen = Arc::new(AtomicBool::new(true));
+    let sperre_grund = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     // Namen vorab bestimmen, damit die Oberflaeche sie anzeigen kann.
     let host = cpal::default_host();
@@ -412,10 +556,16 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     let m2 = mischer.clone();
     let s2 = stumm.clone();
     let e2 = ende.clone();
+    let sp = Sperrgriffe {
+        an: sperre_an.clone(),
+        staerke: sperre_staerke.clone(),
+        offen: sperre_offen.clone(),
+        grund: sperre_grund.clone(),
+    };
     std::thread::Builder::new()
         .name("meetaudio".into())
         .spawn(move || {
-            if let Err(e) = geraete_faden(ein_dev, aus_dev, mik_tx, m2, s2, e2) {
+            if let Err(e) = geraete_faden(ein_dev, aus_dev, mik_tx, m2, s2, e2, sp) {
                 eprintln!("Ton-Geraete: {}", e);
             }
         })?;
@@ -424,10 +574,22 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
         mikro: mik_rx,
         lautsprecher: mischer,
         stumm,
+        sperre_an,
+        sperre_staerke,
+        sperre_offen,
+        sperre_grund,
         ende,
         eingang: ein_name_echt,
         ausgang: aus_name_echt,
     })
+}
+
+/// Die Griffe an der Rauschsperre, wie der Tonfaden sie sieht.
+struct Sperrgriffe {
+    an: Arc<AtomicBool>,
+    staerke: Arc<std::sync::atomic::AtomicU32>,
+    offen: Arc<AtomicBool>,
+    grund: Arc<std::sync::atomic::AtomicU32>,
 }
 
 fn geraete_faden(
@@ -437,6 +599,7 @@ fn geraete_faden(
     mischer: Arc<Mutex<Mischer>>,
     stumm: Arc<AtomicBool>,
     ende: Arc<AtomicBool>,
+    sperre: Sperrgriffe,
 ) -> anyhow::Result<()> {
     use cpal::traits::{DeviceTrait, StreamTrait};
 
@@ -519,6 +682,7 @@ fn geraete_faden(
     aus_stream.play()?;
 
     let mut echo = Echo::neu();
+    let mut sperr = Rauschsperre::neu();
     while !ende.load(Ordering::Relaxed) {
         // Ein 20-ms-Paar aus Mikrofon und Referenz holen.
         let mikro = {
@@ -541,7 +705,19 @@ fn geraete_faden(
                 vec![0.0; RAHMEN]
             }
         };
-        let sauber = echo.rahmen(&mikro, &referenz);
+        let mut sauber = echo.rahmen(&mikro, &referenz);
+        // Erst Echo weg, DANN die Rauschsperre: sonst wuerde das Echo als
+        // Nutzsignal gelten und das Tor sinnlos aufhalten.
+        if sperre.an.load(Ordering::Relaxed) {
+            let staerke = sperre.staerke.load(Ordering::Relaxed).min(100) as u8;
+            let durch = sperr.rahmen(&mut sauber, staerke);
+            sperre.offen.store(durch, Ordering::Relaxed);
+            sperre
+                .grund
+                .store((sperr.grundrauschen() * 10_000.0) as u32, Ordering::Relaxed);
+        } else {
+            sperre.offen.store(true, Ordering::Relaxed);
+        }
         let pcm = if stumm.load(Ordering::Relaxed) {
             vec![0i16; RAHMEN]
         } else {
@@ -571,6 +747,111 @@ pub fn geraete_liste() -> (Vec<String>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Ein Rahmen gleichmaessigen Rauschens einer bestimmten Staerke.
+    fn rauschen(staerke: f32, saat: &mut u32) -> Vec<f32> {
+        (0..960)
+            .map(|_| {
+                // Kleiner eigener Zufall - reproduzierbar, ohne Fremdkiste.
+                *saat = saat.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((*saat >> 8) as f32 / 8_388_608.0 - 1.0) * staerke
+            })
+            .collect()
+    }
+
+    /// Ein Rahmen "Sprache": ein kraeftiger Ton mit etwas Rauschen darauf.
+    fn sprache(t: &mut f32, saat: &mut u32) -> Vec<f32> {
+        (0..960)
+            .map(|_| {
+                *t += 1.0 / 48000.0;
+                *saat = saat.wrapping_mul(1664525).wrapping_add(1013904223);
+                let stoerung = ((*saat >> 8) as f32 / 8_388_608.0 - 1.0) * 0.01;
+                (2.0 * std::f32::consts::PI * 220.0 * *t).sin() * 0.25 + stoerung
+            })
+            .collect()
+    }
+
+    fn effektivwert(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn rauschsperre_daempft_stilles_rauschen_wirklich() {
+        let mut sp = Rauschsperre::neu();
+        let mut saat = 7u32;
+        // Erst zwei Sekunden Ruhe: einmessen + zudrehen.
+        let mut letzter = Vec::new();
+        for _ in 0..100 {
+            let mut r = rauschen(0.01, &mut saat);
+            sp.rahmen(&mut r, 50);
+            letzter = r;
+        }
+        let rest = effektivwert(&letzter);
+        assert!(
+            rest < 0.001,
+            "Rauschen wird nicht gedaempft: Effektivwert {rest}"
+        );
+        assert!(!sp.durchlass(), "Tor haette zu sein muessen");
+    }
+
+    #[test]
+    fn rauschsperre_laesst_sprache_durch() {
+        let mut sp = Rauschsperre::neu();
+        let (mut saat, mut t) = (7u32, 0.0f32);
+        for _ in 0..100 {
+            let mut r = rauschen(0.01, &mut saat);
+            sp.rahmen(&mut r, 50);
+        }
+        // Jetzt wird gesprochen - nach spaetestens 100 ms muss es durch.
+        let mut letzter = Vec::new();
+        for _ in 0..5 {
+            let mut r = sprache(&mut t, &mut saat);
+            sp.rahmen(&mut r, 50);
+            letzter = r;
+        }
+        let laut = effektivwert(&letzter);
+        assert!(laut > 0.15, "Sprache kommt nicht durch: Effektivwert {laut}");
+        assert!(sp.durchlass(), "Tor haette offen sein muessen");
+    }
+
+    #[test]
+    fn rauschsperre_schneidet_das_wortende_nicht_ab() {
+        // Der Nachlauf ist der Grund, warum es nicht abgehackt klingt.
+        let mut sp = Rauschsperre::neu();
+        let (mut saat, mut t) = (7u32, 0.0f32);
+        for _ in 0..100 {
+            let mut r = rauschen(0.01, &mut saat);
+            sp.rahmen(&mut r, 50);
+        }
+        for _ in 0..10 {
+            let mut r = sprache(&mut t, &mut saat);
+            sp.rahmen(&mut r, 50);
+        }
+        // Direkt nach dem letzten lauten Rahmen muss noch durchgelassen
+        // werden - sonst faellt das Ende jedes Wortes weg.
+        let mut r = rauschen(0.01, &mut saat);
+        sp.rahmen(&mut r, 50);
+        assert!(sp.durchlass(), "Nachlauf greift nicht");
+    }
+
+    #[test]
+    fn staerke_null_laesst_mehr_durch_als_staerke_hundert() {
+        // Der Regler muss auch wirklich etwas bewirken.
+        let mess = |staerke: u8| {
+            let mut sp = Rauschsperre::neu();
+            let mut saat = 7u32;
+            for _ in 0..60 {
+                let mut r = rauschen(0.01, &mut saat);
+                sp.rahmen(&mut r, staerke);
+            }
+            // Ein etwas lauteres Geraeusch - Tastaturklappern.
+            let mut r = rauschen(0.03, &mut saat);
+            sp.rahmen(&mut r, staerke);
+            sp.durchlass()
+        };
+        assert!(mess(0), "bei 0 muss das Klappern durchkommen");
+        assert!(!mess(100), "bei 100 darf das Klappern nicht durchkommen");
+    }
     use super::*;
 
     fn sinus(n: usize, hz: f32, amp: f32, phase: &mut f32) -> Vec<f32> {

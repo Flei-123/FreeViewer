@@ -69,6 +69,11 @@ pub struct NativMeet {
     /// Der rote Rahmen um das, was gerade rausgeht. Lebt genau so lange
     /// wie die Freigabe; beim Fallenlassen verschwindet er von selbst.
     rahmen: Option<crate::fenster::Rahmen>,
+    /// Rauschsperre: an? Und wie streng (0..100)? Wird hier mitgefuehrt,
+    /// damit ein Geraetewechsel die Einstellung nicht vergisst - die
+    /// Tongeraete werden dabei komplett neu aufgebaut.
+    pub sperre_an: bool,
+    pub sperre_staerke: u8,
     /// Soll ueberhaupt ein Rahmen gezeigt werden? Manche wollen ihn nicht.
     pub rahmen_an: bool,
     /// Wohin der Rahmen zuletzt gesetzt wurde - unnoetiges Verschieben
@@ -214,6 +219,8 @@ impl NativMeet {
             schirm_koder: None,
             schirm_an: false,
             rahmen: None,
+            sperre_an: true,
+            sperre_staerke: 45,
             rahmen_an: true,
             rahmen_lage: None,
             schirm_meldung: String::new(),
@@ -938,6 +945,12 @@ impl NativMeet {
             Ok(g) => {
                 g.stumm
                     .store(self.stumm, std::sync::atomic::Ordering::Relaxed);
+                g.sperre_an
+                    .store(self.sperre_an, std::sync::atomic::Ordering::Relaxed);
+                g.sperre_staerke.store(
+                    self.sperre_staerke as u32,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 self.meldung = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
                 self.protokoll.push(self.meldung.clone());
                 self.geraete = Some(g);
@@ -946,6 +959,39 @@ impl NativMeet {
                 self.meldung = format!("Kein Ton-Geraet: {}", e);
                 self.protokoll.push(self.meldung.clone());
             }
+        }
+    }
+
+    /// Rauschsperre einstellen. Wirkt sofort, ohne den Ton neu aufzubauen.
+    pub fn rauschsperre_setzen(&mut self, an: bool, staerke: u8) {
+        self.sperre_an = an;
+        self.sperre_staerke = staerke.min(100);
+        if let Some(g) = &self.geraete {
+            g.sperre_an.store(an, std::sync::atomic::Ordering::Relaxed);
+            g.sperre_staerke.store(
+                self.sperre_staerke as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Laesst die Rauschsperre gerade durch? Nur fuer die Anzeige - ohne
+    /// diese Rueckmeldung waere der Regler ein Blindflug.
+    pub fn sperre_offen(&self) -> bool {
+        match &self.geraete {
+            Some(g) => g.sperre_offen.load(std::sync::atomic::Ordering::Relaxed),
+            None => true,
+        }
+    }
+
+    /// Geschaetztes Grundrauschen (0..1) - macht sichtbar, WORAUF sich die
+    /// Sperre gerade eingestellt hat.
+    pub fn sperre_grundrauschen(&self) -> f32 {
+        match &self.geraete {
+            Some(g) => {
+                g.sperre_grund.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10_000.0
+            }
+            None => 0.0,
         }
     }
 

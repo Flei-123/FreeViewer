@@ -199,6 +199,14 @@ pub struct Sicht {
     pub fenster: Vec<(isize, String, String)>,
     /// Roter Rahmen um das Geteilte an?
     pub rahmen_an: bool,
+    /// Rauschsperre: an, Strenge 0..100, laesst gerade durch,
+    /// geschaetztes Grundrauschen (0..1).
+    pub sperre_an: bool,
+    pub sperre_staerke: u8,
+    pub sperre_offen: bool,
+    pub sperre_grund: f32,
+    /// Ausschlag des eigenen Mikrofons (0..1) - fuer den Pegelbalken.
+    pub eigener_pegel: f32,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -303,6 +311,8 @@ pub enum Aktion {
     FensterWaehlen(isize),
     /// Roten Rahmen um das Geteilte an-/abschalten.
     Rahmen(bool),
+    /// Rauschsperre: an/aus und Strenge (0..100).
+    Rauschsperre(bool, u8),
     /// Als Zuschauer den Teilenden um die Steuerung bitten.
     SteuerungAnfragen,
     /// Als Teilender ueber eine Anfrage entscheiden.
@@ -1798,6 +1808,61 @@ fn einstellungen(
             }
             ui.add_space(10.0);
 
+            // ---------------------------------------------- Rauschsperre
+            feld_beschriftung(ui, f, Some("shield"), "Rauschsperre");
+            let mut sperre = s.sperre_an;
+            if ui
+                .checkbox(&mut sperre, "Leises Rauschen nicht übertragen")
+                .changed()
+            {
+                aktionen.push(Aktion::Rauschsperre(sperre, s.sperre_staerke));
+            }
+            if s.sperre_an {
+                let mut st = s.sperre_staerke as f32;
+                let regler = ui.add(
+                    egui::Slider::new(&mut st, 0.0..=100.0)
+                        .show_value(false)
+                        .text("weniger streng  ↔  strenger"),
+                );
+                if regler.changed() {
+                    aktionen.push(Aktion::Rauschsperre(true, st.round() as u8));
+                }
+                // Ohne Rueckmeldung waere der Regler ein Blindflug: hier
+                // sieht man, ob gerade durchgelassen oder gesperrt wird
+                // und worauf sich die Sperre eingemessen hat.
+                let (r, _) = ui.allocate_exact_size(vec2(breite, 10.0), egui::Sense::hover());
+                let mal = ui.painter();
+                mal.rect_filled(r, 5.0, f.p.card_hi);
+                let pegel = s.eigener_pegel.clamp(0.0, 1.0).sqrt();
+                let voll = Rect::from_min_size(r.min, vec2(r.width() * pegel, r.height()));
+                mal.rect_filled(
+                    voll,
+                    5.0,
+                    if s.sperre_offen { f.p.accent } else { f.p.muted },
+                );
+                // Wo die Schwelle ungefaehr liegt (Grundrauschen mal
+                // Faktor), als duenner Strich.
+                let s_anteil = (s.sperre_grund
+                    * (2.0 + s.sperre_staerke as f32 / 100.0 * 6.0))
+                    .clamp(0.0, 1.0)
+                    .sqrt();
+                let x = r.left() + r.width() * s_anteil;
+                mal.line_segment(
+                    [pos2(x, r.top()), pos2(x, r.bottom())],
+                    egui::Stroke::new(1.5, f.p.accent),
+                );
+                ui.label(
+                    egui::RichText::new(if s.sperre_offen {
+                        "geht raus"
+                    } else {
+                        "gesperrt – es geht gerade nichts raus"
+                    })
+                    .size(10.0)
+                    .color(if s.sperre_offen { f.p.accent } else { f.p.muted }),
+                );
+            }
+            ui.add_space(10.0);
+
             ui.horizontal(|ui| {
                 if mini(ui, f, "Geräte neu suchen", false).clicked() {
                     aktionen.push(Aktion::GeraeteNeuLesen);
@@ -2950,6 +3015,11 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         Sicht {
             fenster: Vec::new(),
             rahmen_an: true,
+            sperre_an: true,
+            sperre_staerke: 45,
+            sperre_offen: true,
+            sperre_grund: 0.004,
+            eigener_pegel: 0.2,
             steuer_anfragen: Vec::new(),
             steuer_erlaubt: Vec::new(),
             steuer_gefragt: false,

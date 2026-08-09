@@ -4054,6 +4054,11 @@ impl App {
                 monitore: self.meet_win.monitore.clone(),
                 fenster: self.meet_win.fenster.clone(),
                 rahmen_an: n.rahmen_an,
+                sperre_an: n.sperre_an,
+                sperre_staerke: n.sperre_staerke,
+                sperre_offen: n.sperre_offen(),
+                sperre_grund: n.sperre_grundrauschen(),
+                eigener_pegel: n.pegel,
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
@@ -4169,6 +4174,7 @@ impl App {
                     }
                 }
                 meetfenster::Aktion::Rahmen(v) => n.rahmen_schalten(v),
+                meetfenster::Aktion::Rauschsperre(an, st) => n.rauschsperre_setzen(an, st),
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
                 meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
                 meetfenster::Aktion::SteuerungAnfragen => n.steuerung_anfragen(),
