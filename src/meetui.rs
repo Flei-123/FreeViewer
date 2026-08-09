@@ -66,6 +66,14 @@ pub struct NativMeet {
     schirm: Option<crate::meetschirm::Aufnahme>,
     schirm_koder: Option<crate::meetvideo::Kodierer>,
     pub schirm_an: bool,
+    /// Der rote Rahmen um das, was gerade rausgeht. Lebt genau so lange
+    /// wie die Freigabe; beim Fallenlassen verschwindet er von selbst.
+    rahmen: Option<crate::fenster::Rahmen>,
+    /// Soll ueberhaupt ein Rahmen gezeigt werden? Manche wollen ihn nicht.
+    pub rahmen_an: bool,
+    /// Wohin der Rahmen zuletzt gesetzt wurde - unnoetiges Verschieben
+    /// waere Flackern.
+    rahmen_lage: Option<(i32, i32, i32, i32)>,
     pub schirm_meldung: String,
     pub schirm_gesendet: u64,
     /// Das eigene geteilte Bild als RGBA - damit man SELBST sieht, was man
@@ -205,6 +213,9 @@ impl NativMeet {
             schirm: None,
             schirm_koder: None,
             schirm_an: false,
+            rahmen: None,
+            rahmen_an: true,
+            rahmen_lage: None,
             schirm_meldung: String::new(),
             schirm_gesendet: 0,
             eigen_schirm: None,
@@ -550,11 +561,11 @@ impl NativMeet {
             return;
         }
         self.naechster_zeiger = jetzt + std::time::Duration::from_millis(100);
-        let index = match self.schirm.as_ref() {
-            Some(a) => a.index,
+        let quelle = match self.schirm.as_ref() {
+            Some(a) => a.quelle,
             None => return,
         };
-        if let Some((x, y)) = crate::meetschirm::zeiger_anteil(index) {
+        if let Some((x, y)) = crate::meetschirm::zeiger_anteil_quelle(quelle) {
             let neu = (x, y);
             let anders = match self.letzter_zeiger {
                 Some((ax, ay)) => (ax - x).abs() > 0.002 || (ay - y).abs() > 0.002,
@@ -569,6 +580,11 @@ impl NativMeet {
 
     fn schirm_pumpe(&mut self) {
         let jetzt = std::time::Instant::now();
+        // Den Rahmen mitziehen, BEVOR wir wegen der Bildrate abbrechen -
+        // ein Fenster laesst sich schneller schieben, als 20-mal je
+        // Sekunde ein Bild rausgeht, und ein hinterherhinkender Rahmen
+        // sieht kaputt aus.
+        self.rahmen_pumpe();
         if jetzt < self.naechstes_schirmbild {
             return;
         }
@@ -620,6 +636,52 @@ impl NativMeet {
         }
     }
 
+    /// Den roten Rahmen der geteilten Quelle nachfuehren.
+    ///
+    /// Beim Bildschirm aendert sich nichts, beim Fenster staendig - es
+    /// wandert, wird groesser, wird minimiert. Verschwindet es, wird der
+    /// Rahmen weggenommen statt an einer falschen Stelle stehen zu bleiben.
+    fn rahmen_pumpe(&mut self) {
+        if !self.schirm_an {
+            return;
+        }
+        let Some(a) = self.schirm.as_ref() else { return };
+        let quelle = a.quelle;
+        match (self.rahmen_an, quelle.lage()) {
+            (true, Some(lage)) => {
+                if self.rahmen.is_none() {
+                    self.rahmen = Some(crate::fenster::Rahmen::zeigen(
+                        lage.0, lage.1, lage.2, lage.3,
+                    ));
+                    self.rahmen_lage = Some(lage);
+                } else if self.rahmen_lage != Some(lage) {
+                    if let Some(r) = self.rahmen.as_ref() {
+                        r.setzen(lage.0, lage.1, lage.2, lage.3);
+                    }
+                    self.rahmen_lage = Some(lage);
+                }
+            }
+            _ => {
+                self.rahmen = None;
+                self.rahmen_lage = None;
+            }
+        }
+    }
+
+    /// Roten Rahmen an- oder abschalten. Wirkt sofort.
+    pub fn rahmen_schalten(&mut self, an: bool) {
+        self.rahmen_an = an;
+        if !an {
+            self.rahmen = None;
+            self.rahmen_lage = None;
+        }
+    }
+
+    /// Welche Programmfenster lassen sich teilen?
+    pub fn fenster() -> Vec<crate::fenster::Fenster> {
+        crate::fenster::liste()
+    }
+
     /// Wie viele Bildschirme gibt es hier?
     pub fn monitore() -> Vec<crate::meetschirm::Schirm> {
         crate::meetschirm::liste()
@@ -631,7 +693,17 @@ impl NativMeet {
     /// ins Protokoll. Genau daran lag es, dass ein Fehlschlag aussah wie
     /// "es passiert nichts".
     pub fn schirm_schalten_melden(&mut self, an: bool, index: usize) -> Option<String> {
-        self.schirm_schalten(an, index);
+        self.quelle_schalten_melden(an, crate::meetschirm::Quelle::Bildschirm(index))
+    }
+
+    /// Wie `schirm_schalten_melden`, aber die Quelle darf auch ein einzelnes
+    /// Programmfenster sein.
+    pub fn quelle_schalten_melden(
+        &mut self,
+        an: bool,
+        quelle: crate::meetschirm::Quelle,
+    ) -> Option<String> {
+        self.quelle_schalten(an, quelle);
         if an && !self.schirm_an {
             let m = self.schirm_meldung.clone();
             return Some(if m.is_empty() {
@@ -644,11 +716,16 @@ impl NativMeet {
     }
 
     pub fn schirm_schalten(&mut self, an: bool, index: usize) {
+        self.quelle_schalten(an, crate::meetschirm::Quelle::Bildschirm(index))
+    }
+
+    /// Freigabe einer beliebigen Quelle schalten.
+    pub fn quelle_schalten(&mut self, an: bool, quelle: crate::meetschirm::Quelle) {
         if an {
             if self.schirm.is_some() {
                 return;
             }
-            match crate::meetschirm::oeffnen(index, 1920, 1080, 15) {
+            match crate::meetschirm::oeffnen_quelle(quelle, 1920, 1080, 15) {
                 Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, 4_000_000) {
                     Ok(k) => {
                         self.schirm_meldung = format!("Teile {}", a.name);
@@ -665,6 +742,18 @@ impl NativMeet {
                             serde_json::json!({"t":"publish","mid":self.ton.vid2,"screen":true}),
                         );
                         self.sig.roh(serde_json::json!({"t":"screen","on":true}));
+                        // Rot umranden, was rausgeht. Der Rahmen liegt
+                        // ueber allem, nimmt keine Klicks an und ist aus
+                        // der eigenen Aufnahme ausgeschlossen - sonst saehe
+                        // der Zuschauer ihn doppelt.
+                        self.rahmen = None;
+                        self.rahmen_lage = None;
+                        if self.rahmen_an {
+                            if let Some((x, y, b, h)) = quelle.lage() {
+                                self.rahmen = Some(crate::fenster::Rahmen::zeigen(x, y, b, h));
+                                self.rahmen_lage = Some((x, y, b, h));
+                            }
+                        }
                     }
                     Err(e) => {
                         a.stoppen();
@@ -683,6 +772,8 @@ impl NativMeet {
             }
             self.schirm_koder = None;
             self.schirm_an = false;
+            self.rahmen = None;
+            self.rahmen_lage = None;
             self.eigen_schirm = None;
             self.eigen_schirm_stand += 1;
             self.schirm_meldung = String::new();
@@ -952,7 +1043,7 @@ impl NativMeet {
     /// Angabe direkt vor der Nase lag.
     pub fn eigener_zeiger(&self) -> Option<(f32, f32)> {
         let a = self.schirm.as_ref()?;
-        crate::meetschirm::zeiger_anteil(a.index)
+        crate::meetschirm::zeiger_anteil_quelle(a.quelle)
     }
 
     /// Welchen Ausschnitt sendet dieser Teilnehmer gerade?

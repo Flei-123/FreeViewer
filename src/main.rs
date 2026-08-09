@@ -17,6 +17,7 @@ mod clip;
 mod crypto;
 mod encoder;
 mod feedback;
+mod freunde;
 mod h264;
 mod hostside;
 mod i18n;
@@ -37,6 +38,7 @@ mod meetvideo;
 #[cfg(windows)]
 mod camdshow;
 mod meetcam;
+mod fenster;
 mod meetschirm;
 mod input;
 mod net;
@@ -3534,6 +3536,14 @@ impl App {
             .into_iter()
             .map(|m| (m.name, m.breite, m.hoehe))
             .collect();
+        if std::time::Instant::now() >= self.meet_win.fenster_naechste {
+            self.meet_win.fenster_naechste =
+                std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            self.meet_win.fenster = fenster::liste()
+                .into_iter()
+                .map(|f| (f.kennung, f.titel, f.programm))
+                .collect();
+        }
         if !self.meet_win.geraete_geladen {
             self.meet_win.geraete_geladen = true;
             let slot = self.meet_win.geraete.clone();
@@ -4042,6 +4052,8 @@ impl App {
                     None => false,
                 },
                 monitore: self.meet_win.monitore.clone(),
+                fenster: self.meet_win.fenster.clone(),
+                rahmen_an: n.rahmen_an,
             };
             bilder = meetfenster::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
@@ -4148,6 +4160,15 @@ impl App {
                         schirm_fehler = Some(m);
                     }
                 }
+                meetfenster::Aktion::FensterWaehlen(k) => {
+                    if let Some(m) = n.quelle_schalten_melden(
+                        true,
+                        meetschirm::Quelle::Fenster(k),
+                    ) {
+                        schirm_fehler = Some(m);
+                    }
+                }
+                meetfenster::Aktion::Rahmen(v) => n.rahmen_schalten(v),
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
                 meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
                 meetfenster::Aktion::SteuerungAnfragen => n.steuerung_anfragen(),
@@ -7591,6 +7612,12 @@ struct MeetWin {
     spk_sel: usize,
     /// Bildschirme dieses Rechners (Name, Breite, Hoehe) - einmal eingelesen.
     monitore: Vec<(String, u32, u32)>,
+    /// Offene Programmfenster (Kennung, Titel, Programm). Wird nur alle
+    /// anderthalb Sekunden neu eingelesen: EnumWindows fragt fuer JEDES
+    /// Fenster die Fensterverwaltung und den Prozess - das jede Bildrate
+    /// zu tun waere Verschwendung.
+    fenster: Vec<(isize, String, String)>,
+    fenster_naechste: std::time::Instant,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
     tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
     tn_busy: Arc<std::sync::atomic::AtomicBool>,
@@ -7615,6 +7642,8 @@ impl Default for MeetWin {
             spks: Vec::new(),
             spk_sel: 0,
             monitore: Vec::new(),
+            fenster: Vec::new(),
+            fenster_naechste: std::time::Instant::now(),
             stumm: false,
             ohne_video: false,
             geraete: Arc::new(std::sync::Mutex::new(None)),

@@ -194,6 +194,11 @@ pub struct Sicht {
     /// einem wird gefragt, welcher geteilt werden soll - der Browser bekommt
     /// dafuer die Auswahl von Windows, nativ muessen wir selbst fragen.
     pub monitore: Vec<(String, u32, u32)>,
+    /// Offene Programmfenster, die sich einzeln teilen lassen:
+    /// (Kennung, Titel, Programm).
+    pub fenster: Vec<(isize, String, String)>,
+    /// Roter Rahmen um das Geteilte an?
+    pub rahmen_an: bool,
 }
 
 /// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
@@ -294,6 +299,10 @@ pub enum Aktion {
     GeraeteNeuLesen,
     /// Diesen Bildschirm teilen (Index aus `Sicht::monitore`).
     SchirmWaehlen(usize),
+    /// Genau dieses Programmfenster teilen (Kennung aus `Sicht::fenster`).
+    FensterWaehlen(isize),
+    /// Roten Rahmen um das Geteilte an-/abschalten.
+    Rahmen(bool),
     /// Als Zuschauer den Teilenden um die Steuerung bitten.
     SteuerungAnfragen,
     /// Als Teilender ueber eine Anfrage entscheiden.
@@ -1587,7 +1596,11 @@ fn kopf(
                     {
                         if s.schirm_an {
                             aktionen.push(Aktion::Schirm(false));
-                        } else if s.monitore.len() > 1 {
+                        } else if s.monitore.len() > 1 || !s.fenster.is_empty() {
+                            // Sobald es etwas zu waehlen gibt, wird gefragt.
+                            // Frueher ging bei einem einzigen Bildschirm
+                            // ungefragt ALLES raus - genau das wollte Justin
+                            // nicht mehr.
                             z.schirmwahl_offen = true;
                         } else {
                             aktionen.push(Aktion::SchirmWaehlen(0));
@@ -1636,11 +1649,11 @@ fn schirmwahl(
     aktionen: &mut Vec<Aktion>,
 ) {
     let mut offen = true;
-    egui::Window::new("Welchen Bildschirm teilen?")
+    egui::Window::new("Was möchtest du teilen?")
         .open(&mut offen)
         .collapsible(false)
         .resizable(false)
-        .default_width(330.0)
+        .default_width(380.0)
         .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -20.0))
         .frame(
             egui::Frame::NONE
@@ -1651,12 +1664,57 @@ fn schirmwahl(
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+            ui.label(
+                egui::RichText::new("GANZER BILDSCHIRM")
+                    .size(10.5)
+                    .color(f.p.muted),
+            );
             for (i, (name, b, h)) in s.monitore.iter().enumerate() {
                 let text = format!("{}  ·  {}×{}", kurz(name, 26), b, h);
                 if mini(ui, f, &text, i == 0).clicked() {
                     aktionen.push(Aktion::SchirmWaehlen(i));
                     z.schirmwahl_offen = false;
                 }
+            }
+            if !s.fenster.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("NUR EIN PROGRAMM")
+                        .size(10.5)
+                        .color(f.p.muted),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Es geht wirklich nur dieses Fenster raus – alles andere bleibt privat.",
+                    )
+                    .size(10.5)
+                    .color(f.p.muted),
+                );
+                // Lange Listen sonst sprengen den Schirm: bei vielen
+                // offenen Fenstern wird gerollt statt abgeschnitten.
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        for (k, titel, prog) in s.fenster.iter() {
+                            let text = if prog.is_empty() {
+                                kurz(titel, 40)
+                            } else {
+                                format!("{}  ·  {}", kurz(titel, 32), kurz(prog, 14))
+                            };
+                            if mini(ui, f, &text, false).clicked() {
+                                aktionen.push(Aktion::FensterWaehlen(*k));
+                                z.schirmwahl_offen = false;
+                            }
+                        }
+                    });
+            }
+            ui.add_space(8.0);
+            let mut rahmen = s.rahmen_an;
+            if ui
+                .checkbox(&mut rahmen, "Rot umranden, was geteilt wird")
+                .changed()
+            {
+                aktionen.push(Aktion::Rahmen(rahmen));
             }
             ui.add_space(4.0);
             if mini(ui, f, "Abbrechen", false).clicked() {
@@ -2890,6 +2948,8 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             });
         }
         Sicht {
+            fenster: Vec::new(),
+            rahmen_an: true,
             steuer_anfragen: Vec::new(),
             steuer_erlaubt: Vec::new(),
             steuer_gefragt: false,

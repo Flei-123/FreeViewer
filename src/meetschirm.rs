@@ -33,6 +33,40 @@ pub struct Schirm {
     pub primaer: bool,
 }
 
+/// WAS geteilt wird: ein ganzer Bildschirm oder genau ein Fenster.
+///
+/// Warum ein eigener Typ und nicht einfach zwei Funktionen: der
+/// Aufnahmefaden muss die Quelle NEU oeffnen koennen, wenn die Aufnahme
+/// abreisst (Aufloesung geaendert, Sitzung gewechselt). Dafuer braucht er
+/// die Angabe, aus der er sie ueberhaupt aufgemacht hat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Quelle {
+    /// Index aus `liste()`.
+    Bildschirm(usize),
+    /// Fensterkennung aus `crate::fenster::liste()`.
+    Fenster(isize),
+}
+
+impl Quelle {
+    fn oeffnen(&self) -> Option<Box<dyn crate::capture::Backend>> {
+        match self {
+            Quelle::Bildschirm(i) => crate::capture::open_index(true, *i),
+            Quelle::Fenster(k) => crate::fenster::aufnahme(*k),
+        }
+    }
+
+    /// Wo liegt die Quelle auf dem Bildschirm? (x, y, Breite, Hoehe).
+    /// Wird fuer den roten Rahmen gebraucht.
+    pub fn lage(&self) -> Option<(i32, i32, i32, i32)> {
+        match self {
+            Quelle::Bildschirm(i) => crate::capture::list_monitors(true)
+                .get(*i)
+                .map(|m| (m.x, m.y, m.w as i32, m.h as i32)),
+            Quelle::Fenster(k) => crate::fenster::lage(*k),
+        }
+    }
+}
+
 /// Alle Bildschirme dieses Rechners, der Hauptbildschirm zuerst.
 pub fn liste() -> Vec<Schirm> {
     crate::capture::list_monitors(true)
@@ -213,6 +247,42 @@ pub fn bild_nach_nv12_teil(
 ///
 /// None = der Zeiger ist gerade auf einem ANDEREN Bildschirm; dann waere
 /// jede Zahl gelogen.
+/// Wo steht der Zeiger INNERHALB der geteilten Quelle (0..1)?
+///
+/// Beim Fenster ist das nicht dasselbe wie beim Bildschirm: das Fenster
+/// wandert, also muss die Lage bei jedem Aufruf frisch geholt werden.
+/// Steht der Zeiger daneben, kommt None - eine erfundene Position waere
+/// schlimmer als gar keine.
+pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
+    match q {
+        Quelle::Bildschirm(i) => zeiger_anteil(i),
+        Quelle::Fenster(_) => {
+            #[cfg(windows)]
+            {
+                use windows::Win32::Foundation::POINT;
+                use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+                let (x, y, b, h) = q.lage()?;
+                if b < 2 || h < 2 {
+                    return None;
+                }
+                let mut p = POINT::default();
+                if unsafe { GetCursorPos(&mut p) }.is_err() {
+                    return None;
+                }
+                let (dx, dy) = (p.x - x, p.y - y);
+                if dx < 0 || dy < 0 || dx >= b || dy >= h {
+                    return None;
+                }
+                Some((dx as f32 / b as f32, dy as f32 / h as f32))
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        }
+    }
+}
+
 pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
     #[cfg(windows)]
     {
@@ -315,8 +385,8 @@ pub struct Aufnahme {
     pub name: String,
     pub breite: u32,
     pub hoehe: u32,
-    /// Welcher Bildschirm (Index aus `liste()`).
-    pub index: usize,
+    /// Woraus das Bild kommt (Bildschirm oder Fenster).
+    pub quelle: Quelle,
     neu: Arc<Mutex<Option<Bild>>>,
     zaehler: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -364,6 +434,11 @@ impl Drop for Aufnahme {
 /// `max_b`/`max_h` begrenzen die Uebertragungsgroesse (Seitenverhaeltnis
 /// bleibt erhalten), `fps` ist die Obergrenze der Bildrate.
 pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
+    oeffnen_quelle(Quelle::Bildschirm(index), max_b, max_h, fps)
+}
+
+/// Wie `oeffnen`, aber die Quelle darf auch ein einzelnes Fenster sein.
+pub fn oeffnen_quelle(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
     let fps = fps.clamp(1, 60);
     let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
     let zaehler = Arc::new(AtomicU64::new(0));
@@ -375,14 +450,14 @@ pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahm
     let b2 = bereich.clone();
     std::thread::Builder::new()
         .name("meetschirm".into())
-        .spawn(move || schleife(index, max_b, max_h, fps, tx, n2, z2, s2, f2, b2))
+        .spawn(move || schleife(quelle, max_b, max_h, fps, tx, n2, z2, s2, f2, b2))
         .map_err(|e| anyhow!("Bildschirmfaden: {}", e))?;
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(Ok((name, b, h))) => Ok(Aufnahme {
             name,
             breite: b,
             hoehe: h,
-            index,
+            quelle,
             neu,
             zaehler,
             stop,
@@ -399,7 +474,7 @@ pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahm
 
 #[allow(clippy::too_many_arguments)]
 fn schleife(
-    index: usize,
+    quelle: Quelle,
     max_b: u32,
     max_h: u32,
     fps: u32,
@@ -410,19 +485,29 @@ fn schleife(
     fehler: Arc<Mutex<String>>,
     bereich: Arc<Mutex<Bereich>>,
 ) {
-    let mut backend = match crate::capture::open_index(true, index) {
+    let mut backend = match quelle.oeffnen() {
         Some(b) => b,
         None => {
-            let _ = tx.send(Err("kein Bildschirm aufnehmbar".to_string()));
+            let _ = tx.send(Err(match quelle {
+                Quelle::Bildschirm(_) => "kein Bildschirm aufnehmbar".to_string(),
+                Quelle::Fenster(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
+            }));
             return;
         }
     };
     let (sb, sh) = backend.size();
     let (zb, zh) = zielgroesse(sb, sh, max_b, max_h);
-    let anzeige = crate::capture::list_monitors(true)
-        .get(index)
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| format!("Bildschirm {}", index + 1));
+    let anzeige = match quelle {
+        Quelle::Bildschirm(index) => crate::capture::list_monitors(true)
+            .get(index)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| format!("Bildschirm {}", index + 1)),
+        Quelle::Fenster(k) => crate::fenster::liste()
+            .into_iter()
+            .find(|f| f.kennung == k)
+            .map(|f| f.titel)
+            .unwrap_or_else(|| "Fenster".to_string()),
+    };
     let name = format!("{} ({}x{} -> {}x{}, {})", anzeige, sb, sh, zb, zh, backend.name());
     if tx.send(Ok((name, zb, zh))).is_err() {
         return;
@@ -449,7 +534,7 @@ fn schleife(
                 if let Ok(mut f) = fehler.lock() {
                     *f = format!("Aufnahme abgerissen ({}. Mal) - neu geoeffnet", verluste);
                 }
-                match crate::capture::open_index(true, index) {
+                match quelle.oeffnen() {
                     Some(b) => {
                         backend = b;
                         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -457,7 +542,12 @@ fn schleife(
                     }
                     None => {
                         if let Ok(mut f) = fehler.lock() {
-                            *f = "Bildschirm nicht mehr aufnehmbar".into();
+                            *f = match quelle {
+                                Quelle::Bildschirm(_) => "Bildschirm nicht mehr aufnehmbar".into(),
+                                // Beim Fenster ist der haeufigste Grund
+                                // schlicht: es wurde geschlossen.
+                                Quelle::Fenster(_) => "Das geteilte Fenster ist weg".to_string(),
+                            };
                         }
                         return;
                     }
@@ -495,7 +585,7 @@ fn schleife(
         // Den Mauszeiger ins Bild malen. Windows legt ihn bei der Aufnahme
         // NICHT hinein - ohne diesen Schritt sieht der Zuschauer nie, wohin
         // gezeigt wird.
-        if let Some((fx, fy)) = zeiger_anteil(index) {
+        if let Some((fx, fy)) = zeiger_anteil_quelle(quelle) {
             let (tx, ty, tw, th) = teil;
             if fx >= tx && fy >= ty && fx <= tx + tw && fy <= ty + th {
                 let px = ((fx - tx) / tw.max(0.0001) * zb as f32) as i32;

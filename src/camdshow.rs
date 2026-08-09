@@ -26,6 +26,8 @@
 //! B,G,R. Beides wird hier geradegezogen, bevor daraus NV12 wird.
 
 #![cfg(windows)]
+// Die COM-Namen kommen aus qedit.dll und muessen genau so heissen.
+#![allow(non_snake_case)]
 
 use crate::meetcam::{Bild, Geraet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,7 +60,6 @@ pub const PRAEFIX: &str = "ds:";
 const CLSID_SAMPLE_GRABBER: GUID = GUID::from_u128(0xc1f400a0_3f08_11d3_9f0b_006008039e37);
 const CLSID_NULL_RENDERER: GUID = GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
 
-#[allow(non_snake_case)]
 #[windows::core::interface("6b652fff-11fe-4fce-92ad-0266b5d7c78f")]
 unsafe trait ISampleGrabber: windows::core::IUnknown {
     unsafe fn SetOneShot(&self, one_shot: BOOL) -> HRESULT;
