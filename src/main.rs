@@ -1305,6 +1305,7 @@ fn main() -> eframe::Result<()> {
             ("Einstellungen", View::Settings, SettingsTab::General),
             ("Konto", View::Settings, SettingsTab::Account),
             ("Meet", View::Meet, SettingsTab::General),
+            ("Freunde", View::Freunde, SettingsTab::General),
         ] {
             app.view = view;
             app.stab = stab;
@@ -2025,6 +2026,7 @@ fn main() -> eframe::Result<()> {
                 app.view = match want.as_deref() {
                     Some("devices") => View::Devices,
                     Some("meet") => View::Meet,
+                    Some("freunde") | Some("friends") => View::Freunde,
                     Some("settings") => View::Settings,
                     Some("settings2") => View::Settings,
                     _ => View::Start,
@@ -3166,6 +3168,93 @@ impl App {
                     self.connect_to(&id);
                 }
             }
+
+            // ------------------------------------------------- Freunde
+            // Kurzfassung der Freundesliste: wer online ist, ist einen
+            // Klick entfernt. Die ganze Seite liegt in der Leiste links -
+            // hier steht nur, was man auf der Startseite wirklich braucht.
+            {
+                let dienst = self.freunde.clone();
+                let liste = dienst.as_ref().map(|d| d.liste()).unwrap_or_default();
+                let offen = dienst.as_ref().map(|d| d.eingehende().len()).unwrap_or(0);
+                ui.add_space(8.0);
+                section(ui, i18n::t("nav.friends"));
+                let mut go_f: Option<String> = None;
+                let mut oeffnen = false;
+                card(ui, |ui| {
+                    if offen > 0 {
+                        ui.horizontal(|ui| {
+                            ui.painter().circle_filled(
+                                ui.cursor().min + egui::vec2(4.0, 9.0),
+                                4.0,
+                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
+                            );
+                            ui.add_space(12.0);
+                            if ui
+                                .link(
+                                    egui::RichText::new(i18n::tf(
+                                        "friends.pending",
+                                        &offen.to_string(),
+                                    ))
+                                    .size(12.5)
+                                    .strong(),
+                                )
+                                .clicked()
+                            {
+                                oeffnen = true;
+                            }
+                        });
+                    }
+                    if liste.is_empty() {
+                        ui.label(
+                            egui::RichText::new(i18n::t("friends.none"))
+                                .size(12.0)
+                                .color(p.muted),
+                        );
+                    }
+                    for f in liste.iter().take(4) {
+                        let on = f.online;
+                        ui.horizontal(|ui| {
+                            icons::show(ui, "friends", 15.0, row_color(on, false));
+                            ui.label(
+                                egui::RichText::new(f.anzeige())
+                                    .size(12.5)
+                                    .color(row_color(on, true)),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if icon_ghost(ui, "connect", i18n::t("dev.connect")).clicked() {
+                                    go_f = Some(f.fvid.clone());
+                                }
+                                status_pill(
+                                    ui,
+                                    on,
+                                    if on {
+                                        i18n::t("st.online")
+                                    } else {
+                                        i18n::t("st.offline")
+                                    },
+                                );
+                            });
+                        });
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .link(
+                            egui::RichText::new(i18n::t("friends.open"))
+                                .size(12.0)
+                                .color(p.accent),
+                        )
+                        .clicked()
+                    {
+                        oeffnen = true;
+                    }
+                });
+                if let Some(id) = go_f {
+                    self.connect_to(&id);
+                } else if oeffnen {
+                    self.view = View::Freunde;
+                }
+            }
         });
 
         if !self.hint.is_empty() {
@@ -3274,10 +3363,16 @@ impl App {
                 ui.vertical_centered(|ui| {
                     logo(ui);
                     ui.add_space(10.0);
+                    // Der Freunde-Dienst laeuft ab jetzt vom ersten Bild an.
+                    // Frueher startete er erst beim Oeffnen der Seite - eine
+                    // Freundschaftsanfrage, die niemand sieht, weil das
+                    // Programm gar nicht danach fragt, ist keine Anfrage.
+                    let offen = self.freunde_dienst().eingehende().len();
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
                         (View::Meet, "meet", i18n::t("nav.meet")),
+                        (View::Freunde, "friends", i18n::t("nav.friends")),
                         (View::Settings, "settings", i18n::t("nav.settings")),
                     ] {
                         let sel = self.view == v;
@@ -3316,6 +3411,17 @@ impl App {
                             p.muted
                         };
                         ui.put(rect, icons::image(name, 19.0, fg));
+                        // Offene Anfragen als Punkt am Symbol - sichtbar,
+                        // ohne dass man die Seite oeffnen muss.
+                        let mut tip = tip.to_string();
+                        if v == View::Freunde && offen > 0 {
+                            ui.painter().circle_filled(
+                                egui::pos2(rect.right() - 7.0, rect.top() + 7.0),
+                                4.0,
+                                egui::Color32::from_rgb(0xef, 0x44, 0x44),
+                            );
+                            tip = format!("{} ({} offen)", tip, offen);
+                        }
                         let r = zeigefinger(r).on_hover_text(tip);
                         if r.clicked() {
                             self.view = v;
@@ -4481,7 +4587,7 @@ if let Some(path) = self.shot.clone() {
                         View::Start => i18n::t("nav.start"),
                         View::Devices => i18n::t("nav.devices"),
                         View::Meet => i18n::t("nav.meet"),
-                        View::Freunde => "Freunde",
+                        View::Freunde => i18n::t("nav.friends"),
                         View::Settings => i18n::t("nav.settings"),
                     };
                     ui.label(egui::RichText::new(title).size(16.0).strong().color(p.text));

@@ -31,6 +31,14 @@ const TABLE: &[(&str, &str, &str)] = &[
     // Navigation und Kopfzeile
     ("nav.start", "Start", "Home"),
     ("nav.devices", "Geräte", "Devices"),
+    ("nav.friends", "Freunde", "Friends"),
+    ("friends.none", "Noch keine Freunde", "No friends yet"),
+    ("friends.open", "Freunde verwalten", "Manage friends"),
+    (
+        "friends.pending",
+        "{} offene Anfrage(n)",
+        "{} pending request(s)",
+    ),
     ("nav.settings", "Einstellungen", "Settings"),
     ("hdr.search", "Suchen und verbinden", "Search and connect"),
     ("st.ready", "Bereit", "Ready"),
