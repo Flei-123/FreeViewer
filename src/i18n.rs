@@ -42,6 +42,32 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("nav.settings", "Einstellungen", "Settings"),
     ("hdr.search", "Suchen und verbinden", "Search and connect"),
     ("st.ready", "Bereit", "Ready"),
+    ("st.no_net", "Offline", "Offline"),
+    (
+        "net.connecting",
+        "Verbinde mit dem Relay …",
+        "Connecting to the relay …",
+    ),
+    (
+        "net.ready_wait",
+        "Bereit - warte auf Verbindungen",
+        "Ready - waiting for connections",
+    ),
+    (
+        "net.no_internet",
+        "Offline - keine Internetverbindung",
+        "Offline - no internet connection",
+    ),
+    (
+        "net.no_relay",
+        "Offline - Relay nicht erreichbar",
+        "Offline - relay unreachable",
+    ),
+    (
+        "net.closed",
+        "Verbindung zum Relay beendet",
+        "Relay connection closed",
+    ),
     ("st.connecting", "Verbinde …", "Connecting …"),
     ("st.online", "Online", "Online"),
     ("st.offline", "Offline", "Offline"),

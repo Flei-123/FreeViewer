@@ -145,6 +145,8 @@ mod win {
     use anyhow::anyhow;
     use std::sync::Once;
     use windows::core::{Interface, GUID, PWSTR, VARIANT};
+    use windows::Win32::Foundation::FALSE;
+    use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::CoTaskMemFree;
 
@@ -291,6 +293,9 @@ mod win {
         /// How many "send me a frame" tokens the async MFT still owes us.
         need: i32,
         frames: u64,
+        /// Nur gesetzt, wenn der Encoder die Bilder DIREKT von der
+        /// Grafikkarte nimmt. Muss leben, solange der Encoder lebt.
+        devman: Option<IMFDXGIDeviceManager>,
     }
 
     impl Encoder {
@@ -326,7 +331,7 @@ mod win {
                     flags,
                     input,
                     output,
-                    |a, name| match Self::build(a, name, hardware, w, h, fps, bitrate) {
+                    |a, name| match Self::build(a, name, hardware, w, h, fps, bitrate, None) {
                         Ok(e) => Some(e),
                         Err(e) => {
                             crate::capture::log_line(&format!("h264 {} faellt aus: {}", name, e));
@@ -338,6 +343,41 @@ mod win {
             enc.ok_or_else(|| anyhow!("kein H.264 Encoder gefunden"))
         }
 
+        /// Encoder, der seine Bilder DIREKT als Textur von der Grafikkarte
+        /// nimmt - ohne den Umweg ueber den Hauptspeicher.
+        ///
+        /// Nur Hardware-Encoder koennen das; ein Software-Encoder waere hier
+        /// sinnlos, weil er die Textur ohnehin herunterladen muesste.
+        pub fn new_d3d(dev: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Self> {
+            mf_startup();
+            let w = w & !1;
+            let h = h & !1;
+            if w < 32 || h < 32 {
+                return Err(anyhow!("Aufloesung zu klein fuer H.264"));
+            }
+            let input = type_info(MFMediaType_Video, MFVideoFormat_NV12);
+            let output = type_info(MFMediaType_Video, MFVideoFormat_H264);
+            let enc = find_mft(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0),
+                input,
+                output,
+                |a, name| match Self::build(a, name, true, w, h, fps, bitrate, Some(dev)) {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        crate::capture::log_line(&format!("h264-direkt {} faellt aus: {}", name, e));
+                        None
+                    }
+                },
+            );
+            enc.ok_or_else(|| anyhow!("kein H.264 Encoder mit Grafikkarten-Anbindung"))
+        }
+
+        /// True, wenn dieser Encoder Bilder direkt von der Grafikkarte nimmt.
+        pub fn direkt(&self) -> bool {
+            self.devman.is_some()
+        }
+
         fn build(
             a: &IMFActivate,
             name: &str,
@@ -346,6 +386,7 @@ mod win {
             h: u32,
             fps: u32,
             bitrate: u32,
+            dev: Option<&ID3D11Device>,
         ) -> Result<Self> {
             unsafe {
                 let t: IMFTransform = a.ActivateObject()?;
@@ -356,6 +397,21 @@ mod win {
                         attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
                         events = t.cast::<IMFMediaEventGenerator>().ok();
                     }
+                }
+                // Der Manager muss stehen, BEVOR die Formate ausgehandelt
+                // werden - danach nimmt der Treiber ihn nicht mehr an.
+                let mut devman: Option<IMFDXGIDeviceManager> = None;
+                if let Some(d) = dev {
+                    let mut token = 0u32;
+                    let mut man: Option<IMFDXGIDeviceManager> = None;
+                    MFCreateDXGIDeviceManager(&mut token, &mut man)
+                        .map_err(|e| anyhow!("DXGI-Manager: {}", e))?;
+                    let man = man.ok_or_else(|| anyhow!("kein DXGI-Manager"))?;
+                    man.ResetDevice(d, token)
+                        .map_err(|e| anyhow!("ResetDevice: {}", e))?;
+                    t.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, man.as_raw() as usize)
+                        .map_err(|e| anyhow!("SET_D3D_MANAGER: {}", e))?;
+                    devman = Some(man);
                 }
                 set_codec_api(&t, bitrate, fps * 4);
 
@@ -401,6 +457,9 @@ mod win {
                     bitrate / 1000,
                     if events.is_some() { ", async" } else { "" }
                 ));
+                if devman.is_some() {
+                    crate::capture::log_line("h264 encoder nimmt die Bilder direkt von der Grafikkarte");
+                }
 
                 Ok(Self {
                     t,
@@ -414,6 +473,7 @@ mod win {
                     hardware,
                     need: 0,
                     frames: 0,
+                    devman,
                 })
             }
         }
@@ -528,11 +588,46 @@ mod win {
                     self.nv12_len()
                 ));
             }
+            let (time, dur) = self.zeitmarke();
+            let sample = unsafe { sample_from_bytes(&nv12[..self.nv12_len()], time, dur)? };
+            self.hineingeben(sample)
+        }
+
+        /// Dasselbe, aber das Bild liegt schon als NV12-Textur auf der
+        /// Grafikkarte. Spart pro Bild einen Hin- und Rueckweg ueber den
+        /// PCIe-Bus - bei 2496x1664 rund 6 MB.
+        pub fn encode_tex(&mut self, tex: &ID3D11Texture2D) -> Result<Vec<Chunk>> {
+            if self.devman.is_none() {
+                return Err(anyhow!("dieser Encoder nimmt keine Texturen"));
+            }
+            let (time, dur) = self.zeitmarke();
+            let sample = unsafe {
+                let buf = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, tex, 0, FALSE)
+                    .map_err(|e| anyhow!("DXGI-Puffer: {}", e))?;
+                if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
+                    if let Ok(len) = b2.GetContiguousLength() {
+                        let _ = buf.SetCurrentLength(len);
+                    }
+                }
+                let s = MFCreateSample()?;
+                s.AddBuffer(&buf)?;
+                s.SetSampleTime(time)?;
+                s.SetSampleDuration(dur)?;
+                s
+            };
+            self.hineingeben(sample)
+        }
+
+        fn zeitmarke(&self) -> (i64, i64) {
             let dur = 10_000_000i64 / self.fps.max(1) as i64;
-            let time = self.frames as i64 * dur;
+            (self.frames as i64 * dur, dur)
+        }
+
+        /// Ein fertiges Sample in den Encoder schieben und abholen, was
+        /// herauskommt. Fuer beide Wege gleich.
+        fn hineingeben(&mut self, sample: IMFSample) -> Result<Vec<Chunk>> {
             let mut out = Vec::new();
             unsafe {
-                let sample = sample_from_bytes(&nv12[..self.nv12_len()], time, dur)?;
                 if self.events.is_some() {
                     // async MFT: wait for a token, then push the frame in
                     self.drain(false, &mut out)?;

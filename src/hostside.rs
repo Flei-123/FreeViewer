@@ -60,17 +60,55 @@ pub fn profile(mode: u8) -> Profile {
     }
 }
 
+/// Steht ueberhaupt eine Leitung nach draussen? Ein kurzer TCP-Versuch auf
+/// zwei bekannte Adressen - reicht, um "kein Internet" von "Relay antwortet
+/// nicht" zu unterscheiden. Ohne diese Unterscheidung raet die Meldung nur.
+/// Sekunden aus einer Umgebungsvariable, sonst der Standardwert. Nur damit
+/// sich die Zeiten im Test (und beim Suchen eines Fehlers) verkuerzen lassen.
+fn sekunden(name: &str, standard: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(standard)
+}
+
+async fn internet_da() -> bool {
+    for ziel in ["1.1.1.1:443", "8.8.8.8:443"] {
+        let v = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(ziel),
+        )
+        .await;
+        if matches!(v, Ok(Ok(_))) {
+            return true;
+        }
+    }
+    false
+}
+
 pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
     loop {
-        shared.set_host_status("Verbinde mit Relay...");
+        shared.set_net_state(0);
+        shared.set_host_status(crate::i18n::t("net.connecting"));
         let mut replaced = false;
         match host_once(&shared, &secret).await {
-            Ok(()) => shared.set_host_status("Relay-Verbindung beendet"),
+            Ok(()) => shared.set_host_status(crate::i18n::t("net.closed")),
             Err(e) => {
                 replaced = e.to_string().contains("neu registriert");
-                shared.set_host_status(format!("Relay-Fehler: {}", e));
+                if replaced {
+                    shared.set_host_status(format!("Relay-Fehler: {}", e));
+                } else if internet_da().await {
+                    // Netz ist da, der Relay nicht erreichbar - das ist eine
+                    // andere Baustelle als ein totes WLAN, also auch eine
+                    // andere Meldung.
+                    shared.set_host_status(crate::i18n::t("net.no_relay"));
+                } else {
+                    shared.set_host_status(crate::i18n::t("net.no_internet"));
+                }
             }
         }
+        shared.set_net_state(2);
         *shared.my_id.lock().unwrap() = String::new();
         *shared.host_peer.lock().unwrap() = "Keine aktive Sitzung".to_string();
         if replaced && !agent {
@@ -92,7 +130,7 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
                 return;
             }
         } else {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(sekunden("FV_RETRY_SEK", 3))).await;
         }
     }
 }
@@ -115,6 +153,16 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
 
     let mut sess: Option<Session> = None;
 
+    // Herzschlag: Ohne ihn merkt niemand, wenn die Leitung stirbt. Ein
+    // gekapptes WLAN schickt kein "Auf Wiedersehen" - der Stream schweigt
+    // nur, und TCP braucht Minuten, bis es das zugibt. Deshalb: alle 15 s
+    // ein Ping, und wenn 40 s lang NICHTS kam (auch kein Pong), gilt die
+    // Verbindung als tot und wird neu aufgebaut.
+    let mut letzter_kontakt = Instant::now();
+    let mut letzter_ping = Instant::now();
+    let ping_alle = Duration::from_secs(sekunden("FV_PING_SEK", 15));
+    let still_max = Duration::from_secs(sekunden("FV_STILL_SEK", 40));
+
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
     loop {
         let msg = tokio::select! {
@@ -123,6 +171,15 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 None => break,
             },
             _ = ticker.tick() => {
+                if letzter_kontakt.elapsed() > still_max {
+                    return Err(anyhow!("Relay antwortet nicht mehr"));
+                }
+                if letzter_ping.elapsed() > ping_alle {
+                    letzter_ping = Instant::now();
+                    if tx.send(WsMsg::Ping(Vec::new().into())).is_err() {
+                        return Err(anyhow!("Leitung zum Relay abgerissen"));
+                    }
+                }
                 let mut drop_session = false;
                 if let Some(s) = sess.as_mut() {
                     if let Err(e) = s.poll_confirm(&tx, shared) {
@@ -138,6 +195,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 continue;
             }
         };
+        letzter_kontakt = Instant::now();
         match msg {
             WsMsg::Text(t) => {
                 let v: serde_json::Value =
@@ -150,7 +208,8 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                             .unwrap_or("")
                             .to_string();
                         *shared.my_id.lock().unwrap() = id;
-                        shared.set_host_status("Bereit - warte auf Verbindungen");
+                        shared.set_net_state(1);
+                        shared.set_host_status(crate::i18n::t("net.ready_wait"));
                     }
                     "incoming" => {
                         if let Some(s) = sess.take() {
@@ -864,6 +923,14 @@ pub fn video_selftest(rounds: u32) -> String {
         delta.set_quality(prof.full_q, prof.tile_q);
 
         let mut nv12 = Vec::new();
+        // Dritter Weg: das Bild bleibt auf der Grafikkarte und geht als
+        // Textur in den Encoder. Wird erst beim ersten Bild gebaut, weil
+        // dafuer das Geraet der Aufnahme gebraucht wird.
+        #[cfg(windows)]
+        let mut direkt: Option<crate::h264::Encoder> = None;
+        #[cfg(windows)]
+        let (mut t_dir, mut b_dir, mut n_dir, mut dir_fehler) =
+            (0u128, 0usize, 0u32, String::new());
         let (mut t_cap, mut t_scale, mut t_nv, mut t_264, mut t_jpg) =
             (0u128, 0u128, 0u128, 0u128, 0u128);
         let (mut b_264, mut b_jpg) = (0usize, 0usize);
@@ -931,6 +998,44 @@ pub fn video_selftest(rounds: u32) -> String {
                 }
             }
 
+            #[cfg(windows)]
+            {
+                let t = Instant::now();
+                if let Some((dev, tex)) = cap.nv12_gpu(dw, dh) {
+                    if direkt.is_none() && dir_fehler.is_empty() {
+                        match crate::h264::Encoder::new_d3d(
+                            &dev,
+                            dw,
+                            dh,
+                            prof.fps as u32,
+                            prof.bitrate,
+                        ) {
+                            Ok(e) => direkt = Some(e),
+                            Err(e) => dir_fehler = e.to_string(),
+                        }
+                    }
+                    if let Some(e) = direkt.as_mut() {
+                        match e.encode_tex(&tex) {
+                            Ok(cs) => {
+                                t_dir += t.elapsed().as_micros();
+                                n_dir += 1;
+                                for c in cs {
+                                    b_dir += c.data.len();
+                                }
+                            }
+                            Err(err) => {
+                                if dir_fehler.is_empty() {
+                                    dir_fehler = err.to_string();
+                                }
+                                direkt = None;
+                            }
+                        }
+                    }
+                } else if dir_fehler.is_empty() {
+                    dir_fehler = "keine NV12-Textur von der Aufnahme".to_string();
+                }
+            }
+
             let t = Instant::now();
             let res = delta.encode(&rgb, dw, dh);
             t_jpg += t.elapsed().as_micros();
@@ -959,6 +1064,20 @@ pub fn video_selftest(rounds: u32) -> String {
             b_264 as f32 * 8.0 / 1_000_000.0 / (n_264.max(1) as f32 / prof.fps as f32),
             prof.fps
         ));
+        #[cfg(windows)]
+        {
+            if n_dir > 0 {
+                out.push_str(&format!(
+                    "DIREKT: alles auf der Grafikkarte {:.2} ms/Frame => {:.0} fps moeglich | {} Einheiten, {:.1} KB/Frame\n",
+                    t_dir as f32 / n_dir as f32 / 1000.0,
+                    1000.0 / (t_dir as f32 / n_dir as f32 / 1000.0).max(0.001),
+                    n_dir,
+                    b_dir as f32 / n_dir.max(1) as f32 / 1024.0,
+                ));
+            } else if !dir_fehler.is_empty() {
+                out.push_str(&format!("DIREKT: geht nicht - {}\n", dir_fehler));
+            }
+        }
         out.push_str(&format!(
             "JPEG  : encode {:.2} ms/Frame | {} gesendet, {:.1} KB/Frame, {:.2} Mbit/s bei {} fps\n",
             t_jpg as f32 / f / 1000.0,
@@ -1490,4 +1609,105 @@ fn input_loop(
     }
     // never leave keys stuck on the host when a session dies
     inj.release_all();
+}
+
+
+#[cfg(test)]
+mod verbindungstests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Ein Relay, der sich einmal meldet und danach schweigt - genau das,
+    /// was ein weggebrochenes WLAN aus Sicht des Programms ist: die
+    /// Leitung steht noch offen, es kommt nur nie wieder etwas.
+    async fn stummer_relay() -> (String, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = tokio::spawn(async move {
+            if let Ok((sock, _)) = l.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await {
+                    use futures_util::SinkExt;
+                    let _ = ws
+                        .send(WsMsg::text(
+                            "{\"t\":\"registered\",\"id\":\"123456789\"}",
+                        ))
+                        .await;
+                    // Ab jetzt nichts mehr - auch keine Antwort auf Pings.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        });
+        (format!("ws://{}", addr), h)
+    }
+
+    /// Frueher blieb "Bereit" stehen, bis TCP nach Minuten aufgab. Jetzt
+    /// muss der Zustand nach der Stille-Frist auf "offline" kippen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stille_leitung_wird_als_offline_erkannt() {
+        std::env::set_var("FV_PING_SEK", "1");
+        std::env::set_var("FV_STILL_SEK", "2");
+        std::env::set_var("FV_RETRY_SEK", "1");
+        let (url, _srv) = stummer_relay().await;
+        let shared = Arc::new(Shared::new(url, "pw".to_string()));
+        let s2 = shared.clone();
+        let host = tokio::spawn(async move { run_host(s2, "geheim".to_string(), true).await });
+
+        // 1) es muss ueberhaupt erst "bereit" werden
+        let mut war_bereit = false;
+        for _ in 0..40 {
+            if shared.net_state() == 1 && !shared.my_id.lock().unwrap().is_empty() {
+                war_bereit = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(war_bereit, "Registrierung wurde nie als 'bereit' gemeldet");
+
+        // 2) und danach, ohne ein einziges Lebenszeichen, auf offline kippen
+        let mut wurde_offline = false;
+        for _ in 0..60 {
+            if shared.net_state() == 2 {
+                wurde_offline = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        host.abort();
+        assert!(
+            wurde_offline,
+            "stille Leitung blieb 'bereit' - genau der Fehler, um den es geht"
+        );
+        assert!(
+            shared.my_id.lock().unwrap().is_empty(),
+            "die eigene Nummer muss weg sein, wenn niemand sie mehr kennt"
+        );
+        let text = shared.host_status.lock().unwrap().clone();
+        assert!(
+            text.contains("Offline") || text.contains("offline"),
+            "Statuszeile sagt nicht offline, sondern: {}",
+            text
+        );
+        // Der Ordnung halber: der Zaehler fuer laufende Sitzungen bleibt aus.
+        assert!(!shared.connected.load(Ordering::Relaxed));
+    }
+
+    /// Ohne Relay in Sicht darf nie "Bereit" stehen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kein_relay_erreichbar_heisst_offline() {
+        std::env::set_var("FV_RETRY_SEK", "1");
+        // Port 1 hoert niemand ab.
+        let shared = Arc::new(Shared::new("ws://127.0.0.1:1".to_string(), "pw".into()));
+        let s2 = shared.clone();
+        let host = tokio::spawn(async move { run_host(s2, "geheim".to_string(), true).await });
+        let mut offline = false;
+        for _ in 0..80 {
+            if shared.net_state() == 2 {
+                offline = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        host.abort();
+        assert!(offline, "ohne Relay muss der Zustand offline sein");
+    }
 }

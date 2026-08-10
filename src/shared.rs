@@ -38,6 +38,13 @@ pub struct Shared {
     pub relay_url: String,
     // host side
     pub my_id: Mutex<String>,
+    /// Wie es um die Leitung zum Relay steht: 0 = verbinde gerade,
+    /// 1 = angemeldet und erreichbar, 2 = offline.
+    ///
+    /// WARUM eigenes Feld: `my_id` sagt nur, dass wir irgendwann einmal
+    /// eine Nummer bekommen haben. Ob die Leitung JETZT steht, ist eine
+    /// andere Frage - und genau die will der Nutzer beantwortet haben.
+    pub net_state: AtomicU8,
     pub password: Mutex<String>,
     pub host_status: Mutex<String>,
     pub host_peer: Mutex<String>,
@@ -106,6 +113,7 @@ impl Shared {
         Self {
             relay_url,
             my_id: Mutex::new(String::new()),
+            net_state: AtomicU8::new(0),
             password: Mutex::new(password),
             host_status: Mutex::new("Starte...".to_string()),
             host_peer: Mutex::new("Keine aktive Sitzung".to_string()),
@@ -142,6 +150,15 @@ impl Shared {
             voice: std::sync::Arc::new(crate::audio::VoiceState::default()),            clip_on: AtomicBool::new(crate::ident::clipboard_enabled()),
             stats: Mutex::new(Stats::default()),
         }
+    }
+
+    /// 0 = verbinde, 1 = bereit, 2 = offline.
+    pub fn set_net_state(&self, v: u8) {
+        self.net_state
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn net_state(&self) -> u8 {
+        self.net_state.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_host_status(&self, s: impl Into<String>) {

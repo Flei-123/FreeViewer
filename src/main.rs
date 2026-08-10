@@ -2068,6 +2068,16 @@ fn main() -> eframe::Result<()> {
                 } else {
                     app.shot = Some(std::path::PathBuf::from(path));
                 }
+                // --shotwait N: Bild erst nach N Bildern - so laesst sich
+                // auch ein Zustand fotografieren, der ein paar Sekunden
+                // braucht (z. B. "Relay nicht erreichbar").
+                if let Some(n) = std::env::args()
+                    .skip_while(|a| a != "--shotwait")
+                    .nth(1)
+                    .and_then(|x| x.parse::<u32>().ok())
+                {
+                    app.shot_warte = n;
+                }
                 Ok(Box::new(app))
             }),
         );
@@ -2950,7 +2960,19 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                status_pill(ui, online, if online { i18n::t("pill.ready") } else { i18n::t("pill.connecting") });
+                let zustand = self.shared.net_state();
+                let online = online && zustand == 1;
+                status_pill(
+                    ui,
+                    online,
+                    if online {
+                        i18n::t("pill.ready")
+                    } else if zustand == 2 {
+                        i18n::t("st.no_net")
+                    } else {
+                        i18n::t("pill.connecting")
+                    },
+                );
             });
         });
         ui.add_space(6.0);
@@ -3049,7 +3071,7 @@ impl App {
                 divider(ui);
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    dot(ui, !my_id.is_empty());
+                    dot(ui, !my_id.is_empty() && self.shared.net_state() == 1);
                     ui.label(egui::RichText::new(host_status).size(12.0).color(p.muted));
                 });
                 if host_peer != i18n::t("start.nosession") && !host_peer.is_empty() {
@@ -4609,11 +4631,18 @@ if let Some(path) = self.shot.clone() {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Der Zustand kommt aus der Leitung selbst, nicht aus
+                        // "wir hatten mal eine Nummer": 0 verbinde, 1 bereit,
+                        // 2 offline.
+                        let zustand = self.shared.net_state();
+                        let online = online && zustand == 1;
                         status_pill(
                             ui,
                             online,
                             if online {
                                 i18n::t("st.ready")
+                            } else if zustand == 2 {
+                                i18n::t("st.no_net")
                             } else {
                                 i18n::t("st.connecting")
                             },

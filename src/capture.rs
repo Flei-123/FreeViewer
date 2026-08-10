@@ -69,6 +69,26 @@ pub trait Backend {
     fn gpu_scaling(&self) -> bool {
         false
     }
+
+    /// Das fertige NV12-Bild BLEIBT auf der Grafikkarte.
+    ///
+    /// WARUM: der bisherige Weg zieht jedes Bild einmal komplett ueber den
+    /// PCIe-Bus zurueck in den Hauptspeicher (Staging + Map + Kopie), nur
+    /// damit der Encoder es gleich wieder hinaufschiebt. Bei 2496x1664 sind
+    /// das 6 MB pro Bild - gemessen rund 8 ms, also mehr als der Encoder
+    /// selbst braucht. Wer die Textur direkt weiterreicht, spart den ganzen
+    /// Umweg; genau daran haengt, ob native Aufloesung fluessig bleibt.
+    #[cfg(windows)]
+    fn nv12_gpu(
+        &mut self,
+        _dw: u32,
+        _dh: u32,
+    ) -> Option<(
+        windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    )> {
+        None
+    }
 }
 
 /// One screen that can be shared. Index 0 is always the primary monitor.
@@ -544,6 +564,18 @@ mod dxgi {
         }
     }
 
+    /// Media Foundation ruft den Grafiktreiber aus seinem eigenen Faden.
+    /// Ohne diesen Schutz greifen Aufnahme und Encoder gleichzeitig auf
+    /// denselben Kontext zu - das endet in Bildsalat oder einem Absturz im
+    /// Treiber.
+    fn mehrfaedig_schuetzen(ctx: &ID3D11DeviceContext) {
+        if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
+            unsafe {
+                let _ = mt.SetMultithreadProtected(true);
+            }
+        }
+    }
+
     fn make_device(adapter: Option<&IDXGIAdapter1>) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
         let mut device: Option<ID3D11Device> = None;
         let mut ctx: Option<ID3D11DeviceContext> = None;
@@ -563,7 +595,7 @@ mod dxgi {
                 base.as_ref(),
                 kind,
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 Some(&levels),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
@@ -572,10 +604,10 @@ mod dxgi {
             )
             .map_err(|e| anyhow!("D3D11CreateDevice: {}", e))?;
         }
-        Ok((
-            device.ok_or_else(|| anyhow!("kein D3D11 device"))?,
-            ctx.ok_or_else(|| anyhow!("kein D3D11 context"))?,
-        ))
+        let device = device.ok_or_else(|| anyhow!("kein D3D11 device"))?;
+        let ctx = ctx.ok_or_else(|| anyhow!("kein D3D11 context"))?;
+        mehrfaedig_schuetzen(&ctx);
+        Ok((device, ctx))
     }
 
     /// One duplicable screen together with the adapter that drives it.
@@ -753,6 +785,11 @@ mod dxgi {
         /// true: the video processor writes NV12 (colour conversion included)
         pub nv12: bool,
         buf: Vec<u8>,
+        /// Fertige NV12-Bilder fuer den Encoder. Reihum, weil ein
+        /// Hardware-Encoder asynchron arbeitet und das zuletzt gelieferte
+        /// Bild noch liest, waehrend die Aufnahme schon das naechste malt.
+        ring: Vec<ID3D11Texture2D>,
+        ring_i: usize,
     }
 
     impl Scaler {
@@ -866,6 +903,8 @@ mod dxgi {
                     out_size: (ow, oh),
                     nv12,
                     buf: vec![0u8; bytes],
+                    ring: Vec::new(),
+                    ring_i: 0,
                 };
                 s.vctx.VideoProcessorSetStreamFrameFormat(
                     &s.proc,
@@ -916,6 +955,18 @@ mod dxgi {
         /// Vollbild ueber PCIe, keine Rechenzeit im Hauptprozessor, und die
         /// Bildpunkte sind ECHT statt hochgerechnet.
         pub fn scale_teil(
+            &mut self,
+            ctx: &ID3D11DeviceContext,
+            frame: &ID3D11Texture2D,
+            teil: (f32, f32, f32, f32),
+        ) -> Result<()> {
+            self.blt_teil(ctx, frame, teil)?;
+            self.rueck_ins_ram(ctx)
+        }
+
+        /// Nur die Arbeit auf der Grafikkarte: skalieren und (bei NV12) die
+        /// Farbwandlung. Das Ergebnis bleibt in der Ausgabetextur.
+        pub fn blt_teil(
             &mut self,
             ctx: &ID3D11DeviceContext,
             frame: &ID3D11Texture2D,
@@ -972,7 +1023,48 @@ mod dxgi {
                     .VideoProcessorBlt(&self.proc, &self.out_view, 0, &[stream.clone()]);
                 std::mem::ManuallyDrop::drop(&mut stream.pInputSurface);
                 res.map_err(|e| anyhow!("VideoProcessorBlt: {}", e))?;
+                Ok(())
+            }
+        }
 
+        /// Ein frisches NV12-Bild als Textur - fuer den Encoder, der es
+        /// direkt von der Grafikkarte nimmt. Kopiert in den Ring, damit die
+        /// naechste Aufnahme das laufende Bild nicht ueberschreibt.
+        pub fn gpu_frame(
+            &mut self,
+            ctx: &ID3D11DeviceContext,
+            device: &ID3D11Device,
+            frame: &ID3D11Texture2D,
+        ) -> Result<ID3D11Texture2D> {
+            self.blt_teil(ctx, frame, (0.0, 0.0, 1.0, 1.0))?;
+            if self.ring.is_empty() {
+                let (ow, oh) = self.out_size;
+                for _ in 0..3 {
+                    self.ring.push(make_tex_fmt(
+                        device,
+                        ow,
+                        oh,
+                        D3D11_USAGE_DEFAULT,
+                        D3D11_BIND_RENDER_TARGET.0 as u32
+                            | D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        0,
+                        DXGI_FORMAT_NV12,
+                    )?);
+                }
+            }
+            let i = self.ring_i % self.ring.len();
+            self.ring_i = self.ring_i.wrapping_add(1);
+            unsafe {
+                let src: ID3D11Resource = self.out_view.GetResource()?;
+                let dst: ID3D11Resource = self.ring[i].cast()?;
+                ctx.CopyResource(&dst, &src);
+            }
+            Ok(self.ring[i].clone())
+        }
+
+        /// Der klassische Weg: Ausgabetextur -> Staging -> Hauptspeicher.
+        fn rueck_ins_ram(&mut self, ctx: &ID3D11DeviceContext) -> Result<()> {
+            unsafe {
                 let dst_tex: ID3D11Resource = self.out_view.GetResource()?;
                 ctx.CopyResource(&self.stage, &dst_tex);
 
@@ -1450,6 +1542,46 @@ mod dxgi {
                 self.scaler_nv12.as_ref().map(|s| s.bytes())
             } else {
                 self.scaler.as_ref().map(|s| s.bytes())
+            }
+        }
+
+        fn nv12_gpu(&mut self, dw: u32, dh: u32) -> Option<(ID3D11Device, ID3D11Texture2D)> {
+            if !self.gpu_ok {
+                return None;
+            }
+            let frame = self.last_tex.clone()?;
+            let (iw, ih) = (self.w, self.h);
+            let need = self
+                .scaler_nv12
+                .as_ref()
+                .map(|s| s.in_size != (iw, ih) || s.out_size != (dw, dh))
+                .unwrap_or(true);
+            if need {
+                match Scaler::new(&self.device, &self.ctx, iw, ih, dw, dh, true) {
+                    Ok(s) => self.scaler_nv12 = Some(s),
+                    Err(e) => {
+                        super::log_line(&format!("gpu scaler aus: {}", e));
+                        self.gpu_ok = false;
+                        self.scaler_nv12 = None;
+                        return None;
+                    }
+                }
+            }
+            let ctx = self.ctx.clone();
+            let dev = self.device.clone();
+            let res = self
+                .scaler_nv12
+                .as_mut()
+                .map(|s| s.gpu_frame(&ctx, &dev, &frame));
+            match res {
+                Some(Ok(tex)) => Some((self.device.clone(), tex)),
+                Some(Err(e)) => {
+                    super::log_line(&format!("gpu frame fehlgeschlagen: {}", e));
+                    self.gpu_ok = false;
+                    self.scaler_nv12 = None;
+                    None
+                }
+                None => None,
             }
         }
 
