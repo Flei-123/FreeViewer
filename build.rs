@@ -27,8 +27,23 @@ fn main() {
         println!("cargo:warning=assets/freeviewer.ico fehlt - Datei bekommt kein Symbol");
         return;
     }
-    let Some(rc) = find_rc() else {
-        println!("cargo:warning=rc.exe nicht gefunden (Windows SDK?) - Datei bekommt kein Symbol");
+    // Zwei Wege zum selben Ziel:
+    //  * MSVC (auf Windows gebaut): rc.exe aus dem Windows-SDK -> .res
+    //  * mingw (auf Linux quergebaut): windres -> .o
+    // Der zweite Weg ist dazugekommen, weil der Server sonst zwar eine
+    // lauffaehige .exe baut, aber ohne Symbol - und eine Auslieferung ohne
+    // Programmsymbol sieht aus wie ein Bastelstueck.
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let werkzeug = if env == "gnu" {
+        find_windres().map(|p| (p, true))
+    } else {
+        find_rc().map(|p| (p, false))
+    };
+    let Some((rc, ist_windres)) = werkzeug else {
+        println!(
+            "cargo:warning={} nicht gefunden - Datei bekommt kein Symbol",
+            if env == "gnu" { "windres" } else { "rc.exe (Windows SDK?)" }
+        );
         return;
     };
 
@@ -95,20 +110,61 @@ END
         return;
     }
 
-    let status = std::process::Command::new(&rc)
-        .arg("/nologo")
-        .arg("/fo")
-        .arg(&res_file)
-        .arg(&rc_file)
-        .status();
-    match status {
-        Ok(s) if s.success() && res_file.exists() => {
-            // Der MSVC-Linker nimmt .res-Dateien wie Objektdateien entgegen.
-            println!("cargo:rustc-link-arg-bins={}", res_file.display());
-        }
-        Ok(s) => println!("cargo:warning=rc.exe endete mit {} - kein Symbol", s),
-        Err(e) => println!("cargo:warning=rc.exe nicht startbar: {} - kein Symbol", e),
+    // windres schreibt eine COFF-Objektdatei, rc.exe eine .res - beide
+    // nimmt der jeweilige Linker wie eine Objektdatei entgegen.
+    let ziel = if ist_windres {
+        out.join("freeviewer_res.o")
+    } else {
+        res_file.clone()
+    };
+    let mut befehl = std::process::Command::new(&rc);
+    if ist_windres {
+        befehl
+            .arg("-I")
+            .arg(root.join("assets"))
+            .arg("-O")
+            .arg("coff")
+            .arg("-i")
+            .arg(&rc_file)
+            .arg("-o")
+            .arg(&ziel);
+    } else {
+        befehl.arg("/nologo").arg("/fo").arg(&ziel).arg(&rc_file);
     }
+    match befehl.status() {
+        Ok(s) if s.success() && ziel.exists() => {
+            println!("cargo:rustc-link-arg-bins={}", ziel.display());
+        }
+        Ok(s) => println!("cargo:warning=Ressourcenwerkzeug endete mit {} - kein Symbol", s),
+        Err(e) => println!("cargo:warning=Ressourcenwerkzeug nicht startbar: {} - kein Symbol", e),
+    }
+}
+
+/// `windres` fuer den mingw-Querbau suchen: erst FV_WINDRES, dann die
+/// ueblichen Namen im PATH.
+fn find_windres() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("FV_WINDRES") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let namen = [
+        "x86_64-w64-mingw32-windres",
+        "windres",
+        "llvm-windres",
+    ];
+    if let Ok(paths) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for n in namen {
+                let cand = dir.join(n);
+                if cand.exists() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Sucht `rc.exe`: erst die Umgebungsvariable FV_RC, dann PATH, dann die
