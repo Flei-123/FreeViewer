@@ -25,6 +25,13 @@ use crate::shared::Shared;
 #[derive(Clone, Copy, Debug)]
 pub struct Profile {
     pub max_w: u32,
+    /// Obergrenze, wenn das Bild als H.264 geht.
+    ///
+    /// WARUM eine zweite Zahl: die 1920 stammen aus der JPEG-Zeit, wo jedes
+    /// Bild 46 KB kostete. H.264 braucht fuer dasselbe Bild 5 KB - da ist
+    /// Herunterskalieren nur noch Schaerfeverlust ohne Gegenwert. Genau das
+    /// ist der Unterschied, den man zu mstsc sieht.
+    pub max_w_video: u32,
     pub full_q: u8,
     pub tile_q: u8,
     pub fps: u64,
@@ -36,6 +43,9 @@ pub struct Profile {
 
 pub const ADMIN: Profile = Profile {
     max_w: 1920,
+    // Bis 2560 wird nichts verkleinert - ein 2496er Bildschirm geht in
+    // seiner echten Aufloesung ueber die Leitung.
+    max_w_video: 2560,
     full_q: 68,
     tile_q: 78,
     // Der Hardware-Encoder braucht etwa eine Millisekunde pro Bild - die
@@ -46,6 +56,8 @@ pub const ADMIN: Profile = Profile {
 
 pub const GAME: Profile = Profile {
     max_w: 1280,
+    // Im Spielmodus zaehlt die Bildrate mehr als die Schaerfe.
+    max_w_video: 1920,
     full_q: 48,
     tile_q: 55,
     fps: 60,
@@ -1097,6 +1109,104 @@ pub fn video_selftest(rounds: u32) -> String {
     out
 }
 
+/// Zaehler fuer die Statistik des Direktpfads (Bilder, Bytes, Fensterbeginn).
+struct DirektZahlen {
+    frames: u32,
+    bytes: usize,
+    fenster: Instant,
+}
+
+/// Ein Bild komplett auf der Grafikkarte encodieren und wegschicken.
+///
+/// Rueckgabe true = erledigt, der alte Weg ueber den Hauptspeicher wird
+/// uebersprungen. Bei jedem Fehler schaltet sich der Direktpfad dauerhaft ab
+/// (`aus`) und die Sitzung laeuft ohne Bruch auf dem alten Weg weiter.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn direkt_senden(
+    cap: &mut Box<dyn capture::Backend>,
+    enc: &mut Option<crate::h264::Encoder>,
+    aus: &mut bool,
+    dw: u32,
+    dh: u32,
+    prof: &Profile,
+    key: bool,
+    out: &mpsc::UnboundedSender<Vec<u8>>,
+    shared: &Arc<Shared>,
+    z: &mut DirektZahlen,
+) -> bool {
+    if *aus {
+        return false;
+    }
+    let Some((dev, tex)) = cap.nv12_gpu(dw, dh) else {
+        // Kein GPU-Weg (Screenshot-Backend, fremder Adapter, gesperrter
+        // Bildschirm) - das ist kein Fehler, nur der andere Weg.
+        return false;
+    };
+    let passt = enc.as_ref().map(|e| e.size() == (dw, dh)).unwrap_or(false);
+    if !passt {
+        match crate::h264::Encoder::new_d3d(&dev, dw, dh, prof.fps as u32, prof.bitrate) {
+            Ok(e) => {
+                capture::log_line(&format!(
+                    "Direktpfad an: {} {}x{} - das Bild verlaesst die Grafikkarte nicht mehr",
+                    e.name(),
+                    dw,
+                    dh
+                ));
+                shared.set_host_status(format!("Video: H.264 direkt von der GPU {}x{}", dw, dh));
+                *enc = Some(e);
+            }
+            Err(e) => {
+                capture::log_line(&format!("Direktpfad geht nicht ({}) - alter Weg", e));
+                *aus = true;
+                *enc = None;
+                return false;
+            }
+        }
+    }
+    let Some(e) = enc.as_mut() else {
+        return false;
+    };
+    if key {
+        e.request_keyframe();
+    }
+    match e.encode_tex(&tex) {
+        Ok(chunks) => {
+            for c in chunks {
+                z.frames += 1;
+                z.bytes += c.data.len();
+                if out
+                    .send(encode(&Msg::Video {
+                        width: dw,
+                        height: dh,
+                        key: c.key,
+                        data: c.data,
+                    }))
+                    .is_err()
+                {
+                    return true;
+                }
+            }
+            if z.fenster.elapsed() >= Duration::from_secs(1) {
+                let secs = z.fenster.elapsed().as_secs_f32();
+                let mut st = shared.stats.lock().unwrap();
+                st.fps = z.frames as f32 / secs;
+                st.kbps = (z.bytes as f32 * 8.0 / 1000.0) / secs;
+                z.frames = 0;
+                z.bytes = 0;
+                z.fenster = Instant::now();
+            }
+            true
+        }
+        Err(err) => {
+            capture::log_line(&format!("Direktpfad abgebrochen ({}) - alter Weg", err));
+            *aus = true;
+            *enc = None;
+            false
+        }
+    }
+}
+
 /// Capture thread + encode thread. The grabber keeps pulling frames while the
 /// encoder is still busy with the previous one, so a session runs at roughly
 /// max(capture, encode) instead of capture + encode.
@@ -1185,6 +1295,19 @@ fn capture_loop(
 
         let mut last_cursor = (i32::MIN, i32::MIN, false);
         let mut fails = 0u32;
+        // Der Encoder des Direktpfads lebt hier, im Aufnahmefaden: eine
+        // D3D11-Textur darf den Faden nicht wechseln, und 3 ms Arbeit
+        // bremsen die Aufnahme nicht.
+        #[cfg(windows)]
+        let mut direkt_enc: Option<crate::h264::Encoder> = None;
+        #[cfg(windows)]
+        let mut direkt_aus = std::env::var("FV_NODIREKT").is_ok();
+        #[cfg(windows)]
+        let mut direkt_z = DirektZahlen {
+            frames: 0,
+            bytes: 0,
+            fenster: Instant::now(),
+        };
         // A picture has to arrive even when nothing moves. Desktop
         // Duplication only reports *changes*, and the lock screen is
         // perfectly still - without this the viewer would stare at a black
@@ -1257,18 +1380,51 @@ fn capture_loop(
                     grabbed += 1;
                     last_push = Instant::now();
                     let (cw, ch) = cap.size();
-                    let (dw, dh) = target_size(cw, ch, prof.max_w);
-                    // With H.264 the GPU scales AND converts to NV12 in one
-                    // pass, so no RGB frame is ever built on the CPU.
-                    let (buf, is_nv12) = if h264_grab.load(Ordering::Relaxed) {
-                        let mut b = Vec::new();
-                        frame_nv12(&mut cap, dw, dh, &mut b);
-                        (b, true)
+                    let will_video = h264_grab.load(Ordering::Relaxed);
+                    let grenze = if will_video {
+                        prof.max_w_video
                     } else {
-                        (frame_rgb(&mut cap, dw, dh), false)
+                        prof.max_w
                     };
-                    // channel full = encoder still busy, drop this frame
-                    pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
+                    let (dw, dh) = target_size(cw, ch, grenze);
+                    // Erster Versuch: alles bleibt auf der Grafikkarte.
+                    let mut erledigt = false;
+                    #[cfg(windows)]
+                    if will_video {
+                        let key = key_grab.swap(false, Ordering::Relaxed);
+                        erledigt = direkt_senden(
+                            &mut cap,
+                            &mut direkt_enc,
+                            &mut direkt_aus,
+                            dw,
+                            dh,
+                            &prof,
+                            key,
+                            &out_grab,
+                            &shared_grab,
+                            &mut direkt_z,
+                        );
+                        if erledigt {
+                            pushed += 1;
+                        } else if key {
+                            // nicht geschafft - der Wunsch nach einem
+                            // Vollbild darf nicht verlorengehen
+                            key_grab.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    if !erledigt {
+                        // With H.264 the GPU scales AND converts to NV12 in one
+                        // pass, so no RGB frame is ever built on the CPU.
+                        let (buf, is_nv12) = if will_video {
+                            let mut b = Vec::new();
+                            frame_nv12(&mut cap, dw, dh, &mut b);
+                            (b, true)
+                        } else {
+                            (frame_rgb(&mut cap, dw, dh), false)
+                        };
+                        // channel full = encoder still busy, drop this frame
+                        pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
+                    }
                 }
                 Next::Unchanged => {
                     let quiet = last_push.elapsed();
@@ -1289,15 +1445,45 @@ fn capture_loop(
                         sent_any = true;
                         key_grab.store(true, Ordering::Relaxed);
                         let (cw, ch) = cap.size();
-                        let (dw, dh) = target_size(cw, ch, prof.max_w);
-                        let (buf, is_nv12) = if h264_grab.load(Ordering::Relaxed) {
-                            let mut b = Vec::new();
-                            frame_nv12(&mut cap, dw, dh, &mut b);
-                            (b, true)
+                        let will_video = h264_grab.load(Ordering::Relaxed);
+                        let grenze = if will_video {
+                            prof.max_w_video
                         } else {
-                            (frame_rgb(&mut cap, dw, dh), false)
+                            prof.max_w
                         };
-                        pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
+                        let (dw, dh) = target_size(cw, ch, grenze);
+                        let mut erledigt = false;
+                        #[cfg(windows)]
+                        if will_video {
+                            key_grab.store(false, Ordering::Relaxed);
+                            erledigt = direkt_senden(
+                                &mut cap,
+                                &mut direkt_enc,
+                                &mut direkt_aus,
+                                dw,
+                                dh,
+                                &prof,
+                                true,
+                                &out_grab,
+                                &shared_grab,
+                                &mut direkt_z,
+                            );
+                            if erledigt {
+                                pushed += 1;
+                            } else {
+                                key_grab.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if !erledigt {
+                            let (buf, is_nv12) = if will_video {
+                                let mut b = Vec::new();
+                                frame_nv12(&mut cap, dw, dh, &mut b);
+                                (b, true)
+                            } else {
+                                (frame_rgb(&mut cap, dw, dh), false)
+                            };
+                            pushed += raw_tx.try_send((buf, dw, dh, is_nv12)).is_ok() as u64;
+                        }
                     } else if !have_pixels
                         && !tried_fallback
                         && quiet > Duration::from_millis(700)
@@ -1409,6 +1595,8 @@ fn capture_loop(
 
         // (re)build the video encoder when the viewer, the resolution or the
         // profile changed; any failure silently falls back to JPEG tiles
+        // Der zweite Weg (ueber den Hauptspeicher) muss dieselbe Grenze
+        // benutzen, sonst baut er den Encoder bei jedem Bild neu.
         let fits = match &codec {
             Codec::H264 { enc, mode: m, .. } => enc.size() == (dw, dh) && *m == cur_mode,
             Codec::Jpeg(_) => false,
