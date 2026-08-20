@@ -2157,15 +2157,190 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    // Zweiter Anlauf ohne Hardwarebeschleunigung: manche Server haben zwar
+    // OpenGL, aber keinen Hardware-Kontext. Lieber langsam zeichnen als gar
+    // nicht starten.
+    let shared2 = shared.clone();
+    let shared3 = shared.clone();
+    let embedded2 = embedded.clone();
+    let bauen = move |cc: &eframe::CreationContext<'_>| {
+        install_theme(&cc.egui_ctx);
+        Ok(Box::new(App::new(shared, start_hidden, embedded.clone())) as Box<dyn eframe::App>)
+    };
+    // Der Wachhund: `run_native` haengt auf Rechnern ohne brauchbare
+    // Grafikausgabe, statt einen Fehler zurueckzugeben - ein Rueckgabewert,
+    // der nie kommt, laesst sich nicht auswerten.
+    {
+        let wach = shared3.clone();
+        std::thread::spawn(move || {
+            let frist = Duration::from_secs(
+                std::env::var("FV_FENSTER_FRIST_SEK")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(25),
+            );
+            std::thread::sleep(frist);
+            if BILD_GEZEICHNET.load(Ordering::Relaxed) {
+                return;
+            }
+            start_fehler_melden(&format!(
+                "Das Fenster kam auch nach {} Sekunden nicht hoch (kein Bild gezeichnet)",
+                frist.as_secs()
+            ));
+            ohne_fenster_weiterlaufen(&wach);
+        });
+    }
+    let erst = eframe::run_native(crate::brand::NAME, options, Box::new(bauen));
+    let Err(e1) = erst else {
+        return Ok(());
+    };
+    capture::log_line(&format!("Oberflaeche startet nicht ({}) - zweiter Anlauf ohne Hardwarebeschleunigung", e1));
+    let optionen2 = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([700.0, 470.0])
+            .with_visible(!start_hidden)
+            .with_icon(app_icon())
+            .with_title(crate::brand::NAME),
+        hardware_acceleration: eframe::HardwareAcceleration::Off,
+        ..Default::default()
+    };
+    let zweit = eframe::run_native(
         crate::brand::NAME,
-        options,
+        optionen2,
         Box::new(move |cc| {
             install_theme(&cc.egui_ctx);
-            Ok(Box::new(App::new(shared, start_hidden, embedded.clone())))
+            Ok(Box::new(App::new(shared2, start_hidden, embedded2.clone())) as Box<dyn eframe::App>)
         }),
+    );
+    match zweit {
+        Ok(()) => Ok(()),
+        Err(e2) => {
+            // Kein Fenster - aber der Rechner soll trotzdem erreichbar sein.
+            // Auf einem Server ist genau das der eigentliche Zweck.
+            start_fehler_melden(&format!("{} | ohne Hardwarebeschleunigung: {}", e1, e2));
+            ohne_fenster_weiterlaufen(&shared3);
+            Err(e2)
+        }
+    }
+}
+
+/// Der Host laeuft schon in eigenen Faeden - hier wird nur gewartet und
+/// protokolliert, damit der Prozess am Leben bleibt.
+fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
+    capture::log_line("Oberflaeche geht nicht - laufe als Host ohne Fenster weiter");
+    let mut zuletzt = String::new();
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let id = shared.my_id.lock().unwrap().clone();
+        let status = shared.host_status.lock().unwrap().clone();
+        let zeile = format!("ohne Fenster: ID {} | {}", id, status);
+        if zeile != zuletzt {
+            capture::log_line(&zeile);
+            println!("{}", zeile);
+            zuletzt = zeile;
+        }
+    }
+}
+
+/// Wurde schon mindestens ein Bild gezeichnet? Daran haengt der Wachhund:
+/// ohne dieses Lebenszeichen ist die Oberflaeche nicht gestartet.
+static BILD_GEZEICHNET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Warum der Start schiefging - fuer Menschen lesbar.
+///
+/// Der haeufigste Fall ist ein Rechner ohne brauchbare Grafikausgabe:
+/// Windows-Server mit "Microsoft Basic Display Adapter", eine RDP-Sitzung
+/// ohne Grafikweiterleitung, oder ein Rechner ohne Grafiktreiber. Dort
+/// scheitert der OpenGL-Kontext, den die Oberflaeche braucht.
+fn start_fehler_text(e: &str) -> String {
+    let low = e.to_lowercase();
+    let grund = if low.contains("opengl")
+        || low.contains("glutin")
+        || low.contains("wgl")
+        || low.contains("egl")
+        || low.contains("no available")
+        || low.contains("context")
+        || low.contains("pixel format")
+        || low.contains("surface")
+    {
+        "Dieser Rechner stellt keine brauchbare Grafikausgabe bereit.\n\n         Das passiert auf Servern ohne Grafiktreiber (Microsoft Basic Display          Adapter) und in Remotedesktop-Sitzungen ohne Grafikweiterleitung.\n\n         Was hilft:\n         \u{2022} Grafiktreiber des Servers installieren\n         \u{2022} direkt an der Konsole des Servers anmelden statt ueber          Remotedesktop\n         \u{2022} in einer virtuellen Maschine die Grafikbeschleunigung          einschalten"
+    } else {
+        "Der Start wurde vom Betriebssystem abgewiesen."
+    };
+    format!(
+        "{} konnte kein Fenster oeffnen.\n\n{}\n\n\
+         DER RECHNER BLEIBT TROTZDEM ERREICHBAR: {} laeuft im Hintergrund \
+         weiter, man kann sich also von aussen daraufschalten.\n\n\
+         Damit das auch nach einem Neustart und vor der Anmeldung gilt, als \
+         Administrator einmal aufrufen:\n    {} --install-service\n\n\
+         Technische Meldung:\n{}\n\nAlle Einzelheiten stehen in:\n{}",
+        crate::brand::NAME,
+        grund,
+        crate::brand::NAME,
+        crate::brand::EXE,
+        e,
+        ident::config_dir().join("start.log").display()
     )
 }
+
+/// Schreibt den Fehler ins Log und zeigt ihn als Fenster.
+fn start_fehler_melden(e: &str) {
+    let text = start_fehler_text(e);
+    let pfad = ident::config_dir().join("start.log");
+    let _ = std::fs::create_dir_all(ident::config_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&pfad)
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "[{}] Start fehlgeschlagen ({} {}): {}",
+            chrono_zeit(),
+            crate::brand::NAME,
+            update::VERSION,
+            e
+        );
+    }
+    eprintln!("{}", text);
+    fehlerfenster(&text);
+}
+
+/// Datum und Uhrzeit ohne zusaetzliche Kiste - fuer eine Logzeile reicht das.
+fn chrono_zeit() -> String {
+    let jetzt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix {}", jetzt)
+}
+
+#[cfg(windows)]
+fn fehlerfenster(text: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+    let mut t: Vec<u16> = text.encode_utf16().collect();
+    t.push(0);
+    let mut titel: Vec<u16> = format!("{} - Start fehlgeschlagen", crate::brand::NAME)
+        .encode_utf16()
+        .collect();
+    titel.push(0);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(t.as_ptr()),
+            PCWSTR(titel.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn fehlerfenster(_text: &str) {}
 
 struct App {
     shared: Arc<Shared>,
@@ -7896,6 +8071,8 @@ fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Lebenszeichen fuer den Wachhund: die Oberflaeche zeichnet.
+        BILD_GEZEICHNET.store(true, Ordering::Relaxed);
         if let Some(n) = self.meet_demo {
             self.meet_demo_ui(ctx, n);
             self.shot_ui(ctx);
