@@ -2147,6 +2147,15 @@ fn main() -> eframe::Result<()> {
         update::gui_marke_pflegen();
     }
 
+    // FV_RENDERER=dx erzwingt DirectX von Anfang an (fuer die Hotline:
+    // wer weiss, dass sein Rechner kein OpenGL hat, spart sich die zwei
+    // Fehlversuche). Alles andere geht den normalen Weg.
+    let dx_erzwungen = std::env::var("FV_RENDERER")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "dx" || v == "directx" || v == "wgpu"
+        })
+        .unwrap_or(false);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
@@ -2154,6 +2163,11 @@ fn main() -> eframe::Result<()> {
             .with_visible(!start_hidden)
             .with_icon(app_icon())
             .with_title(crate::brand::NAME),
+        renderer: if dx_erzwungen {
+            eframe::Renderer::Wgpu
+        } else {
+            eframe::Renderer::Glow
+        },
         ..Default::default()
     };
 
@@ -2162,7 +2176,9 @@ fn main() -> eframe::Result<()> {
     // nicht starten.
     let shared2 = shared.clone();
     let shared3 = shared.clone();
+    let shared4 = shared.clone();
     let embedded2 = embedded.clone();
+    let embedded3 = embedded.clone();
     let bauen = move |cc: &eframe::CreationContext<'_>| {
         install_theme(&cc.egui_ctx);
         Ok(Box::new(App::new(shared, start_hidden, embedded.clone())) as Box<dyn eframe::App>)
@@ -2183,6 +2199,13 @@ fn main() -> eframe::Result<()> {
             if BILD_GEZEICHNET.load(Ordering::Relaxed) {
                 return;
             }
+            // Die Anlaeufe (OpenGL, OpenGL ohne Beschleunigung, DirectX)
+            // melden sich selbst, wenn sie alle durch sind - dann kuemmert
+            // sich der Hauptpfad um die Meldung. Der Wachhund ist NUR fuer
+            // den Fall da, dass `run_native` haengt und nie zurueckkommt.
+            if ANLAEUFE_FERTIG.load(Ordering::Relaxed) {
+                return;
+            }
             start_fehler_melden(&format!(
                 "Das Fenster kam auch nach {} Sekunden nicht hoch (kein Bild gezeichnet)",
                 frist.as_secs()
@@ -2190,7 +2213,14 @@ fn main() -> eframe::Result<()> {
             ohne_fenster_weiterlaufen(&wach);
         });
     }
-    let erst = eframe::run_native(crate::brand::NAME, options, Box::new(bauen));
+    let gl_kaputt_simulieren = std::env::var("FV_TEST_GL_KAPUTT").as_deref() == Ok("1");
+    let erst = if gl_kaputt_simulieren {
+        Err(eframe::Error::AppCreation(
+            "TEST: OpenGL kuenstlich abgeschaltet".into(),
+        ))
+    } else {
+        eframe::run_native(crate::brand::NAME, options, Box::new(bauen))
+    };
     let Err(e1) = erst else {
         return Ok(());
     };
@@ -2205,22 +2235,73 @@ fn main() -> eframe::Result<()> {
         hardware_acceleration: eframe::HardwareAcceleration::Off,
         ..Default::default()
     };
-    let zweit = eframe::run_native(
+    let zweit = if gl_kaputt_simulieren {
+        Err(eframe::Error::AppCreation(
+            "TEST: OpenGL kuenstlich abgeschaltet".into(),
+        ))
+    } else {
+        eframe::run_native(
+            crate::brand::NAME,
+            optionen2,
+            Box::new(move |cc| {
+                install_theme(&cc.egui_ctx);
+                Ok(Box::new(App::new(shared2, start_hidden, embedded2.clone()))
+                    as Box<dyn eframe::App>)
+            }),
+        )
+    };
+    let e2 = match zweit {
+        Ok(()) => return Ok(()),
+        Err(e2) => e2,
+    };
+
+    // DRITTER ANLAUF: DIRECTX STATT OPENGL.
+    //
+    // Genau hier lag der Kundenfall vom 20.08.2026 (start.log:
+    // "egui_glow requires opengl 2.0+"). Windows bringt von sich aus NUR
+    // OpenGL 1.1 mit (der "GDI Generic"-Renderer) - auf Servern, in
+    // Remotedesktop-Sitzungen und in virtuellen Maschinen ohne
+    // Grafiktreiber ist das alles, was es gibt. Beide OpenGL-Anlaeufe
+    // muessen dort scheitern, auch der ohne Hardwarebeschleunigung:
+    // "keine Beschleunigung" heisst bei OpenGL trotzdem OpenGL.
+    //
+    // Direct3D ist die Windows-eigene Schnittstelle und IMMER da: fehlt
+    // eine echte Grafikkarte, springt Microsofts eigener Software-
+    // Rasterizer WARP ein ("Microsoft Basic Render Driver"). Deshalb
+    // zeichnet dieser Anlauf auch auf einer nackten VM ein Fenster.
+    capture::log_line(&format!(
+        "OpenGL geht nicht ({}) - dritter Anlauf mit DirectX (wgpu)",
+        e2
+    ));
+    let optionen3 = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([700.0, 470.0])
+            .with_visible(!start_hidden)
+            .with_icon(app_icon())
+            .with_title(crate::brand::NAME),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+    let dritt = eframe::run_native(
         crate::brand::NAME,
-        optionen2,
+        optionen3,
         Box::new(move |cc| {
             install_theme(&cc.egui_ctx);
-            Ok(Box::new(App::new(shared2, start_hidden, embedded2.clone())) as Box<dyn eframe::App>)
+            Ok(Box::new(App::new(shared4, start_hidden, embedded3.clone())) as Box<dyn eframe::App>)
         }),
     );
-    match zweit {
+    match dritt {
         Ok(()) => Ok(()),
-        Err(e2) => {
+        Err(e3) => {
             // Kein Fenster - aber der Rechner soll trotzdem erreichbar sein.
             // Auf einem Server ist genau das der eigentliche Zweck.
-            start_fehler_melden(&format!("{} | ohne Hardwarebeschleunigung: {}", e1, e2));
+            ANLAEUFE_FERTIG.store(true, Ordering::Relaxed);
+            start_fehler_melden(&format!(
+                "{} | ohne Hardwarebeschleunigung: {} | DirectX: {}",
+                e1, e2, e3
+            ));
             ohne_fenster_weiterlaufen(&shared3);
-            Err(e2)
         }
     }
 }
@@ -2246,6 +2327,10 @@ fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
 /// Wurde schon mindestens ein Bild gezeichnet? Daran haengt der Wachhund:
 /// ohne dieses Lebenszeichen ist die Oberflaeche nicht gestartet.
 static BILD_GEZEICHNET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sind alle Anlaeufe (OpenGL, OpenGL ohne Beschleunigung, DirectX) durch?
+/// Dann meldet der Hauptpfad den Fehler - der Wachhund haelt sich raus.
+static ANLAEUFE_FERTIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Warum der Start schiefging - fuer Menschen lesbar.
 ///
