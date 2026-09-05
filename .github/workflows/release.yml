@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - build: linux
-            os: ubuntu-22.04
+            os: ubuntu-24.04   # libspa 0.10 braucht PipeWire >= 0.3.65, 22.04 hat 0.3.48
             target: x86_64-unknown-linux-gnu
             archive: freeviewer-linux-x86_64.tar.gz
           - build: macos
@@ -46,6 +46,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxrandr-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libxdo-dev libxi-dev libgtk-3-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev pkg-config cmake nasm autoconf automake libtool
+      - name: Autotools for audiopus_sys (macOS)
+        if: matrix.build == 'macos'
+        run: brew install autoconf automake libtool
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
       - name: Archive
