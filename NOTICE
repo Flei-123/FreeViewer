@@ -1,0 +1,22 @@
+FreeViewer
+Copyright (C) 2025-2026 Justin (Fleitec)
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+ADDITIONAL TERM UNDER SECTION 7(b) OF THE GNU GPL VERSION 3
+-----------------------------------------------------------
+As permitted by section 7(b) of the GNU General Public License version 3,
+you must preserve the following attribution in all copies, modified
+versions and works based on this program:
+
+    "Based on FreeViewer by Justin (Fleitec) -- https://github.com/Flei-123/FreeViewer"
+
+It must appear in the documentation and in the "about" window of the
+program. Removing or obscuring it terminates the licence granted to you.
+
+Dependency licences: see LICENSES/UEBERSICHT-alt.md and Cargo.toml.
