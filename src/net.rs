@@ -10,6 +10,12 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 pub type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub async fn connect(url: &str) -> Result<Ws> {
+    // The relay learns our host secret at registration. Plain ws:// would send
+    // it in the clear, so it is only allowed when explicitly asked for
+    // (FV_ALLOW_INSECURE_RELAY=1, e.g. a relay on the same LAN during tests).
+    if url.starts_with("ws://") && std::env::var("FV_ALLOW_INSECURE_RELAY").ok().as_deref() != Some("1") {
+        anyhow::bail!("relay {url} is plain ws:// -- use wss:// or set FV_ALLOW_INSECURE_RELAY=1");
+    }
     let (ws, _resp) = connect_async(url).await?;
     Ok(ws)
 }

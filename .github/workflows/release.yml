@@ -1,104 +1,80 @@
 name: Release
 
+# Laeuft bei einem v*-Tag: baut Linux, macOS und Windows und haengt die
+# Archive an das GitHub-Release. Ohne eingemottete actions-rs-Aktionen.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: FreeViewer ${{ github.ref }}
-        draft: false
-        prerelease: false
+permissions:
+  contents: write
 
-  build-release:
-    name: Build Release
-    needs: create-release
+jobs:
+  build:
+    name: Build ${{ matrix.build }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        build: [linux, macos, windows]
         include:
-        - build: linux
-          os: ubuntu-latest
-          rust: stable
-          target: x86_64-unknown-linux-gnu
-          archive-name: freeviewer-linux.tar.gz
-        - build: macos
-          os: macos-latest
-          rust: stable
-          target: x86_64-apple-darwin
-          archive-name: freeviewer-macos.tar.gz
-        - build: windows
-          os: windows-latest
-          rust: stable
-          target: x86_64-pc-windows-msvc
-          archive-name: freeviewer-windows.zip
-
+          - build: linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: freeviewer-linux-x86_64.tar.gz
+          - build: macos
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: freeviewer-macos-arm64.tar.gz
+          - build: windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: freeviewer-windows-x86_64.zip
     steps:
-    - name: Checkout sources
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages (Linux)
+        if: matrix.build == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxi-dev libgtk-3-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev pkg-config cmake nasm autoconf automake libtool
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Archive
+        shell: bash
+        run: |
+          mkdir archive && cp LICENSE README.md archive/
+          if [ "${{ matrix.build }}" = "windows" ]; then
+            cp target/${{ matrix.target }}/release/freeviewer.exe archive/
+            (cd archive && 7z a ../${{ matrix.archive }} *)
+          else
+            strip target/${{ matrix.target }}/release/freeviewer || true
+            cp target/${{ matrix.target }}/release/freeviewer archive/
+            tar czf ${{ matrix.archive }} -C archive .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
 
-    - name: Install ${{ matrix.rust }} toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: ${{ matrix.rust }}
-        target: ${{ matrix.target }}
-        override: true
-
-    - name: Install system dependencies (Linux)
-      if: matrix.build == 'linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libx11-dev libxrandr-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev
-
-    - name: Build release binary
-      uses: actions-rs/cargo@v1
-      with:
-        command: build
-        args: --release --target ${{ matrix.target }}
-
-    - name: Strip release binary (linux and macos)
-      if: matrix.build == 'linux' || matrix.build == 'macos'
-      run: strip "target/${{ matrix.target }}/release/freeviewer"
-
-    - name: Build archive
-      shell: bash
-      run: |
-        mkdir archive
-        cp LICENSE README.md archive/
-        
-        if [ "${{ matrix.build }}" = "windows" ]; then
-          cp "target/${{ matrix.target }}/release/freeviewer.exe" archive/
-          cd archive
-          7z a "../${{ matrix.archive-name }}" *
-        else
-          cp "target/${{ matrix.target }}/release/freeviewer" archive/
-          tar czf "${{ matrix.archive-name }}" -C archive .
-        fi
-
-    - name: Upload release archive
-      uses: actions/upload-release-asset@v1.0.1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }}
-        asset_path: ${{ matrix.archive-name }}
-        asset_name: ${{ matrix.archive-name }}
-        asset_content_type: application/octet-stream
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -60,3 +60,7 @@ sample.log
 lf.ps1
 tools/lf.ps1
 tools/append_selftest.ps1
+
+# alte Quell-Snapshots und Linux-Binaries gehoeren nicht ins Repo
+*.tgz
+freeviewer-v*

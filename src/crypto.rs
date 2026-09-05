@@ -82,12 +82,11 @@ pub fn session_key(secret: &StaticSecret, peer_pub: &[u8; 32], salt: &[u8; 16]) 
 pub fn password_key(password: &str, salt: &[u8; 16]) -> [u8; 32] {
     let mut out = [0u8; 32];
     let a = argon2::Argon2::default();
-    if a.hash_password_into(password.as_bytes(), salt, &mut out).is_err() {
-        // fall back to a plain hash so the handshake still completes deterministically
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(salt).expect("hmac key");
-        mac.update(password.as_bytes());
-        out.copy_from_slice(&mac.finalize().into_bytes());
-    }
+    // No fallback: a handshake with a weak key is worse than no handshake.
+    // hash_password_into only fails on impossible parameter sizes, which would
+    // be a programming error, not a runtime condition.
+    a.hash_password_into(password.as_bytes(), salt, &mut out)
+        .expect("argon2id: password key derivation failed");
     out
 }
 
