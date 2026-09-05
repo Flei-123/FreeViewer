@@ -45,7 +45,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxrandr-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
-            libxdo-dev libxi-dev libgtk-3-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev pkg-config cmake nasm autoconf automake libtool
+            libxdo-dev libxi-dev libgtk-3-dev libasound2-dev libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev libgbm-dev libdrm-dev pkg-config cmake nasm autoconf automake libtool
       - name: Autotools for audiopus_sys (macOS)
         if: matrix.build == 'macos'
         run: brew install autoconf automake libtool
