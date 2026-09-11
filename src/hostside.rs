@@ -1832,6 +1832,11 @@ mod verbindungstests {
     /// muss der Zustand nach der Stille-Frist auf "offline" kippen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stille_leitung_wird_als_offline_erkannt() {
+        // Seit dem Sicherheits-Commit 1ccde14 wird ws:// abgelehnt. Der
+        // Testrelay laeuft auf 127.0.0.1 und ist damit gemeint, wenn die
+        // Ausnahme ueberhaupt einen Zweck hat - ohne diese Zeile scheitert
+        // der Test an der Verbindung, nicht an der Sache, um die es geht.
+        std::env::set_var("FV_ALLOW_INSECURE_RELAY", "1");
         std::env::set_var("FV_PING_SEK", "1");
         std::env::set_var("FV_STILL_SEK", "2");
         std::env::set_var("FV_RETRY_SEK", "1");

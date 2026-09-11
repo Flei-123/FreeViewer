@@ -1291,7 +1291,11 @@ pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
     let f = farben();
     let mut abbrechen = false;
     // Die Punkte atmen - dafuer muss neu gezeichnet werden.
-    ctx.request_repaint_after(std::time::Duration::from_millis(60));
+    // 20 ms statt 60. In diesem Takt haengt ALLES am Meeting: Mikrofon
+    // abholen, Kamerabild kodieren, Ton an den Lautsprecher. Mit 60 ms
+    // waren hoechstens 16 Bilder/s moeglich, und das Mikrofon lieferte
+    // seine 20-ms-Rahmen im Dreierpack statt einzeln.
+    ctx.request_repaint_after(std::time::Duration::from_millis(20));
     let t = ctx.input(|i| i.time) as f32;
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(f.p.bg))

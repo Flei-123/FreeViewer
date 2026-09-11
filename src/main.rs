@@ -1156,6 +1156,12 @@ fn main() -> eframe::Result<()> {
         let start = std::time::Instant::now();
         let mut naechster = std::time::Instant::now();
         let mut pegel_max = 0.0f32;
+        let schwall: usize = std::env::var("FV_MEET_BURST")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut geschwallt = false;
+        let mut stau_max: u32 = 0;
         while start.elapsed().as_secs() < dauer {
             for e in sig.abholen() {
                 match &e {
@@ -1211,6 +1217,19 @@ fn main() -> eframe::Result<()> {
                     }
                 }
             }
+            // Absichtlicher SCHWALL: stellt einen Haenger der Oberflaeche
+            // nach (Fenster ziehen, Kamera oeffnen). Vorher blieb der
+            // dadurch entstandene Rueckstau fuer immer als Verzoegerung
+            // stehen - mit FV_MEET_BURST=500 laesst sich genau das messen.
+            if !geschwallt && start.elapsed().as_secs() >= 4 {
+                geschwallt = true;
+                if schwall > 0 {
+                    for _ in 0..schwall {
+                        ton.senden(meetrtc::testton(&mut phase, 440.0));
+                    }
+                    println!("SCHWALL {} Rahmen auf einmal eingespeist ({} ms Ton)", schwall, schwall * 20);
+                }
+            }
             // alle 20 ms ein Rahmen Testton (440 Hz)
             while std::time::Instant::now() >= naechster {
                 naechster += std::time::Duration::from_millis(20);
@@ -1218,13 +1237,19 @@ fn main() -> eframe::Result<()> {
             }
             let z = ton.zahlen();
             pegel_max = pegel_max.max(z.pegel_rein);
+            stau_max = stau_max.max(z.ton_stau);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let z = ton.zahlen();
         println!(
-            "ZAHLEN verbunden={} gesendet={} empfangen={} bild_gesendet={} bild_empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3}",
+            "ZAHLEN verbunden={} gesendet={} empfangen={} bild_gesendet={} bild_empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3} bandbreite={} ton_verworfen={} ton_stau={}",
             z.verbunden, z.gesendet, z.empfangen, z.bild_gesendet, z.bild_empfangen,
-            z.bytes_raus, z.bytes_rein, pegel_max
+            z.bytes_raus, z.bytes_rein, pegel_max, z.bandbreite, z.ton_verworfen, z.ton_stau
+        );
+        println!(
+            "STAU hoechstens {} Rahmen = {} ms Verzoegerung im Sendepuffer",
+            stau_max,
+            stau_max * 20
         );
         ton.beenden();
         sig.verlassen();

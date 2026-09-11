@@ -11,6 +11,66 @@ use crate::meetrtc;
 use crate::meetsig;
 use anyhow::Result;
 
+// ------------------------------------------------------- Bitraten
+// WARUM SO NIEDRIG: vorher standen hier 2 Mbit/s fuer eine 640x360-Kamera
+// und 4 Mbit/s fuer den Bildschirm - zusammen 6 Mbit/s Upload. Das haelt
+// kaum eine Hausleitung aus, und weil der Client die Bandbreite nicht
+// geschaetzt hat, sendete er trotzdem weiter. Die Pakete standen dann im
+// Router Schlange, und genau daraus werden die 5 bis 10 Sekunden
+// Verzoegerung. Ein Browser gibt einer 640x360-Kamera 0,3 bis 0,7 Mbit/s.
+/// Kamera 640x360 bei 30 Bildern/s.
+pub const KAMERA_BITRATE: u32 = 700_000;
+/// Avatar - gezeichnete Flaechen, die kosten fast nichts.
+pub const AVATAR_BITRATE: u32 = 400_000;
+/// Bildschirm bis 1920x1080 bei 20 Bildern/s. Bildschirminhalt ist
+/// grossflaechig gleich und laesst sich gut zusammenpressen.
+pub const SCHIRM_BITRATE: u32 = 1_800_000;
+
+/// Untere und obere Schranken - unter der unteren sieht es aus wie Matsch,
+/// ueber der oberen bringt mehr nichts.
+pub const KAMERA_MIN: u32 = 150_000;
+pub const KAMERA_MAX: u32 = 1_200_000;
+pub const SCHIRM_MIN: u32 = 300_000;
+pub const SCHIRM_MAX: u32 = 3_000_000;
+
+/// Teilt die gemessene Sendebandbreite auf Kamera und Bildschirm auf.
+///
+/// WARUM 85 % UND NICHT 100 %: Ton, RTCP und die Signalisierung laufen
+/// ueber dieselbe Leitung, und eine Schaetzung ist eine Schaetzung. Wer
+/// sie voll ausreizt, fuellt bei der ersten Schwankung wieder den Router -
+/// und dann ist die Verzoegerung zurueck.
+///
+/// Der Bildschirm bekommt den groesseren Teil: dort steht Text, den man
+/// lesen koennen muss. Ein koerniges Gesicht stoert weniger als eine
+/// unlesbare Zeile Quelltext.
+///
+/// `schaetzung` = 0 bedeutet "keine Messung" - dann bleiben die
+/// Voreinstellungen stehen.
+pub fn bitraten_verteilen(schaetzung: u64, kamera: bool, schirm: bool) -> (u32, u32) {
+    if schaetzung == 0 {
+        return (KAMERA_BITRATE, SCHIRM_BITRATE);
+    }
+    let nutzbar = (schaetzung as f64 * 0.85) as u32;
+    let (k, s) = match (kamera, schirm) {
+        (true, true) => ((nutzbar as f64 * 0.30) as u32, (nutzbar as f64 * 0.70) as u32),
+        (true, false) => (nutzbar, SCHIRM_BITRATE),
+        (false, true) => (KAMERA_BITRATE, nutzbar),
+        (false, false) => (KAMERA_BITRATE, SCHIRM_BITRATE),
+    };
+    (
+        k.clamp(KAMERA_MIN, KAMERA_MAX),
+        s.clamp(SCHIRM_MIN, SCHIRM_MAX),
+    )
+}
+
+/// Lohnt es sich, den Kodierer neu aufzusetzen? Das kostet ein
+/// Schluesselbild, also nicht wegen jeder Kleinigkeit - erst ab einem
+/// Drittel Unterschied.
+pub fn bitrate_lohnt_wechsel(jetzt: u32, ziel: u32) -> bool {
+    let (a, b) = (jetzt.max(1) as f64, ziel.max(1) as f64);
+    (a - b).abs() / a >= 0.34
+}
+
 pub struct NativMeet {
     sig: meetsig::Sitzung,
     ton: meetrtc::Ton,
@@ -31,6 +91,14 @@ pub struct NativMeet {
     /// Format der ankommenden Bilder ("H264"/"Vp8") - fuer die Anzeige.
     pub bild_codec: String,
     /// Dekodierte KAMERA-Bilder der anderen (je Teilnehmer das letzte).
+    /// Womit die Kamera gerade kodiert (bit/s).
+    pub koder_bitrate: u32,
+    /// Womit der Bildschirm gerade kodiert (bit/s).
+    pub schirm_bitrate: u32,
+    /// Wann zuletzt nachgerechnet wurde.
+    bitrate_geprueft: std::time::Instant,
+    /// Wie oft die Bitrate schon nachgefuehrt wurde - nur zum Messen.
+    pub bitrate_wechsel: u32,
     pub bilder: crate::meetvideo::Dekodierer,
     /// Dekodierte BILDSCHIRM-Bilder der anderen. Eigener Topf, sonst wuerde
     /// die Freigabe das Gesicht desselben Teilnehmers ueberschreiben.
@@ -210,6 +278,10 @@ impl NativMeet {
             raum: raum.to_string(),
             bild_zaehler: 0,
             bild_codec: String::new(),
+            koder_bitrate: KAMERA_BITRATE,
+            schirm_bitrate: SCHIRM_BITRATE,
+            bitrate_geprueft: std::time::Instant::now(),
+            bitrate_wechsel: 0,
             bilder: crate::meetvideo::Dekodierer::neu(),
             schirme: crate::meetvideo::Dekodierer::neu(),
             kamera: None,
@@ -527,6 +599,7 @@ impl NativMeet {
                 }
             }
         }
+        self.bitrate_pumpe();
         self.kamera_pumpe();
         self.schirm_pumpe();
         self.zeiger_pumpe();
@@ -751,11 +824,12 @@ impl NativMeet {
                 return;
             }
             match crate::meetschirm::oeffnen_quelle(quelle, 1920, 1080, 15) {
-                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, 4_000_000) {
+                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, SCHIRM_BITRATE) {
                     Ok(k) => {
                         self.schirm_meldung = format!("Teile {}", a.name);
                         self.schirm = Some(a);
                         self.schirm_koder = Some(k);
+                        self.schirm_bitrate = SCHIRM_BITRATE;
                         self.schirm_an = true;
                         self.schirm_gesendet = 0;
                         self.letztes_schluesselbild =
@@ -821,6 +895,41 @@ impl NativMeet {
 
     /// Kamera -> H.264 -> Meeting. Laeuft mit 15 Bildern je Sekunde; das
     /// Bild wird beim Abholen genommen, nicht gestaut.
+    /// Die Bitrate der gemessenen Leitung nachfuehren.
+    ///
+    /// Der Kodierer laesst sich nicht im Betrieb umstellen, also wird er
+    /// neu aufgesetzt. Das kostet ein Schluesselbild - deshalb hoechstens
+    /// alle drei Sekunden und erst ab einem Drittel Unterschied.
+    fn bitrate_pumpe(&mut self) {
+        if self.bitrate_geprueft.elapsed() < std::time::Duration::from_secs(3) {
+            return;
+        }
+        self.bitrate_geprueft = std::time::Instant::now();
+        let schaetzung = self.ton.zahlen().bandbreite;
+        let (k, s) = bitraten_verteilen(schaetzung, self.kamera_an, self.schirm_an);
+        if self.koder.is_some() && bitrate_lohnt_wechsel(self.koder_bitrate, k) {
+            let (b, h, fps) = match (&self.kamera, self.avatar_an) {
+                (Some(kam), _) => (kam.breite, kam.hoehe, 30),
+                (None, true) => (crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 20),
+                _ => (crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 30),
+            };
+            if let Ok(c) = crate::meetvideo::Kodierer::neu(b, h, fps, k) {
+                self.koder = Some(c);
+                self.koder_bitrate = k;
+                self.bitrate_wechsel += 1;
+            }
+        }
+        if self.schirm_koder.is_some() && bitrate_lohnt_wechsel(self.schirm_bitrate, s) {
+            if let Some(a) = self.schirm.as_ref() {
+                if let Ok(c) = crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, s) {
+                    self.schirm_koder = Some(c);
+                    self.schirm_bitrate = s;
+                    self.bitrate_wechsel += 1;
+                }
+            }
+        }
+    }
+
     fn kamera_pumpe(&mut self) {
         let jetzt = std::time::Instant::now();
         if jetzt < self.naechstes_bild {
@@ -952,9 +1061,12 @@ impl NativMeet {
                     crate::meetvideo::BREITE,
                     crate::meetvideo::HOEHE,
                     20,
-                    1_200_000,
+                    AVATAR_BITRATE,
                 ) {
-                    Ok(c) => self.koder = Some(c),
+                    Ok(c) => {
+                        self.koder = Some(c);
+                        self.koder_bitrate = AVATAR_BITRATE;
+                    }
                     Err(e) => {
                         self.kamera_meldung = format!("Kein Kodierer: {}", e);
                         return;
@@ -999,11 +1111,12 @@ impl NativMeet {
                 30,
             ) {
                 Ok(k) => {
-                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 30, 2_000_000) {
+                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 30, KAMERA_BITRATE) {
                         Ok(c) => {
                             self.kamera_meldung = format!("Kamera: {}", k.name);
                             self.kamera = Some(k);
                             self.koder = Some(c);
+                            self.koder_bitrate = KAMERA_BITRATE;
                             self.kamera_an = true;
                         }
                         Err(e) => {
@@ -1694,5 +1807,59 @@ mod tests {
                 assert!(!e.to_string().is_empty());
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod bitrate_tests {
+    use super::*;
+
+    #[test]
+    fn ohne_messung_bleiben_die_voreinstellungen() {
+        assert_eq!(
+            bitraten_verteilen(0, true, true),
+            (KAMERA_BITRATE, SCHIRM_BITRATE)
+        );
+    }
+
+    #[test]
+    fn die_gemessene_leitung_wird_nicht_ueberschritten() {
+        // Genau der Wert, den der echte Server am 11.09.2026 gemeldet hat.
+        let (k, s) = bitraten_verteilen(1_021_098, true, true);
+        assert!(
+            (k + s) as u64 <= 1_021_098,
+            "zusammen {} bit/s ueber einer Leitung von 1021098",
+            k + s
+        );
+        // Und der alte Stand haette hier 6 Mbit/s gesendet:
+        assert!(
+            (k + s) < 2_000_000 + 4_000_000,
+            "nicht besser als vorher"
+        );
+    }
+
+    #[test]
+    fn bitrate_bleibt_in_den_schranken() {
+        let (k, s) = bitraten_verteilen(50_000, true, true);
+        assert_eq!(k, KAMERA_MIN);
+        assert_eq!(s, SCHIRM_MIN);
+        let (k, s) = bitraten_verteilen(500_000_000, true, true);
+        assert_eq!(k, KAMERA_MAX);
+        assert_eq!(s, SCHIRM_MAX);
+    }
+
+    #[test]
+    fn der_bildschirm_bekommt_mehr_als_die_kamera() {
+        let (k, s) = bitraten_verteilen(4_000_000, true, true);
+        assert!(s > k, "Bildschirm {} <= Kamera {}", s, k);
+    }
+
+    #[test]
+    fn kleine_schwankungen_setzen_den_kodierer_nicht_neu() {
+        assert!(!bitrate_lohnt_wechsel(700_000, 750_000));
+        assert!(!bitrate_lohnt_wechsel(700_000, 650_000));
+        assert!(bitrate_lohnt_wechsel(700_000, 300_000));
+        assert!(bitrate_lohnt_wechsel(300_000, 900_000));
     }
 }

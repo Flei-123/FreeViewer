@@ -70,6 +70,13 @@ pub struct Zahlen {
     pub bytes_rein: u64,
     /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
     pub pegel_rein: f32,
+    /// Tonrahmen, die wegen Rueckstau verworfen wurden. Frueher gab es
+    /// das nicht - der Stau blieb fuer immer als Verzoegerung stehen.
+    pub ton_verworfen: u64,
+    /// Wie viele 20-ms-Rahmen gerade auf ihren Sendeschlitz warten.
+    pub ton_stau: u32,
+    /// Geschaetzte Sendebandbreite in bit/s (0 = keine Schaetzung).
+    pub bandbreite: u64,
     pub verbunden: bool,
 }
 
@@ -194,7 +201,15 @@ pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
     socket.set_nonblocking(true)?;
     let lokal = socket.local_addr()?;
 
-    let mut rtc = Rtc::builder().build(Instant::now());
+    // Bandbreitenschaetzung an. Ohne sie sendet der Client stur mit
+    // fester Bitrate weiter, auch wenn die Leitung laengst zu ist -
+    // die Pakete stapeln sich dann im Router (Bufferbloat) und das
+    // Bild kommt Sekunden zu spaet an. Der Browser macht genau das
+    // hier von sich aus, unser nativer Client bisher nicht.
+    let mut rtc = Rtc::builder()
+        .enable_bwe(Some(str0m::bwe::Bitrate::bps(2_000_000)))
+        .build(Instant::now());
+    rtc.bwe().set_desired_bitrate(str0m::bwe::Bitrate::bps(2_500_000));
     // Kandidaten: jede eigene Adresse, die kein Loopback ist. Der Server ist
     // oeffentlich erreichbar - wir muessen also nur hinaus telefonieren
     // koennen, ein STUN-Server ist dafuer nicht noetig.
@@ -338,6 +353,17 @@ fn lauf(
     // ohne Schluesselbild dekodiert kein Decoder der Welt etwas. Also aktiv
     // eines anfordern (das macht der Browser genauso), bis eines kommt.
     let mut hat_schluessel: HashMap<String, bool> = HashMap::new();
+    // Tonrahmen, die auf ihren 20-ms-Schlitz warten. Begrenzt - siehe
+    // stau_abbauen().
+    let mut ton_warte: std::collections::VecDeque<Vec<i16>> =
+        std::collections::VecDeque::new();
+    // Nur fuer den Kontrollversuch: mit FV_TON_STAU=999999 verhaelt sich
+    // der Client wie der alte Stand (kein Abbau). So laesst sich messen,
+    // dass der Abbau wirklich die Ursache trifft und nicht der Test luegt.
+    let ton_stau_max: usize = std::env::var("FV_TON_STAU")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(TON_STAU_MAX);
     let mut zuletzt_gefragt: HashMap<String, Instant> = HashMap::new();
 
     loop {
@@ -399,7 +425,28 @@ fn lauf(
         // ---- eigenen Ton verschicken ---------------------------------------
         if rtc.is_alive() && Instant::now() >= naechster_rahmen {
             naechster_rahmen += Duration::from_millis(20);
-            if let Ok(pcm) = raus.try_recv() {
+            // Hat der Faden laenger gestockt, liegt der Schlitz weit in der
+            // Vergangenheit - dann nicht in Eile hinterhersenden, sondern
+            // neu ansetzen. Sonst kommt ein Schwall statt eines Stroms.
+            let jetzt_t = Instant::now();
+            if naechster_rahmen + Duration::from_millis(100) < jetzt_t {
+                naechster_rahmen = jetzt_t;
+            }
+            // Alles einsammeln, was die Oberflaeche seit dem letzten Mal
+            // abgeliefert hat, und den Rueckstau kappen.
+            while let Ok(p) = raus.try_recv() {
+                ton_warte.push_back(p);
+            }
+            let weg = stau_abbauen(&mut ton_warte, ton_stau_max);
+            if weg > 0 {
+                if let Ok(mut z) = zahlen.lock() {
+                    z.ton_verworfen += weg as u64;
+                }
+            }
+            if let Ok(mut z) = zahlen.lock() {
+                z.ton_stau = ton_warte.len() as u32;
+            }
+            if let Some(pcm) = ton_warte.pop_front() {
                 if !stumm.load(Ordering::Relaxed) && pt.is_some() {
                     let n = kodierer
                         .encode(&pcm, &mut aus_puffer)
@@ -538,6 +585,21 @@ fn lauf(
                         }
                     }
                     Event::MediaAdded(_) => {}
+                    Event::EgressBitrateEstimate(k) => {
+                        // Nur messen und sichtbar machen. Die Bitrate
+                        // danach automatisch nachzufuehren ist der
+                        // naechste Schritt - erst will ich sehen, ob
+                        // der Server ueberhaupt Rueckmeldung gibt.
+                        let bps = match k {
+                            str0m::bwe::BweKind::Twcc(b) => b.as_u64(),
+                            str0m::bwe::BweKind::Remb(_, b) => b.as_u64(),
+                            // str0m darf spaeter weitere Arten kennen.
+                            _ => 0,
+                        };
+                        if let Ok(mut z) = zahlen.lock() {
+                            z.bandbreite = bps;
+                        }
+                    }
                     Event::MediaData(d) if d.pt.to_string() != "0" && ist_video(&rtc, d.mid) => {
                         let (peer, bildschirm) = spuren
                             .lock()
@@ -690,6 +752,33 @@ fn lauf(
     }
 }
 
+/// Hoechstens so viele 20-ms-Tonrahmen duerfen auf ihren Sendeschlitz
+/// warten. 3 Rahmen = 60 ms. Mehr bringt nichts: gesendet wird streng im
+/// 20-ms-Takt, also wuerde jeder darueber liegende Rahmen die Verzoegerung
+/// dauerhaft erhoehen, statt sie abzubauen.
+pub const TON_STAU_MAX: usize = 3;
+
+/// Rueckstau im Ton-Sendepuffer abbauen: die AELTESTEN Rahmen fliegen raus.
+///
+/// WARUM UEBERHAUPT: Das Mikrofon liefert 20-ms-Rahmen in Echtzeit, die
+/// Oberflaeche holt sie aber nur im Zeichentakt ab - stockt sie einmal
+/// (Fenster ziehen, Bildschirm teilen, Kamera oeffnen), kommen mehrere
+/// Rahmen auf einmal. Gesendet wird trotzdem nur einer je 20 ms. Ohne
+/// Abbau bleibt dieser Vorsprung fuer den Rest des Gespraechs als
+/// Verzoegerung stehen und summiert sich bei jedem weiteren Stocken -
+/// genau so entstehen die 5 bis 10 Sekunden.
+///
+/// Verworfen wird VORNE, nicht hinten: der Zuhoerer soll das AKTUELLE
+/// Wort hoeren, nicht ein altes. Gibt zurueck, wie viele Rahmen wegfielen.
+pub fn stau_abbauen(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize) -> usize {
+    let mut weg = 0usize;
+    while warte.len() > max {
+        warte.pop_front();
+        weg += 1;
+    }
+    weg
+}
+
 /// Gehoert diese m-line zum Bild?
 /// Steckt in diesem Zugriffspunkt ein Schluesselbild (IDR) oder wenigstens
 /// ein Parametersatz (SPS)? Annex-B: Startcode, dann NAL-Kopf.
@@ -744,6 +833,63 @@ pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Die eigentliche Messung: wie viele Millisekunden Ton haengen nach
+    /// einem Stocken der Oberflaeche noch im Sendepuffer?
+    ///
+    /// Aufbau: das Mikrofon liefert 500 Rahmen (10 Sekunden Ton) am
+    /// Stueck - so, wie es nach einem Haenger passiert. Gesendet wird
+    /// danach wie im Betrieb ein Rahmen je 20-ms-Schlitz.
+    fn rueckstau_in_ms(max: usize, geliefert: usize) -> usize {
+        let mut w: std::collections::VecDeque<Vec<i16>> = std::collections::VecDeque::new();
+        for _ in 0..geliefert {
+            w.push_back(vec![0i16; RAHMEN]);
+        }
+        super::stau_abbauen(&mut w, max);
+        // Was uebrig bleibt, wartet - je Rahmen 20 ms Verzoegerung.
+        w.len() * 20
+    }
+
+    #[test]
+    fn verzoegerung_waechst_nicht_mehr_ueber_die_schranke() {
+        // 500 Rahmen auf einmal = 10 Sekunden Ton im Puffer.
+        let bleibt = rueckstau_in_ms(TON_STAU_MAX, 500);
+        assert!(
+            bleibt <= 60,
+            "nach dem Abbau warten noch {} ms Ton - das ist die Verzoegerung, die bleibt",
+            bleibt
+        );
+    }
+
+    #[test]
+    fn gegenprobe_ohne_abbau_bleiben_sekunden_stehen() {
+        // Derselbe Aufbau, aber mit einer Schranke, die nie greift - so
+        // rechnete der alte Stand. Wenn DIESER Test nicht scheitert,
+        // misst der obere nichts.
+        let bleibt = rueckstau_in_ms(usize::MAX, 500);
+        assert_eq!(
+            bleibt, 10_000,
+            "ohne Abbau muessten 10 Sekunden stehen bleiben"
+        );
+        assert!(
+            bleibt > 5_000,
+            "die Gegenprobe zeigt kein Problem - dann taugt die Messung nicht"
+        );
+    }
+
+    #[test]
+    fn abbau_wirft_das_alte_weg_und_behaelt_das_neue() {
+        let mut w: std::collections::VecDeque<Vec<i16>> = std::collections::VecDeque::new();
+        for n in 0..10i16 {
+            w.push_back(vec![n; RAHMEN]);
+        }
+        let weg = super::stau_abbauen(&mut w, 3);
+        assert_eq!(weg, 7);
+        assert_eq!(w.len(), 3);
+        // Der juengste Rahmen (9) muss erhalten bleiben, der aelteste weg.
+        assert_eq!(w.back().unwrap()[0], 9, "der neueste Ton wurde weggeworfen");
+        assert_eq!(w.front().unwrap()[0], 7, "es wurde vom falschen Ende geworfen");
+    }
 
     #[test]
     fn schluesselbild_wird_im_ganzen_zugriffspunkt_gefunden() {
