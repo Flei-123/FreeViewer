@@ -5034,12 +5034,19 @@ if let Some(path) = self.shot.clone() {
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                label_small(ui, "FreeViewer-Nummer des Freundes");
+                label_small(
+                    ui,
+                    if d.angemeldet() {
+                        "FreeViewer-Nummer oder @Name des Freundes"
+                    } else {
+                        "FreeViewer-Nummer des Freundes"
+                    },
+                );
                 ui.horizontal(|ui| {
                     let feld = ui.add(
                         egui::TextEdit::singleline(&mut self.freunde_id)
                             .desired_width(190.0)
-                            .hint_text("497 628 420"),
+                            .hint_text(if d.angemeldet() { "497 628 420 oder @anna" } else { "497 628 420" }),
                     );
                     let senden = ui.button("Anfrage senden").clicked()
                         || (feld.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
@@ -5048,7 +5055,7 @@ if let Some(path) = self.shot.clone() {
                             Ok(()) => {
                                 self.freunde_meldung = format!(
                                     "Anfrage an {} unterwegs - sie gilt erst, wenn er zustimmt.",
-                                    partners::pretty_id(&freunde::normalisieren(&self.freunde_id))
+                                    freunde::ziel_anzeige(&self.freunde_id)
                                 );
                                 self.freunde_id.clear();
                             }
@@ -5090,12 +5097,12 @@ if let Some(path) = self.shot.clone() {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button("Ablehnen").clicked() {
-                                        if let Err(e) = d.ablehnen(a.gegenueber()) {
+                                        if let Err(e) = d.ablehnen(&a.gegenueber()) {
                                             self.freunde_meldung = format!("{}", e);
                                         }
                                     }
                                     if ui.button("Annehmen").clicked() {
-                                        match d.annehmen(a.gegenueber()) {
+                                        match d.annehmen(&a.gegenueber()) {
                                             Ok(()) => {
                                                 self.freunde_meldung =
                                                     format!("{} ist jetzt dein Freund.", a.anzeige())
@@ -5132,7 +5139,7 @@ if let Some(path) = self.shot.clone() {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Zurücknehmen").clicked() {
-                            if let Err(e) = d.ablehnen(a.gegenueber()) {
+                            if let Err(e) = d.ablehnen(&a.gegenueber()) {
                                 self.freunde_meldung = format!("{}", e);
                             }
                         }
@@ -5173,21 +5180,50 @@ if let Some(path) = self.shot.clone() {
                                 ui.label(
                                     egui::RichText::new(fr.anzeige()).size(13.0).color(p.text),
                                 );
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} · {}",
-                                        partners::pretty_id(&fr.fvid),
-                                        fr.zuletzt()
-                                    ))
-                                    .size(10.5)
-                                    .color(p.muted),
+                                // Mit Konto: @Name, dann der PC (bei mehreren
+                                // "+N"), sonst "kein FreeViewer-PC".
+                                let mut unter: Vec<String> = Vec::new();
+                                if !fr.handle.is_empty() && fr.name.trim() != format!("@{}", fr.handle) {
+                                    unter.push(format!("@{}", fr.handle));
+                                }
+                                if fr.hat_pc() {
+                                    let mehr = fr.geraete.len().saturating_sub(1);
+                                    unter.push(if mehr > 0 {
+                                        format!("{} +{} PC", partners::pretty_id(&fr.fvid), mehr)
+                                    } else {
+                                        partners::pretty_id(&fr.fvid)
+                                    });
+                                    unter.push(fr.zuletzt());
+                                } else {
+                                    unter.push("kein FreeViewer-PC".to_string());
+                                }
+                                let r = ui.label(
+                                    egui::RichText::new(unter.join(" · "))
+                                        .size(10.5)
+                                        .color(p.muted),
                                 );
+                                if fr.geraete.len() > 1 {
+                                    r.on_hover_text(
+                                        fr.geraete
+                                            .iter()
+                                            .map(|g| {
+                                                format!(
+                                                    "{}  {}{}",
+                                                    partners::pretty_id(&g.fvid),
+                                                    g.label,
+                                                    if g.online { "  (online)" } else { "" }
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n"),
+                                    );
+                                }
                             });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button("Entfernen").clicked() {
-                                        if let Err(e) = d.entfernen(&fr.fvid) {
+                                        if let Err(e) = d.entfernen(&fr.schluessel()) {
                                             self.freunde_meldung = format!("{}", e);
                                         }
                                     }
