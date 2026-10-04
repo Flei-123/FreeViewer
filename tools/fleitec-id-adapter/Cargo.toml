@@ -1,0 +1,16 @@
+# Runs the REAL src/account.rs (login / sync / URL helpers) over the shared Fleitec-ID
+# vectors WITHOUT building the GUI app: only the four crates account.rs needs.
+#   cargo test --manifest-path tools/fleitec-id-adapter/Cargo.toml
+[package]
+name = "fleitec-id-adapter"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
+
+[workspace]

@@ -581,3 +581,179 @@ mod tests {
         assert!(back.token.is_empty());
     }
 }
+
+
+/// The shared Fleitec-ID vectors (JARVIS docs/fleitec-id/vectors.json): the client
+/// side of the protocol -- relay URLs, token escaping, and the login / sync status
+/// mapping -- run against the real functions of this file. A tiny one-shot HTTP
+/// server on 127.0.0.1 stands in for the relay.
+#[cfg(test)]
+mod fleitec_id_vectors {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fleitec-id-vectors.json")).unwrap()
+    }
+
+    /// Answers ONE request and hands back what the client sent (head + body).
+    fn serve_once(
+        status: u16,
+        headers: &str,
+        body: &str,
+    ) -> (u16, std::thread::JoinHandle<String>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let reply = format!(
+            "HTTP/1.1 {} X\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status,
+            headers,
+            body.len(),
+            body
+        );
+        let h = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = c.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&got[..i]).to_lowercase();
+                    let want = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if got.len() >= i + 4 + want {
+                        break;
+                    }
+                }
+            }
+            c.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&got).to_string()
+        });
+        (port, h)
+    }
+
+    #[test]
+    fn urls_follow_the_vectors() {
+        let v = vectors();
+        for c in v["relay_urls"]["account_url"].as_array().unwrap() {
+            assert_eq!(
+                url(c["relay"].as_str().unwrap(), c["what"].as_str().unwrap()),
+                c["expect"].as_str().unwrap()
+            );
+        }
+        for c in v["relay_urls"]["plain_url"].as_array().unwrap() {
+            assert_eq!(
+                plain_url(c["relay"].as_str().unwrap(), c["what"].as_str().unwrap()),
+                c["expect"].as_str().unwrap()
+            );
+        }
+        for c in v["relay_urls"]["urlenc"].as_array().unwrap() {
+            assert_eq!(urlenc(c["input"].as_str().unwrap()), c["expect"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn login_status_mapping_follows_the_vectors() {
+        let v = vectors();
+        for c in v["http"]["login"]["cases"].as_array().unwrap() {
+            let id = c["id"].as_str().unwrap();
+            let kind = c["expect"]["kind"].as_str().unwrap();
+            let (relay, handle) = match c["status"].as_u64() {
+                None => {
+                    // nobody listens: bind, learn the port, close again
+                    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+                    let port = l.local_addr().unwrap().port();
+                    drop(l);
+                    (format!("ws://127.0.0.1:{}/fv/ws", port), None)
+                }
+                Some(st) => {
+                    let mut hdr = String::new();
+                    if let Some(h) = c.get("headers").and_then(|h| h.as_object()) {
+                        for (k, val) in h {
+                            hdr.push_str(&format!("{}: {}\r\n", k, val.as_str().unwrap()));
+                        }
+                    }
+                    let body = if c["body"].is_null() { String::new() } else { c["body"].to_string() };
+                    let (port, h) = serve_once(st as u16, &hdr, &body);
+                    (format!("ws://127.0.0.1:{}/fv/ws", port), Some(h))
+                }
+            };
+            let r = login(&relay, " Justin ", "pw");
+            if let Some(h) = handle {
+                let req = h.join().unwrap();
+                assert!(req.starts_with("POST /fv/account/login HTTP/1.1"), "{}: {}", id, req);
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                let j: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(j["username"], "Justin", "{}: name is trimmed", id);
+                assert_eq!(j["password"], "pw", "{}: password as typed", id);
+            }
+            match kind {
+                "ok" => {
+                    let s = r.unwrap_or_else(|e| panic!("{}: {}", id, e));
+                    assert_eq!(s.token, c["expect"]["token"].as_str().unwrap(), "{}", id);
+                    let want = c["expect"]["username"].as_str().unwrap();
+                    let want = if want == "<the one typed>" { "Justin" } else { want };
+                    assert_eq!(s.user, want, "{}", id);
+                }
+                "bad_credentials" => {
+                    let e = r.unwrap_err().to_string();
+                    assert!(e.contains("Benutzername oder Passwort"), "{}: {}", id, e);
+                }
+                "rate_limited" => {
+                    let e = r.unwrap_err().to_string();
+                    assert!(e.contains("Zu viele Versuche"), "{}: {}", id, e);
+                }
+                "failed" => {
+                    let e = r.unwrap_err().to_string();
+                    let st = c["expect"]["status"].as_u64().unwrap();
+                    assert!(e.contains(&format!("Anmeldung fehlgeschlagen ({})", st)), "{}: {}", id, e);
+                }
+                "unreachable" => {
+                    let e = r.unwrap_err().to_string();
+                    assert!(e.contains("nicht erreichbar"), "{}: {}", id, e);
+                }
+                other => panic!("unknown kind {}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn sync_sends_the_token_in_the_query_and_reads_the_reply() {
+        let (port, h) = serve_once(
+            200,
+            "",
+            r#"{"username":"Justin","rev":3,"devices":[{"id":"111","name":"a","at":10,"deleted":true}]}"#,
+        );
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let dev = crate::partners::SyncDevice { id: "111".into(), name: "a".into(), ..Default::default() };
+        let r = sync(&relay, "a b/c", vec![dev]).unwrap();
+        let req = h.join().unwrap();
+        assert!(req.starts_with("POST /fv/account/data?token=a%20b%2Fc HTTP/1.1"), "{}", req);
+        let body: serde_json::Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["devices"][0]["id"], "111");
+        assert_eq!(r.username, "Justin");
+        assert_eq!(r.rev, 3);
+        assert_eq!(r.devices.len(), 1);
+        assert!(r.devices[0].deleted, "tombstones survive the round trip");
+    }
+
+    #[test]
+    fn sync_401_means_signed_out() {
+        let (port, h) = serve_once(401, "", r#"{"error":"nicht angemeldet"}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let e = match sync(&relay, "tok", vec![]) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a 401 must be an error"),
+        };
+        let _ = h.join();
+        assert_eq!(e, "nicht angemeldet");
+    }
+}
