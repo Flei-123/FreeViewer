@@ -1,0 +1,15 @@
+name: Manifest + Fleitec-ID checks
+
+# Cheap checks that need no GUI build: the action manifest (api/ACTIONS) against src/main.rs,
+# and src/account.rs against the shared Fleitec-ID test vectors (tools/fleitec-id-adapter).
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Action manifest (lint + flags exist in src/main.rs)
+        run: python3 tools/check_actions.py
+      - name: Fleitec-ID vectors against src/account.rs
+        run: cargo test --manifest-path tools/fleitec-id-adapter/Cargo.toml

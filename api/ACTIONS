@@ -1,0 +1,47 @@
+manifest 1
+app freeviewer
+title "FreeViewer command line (src/main.rs): the scripted, documented flags"
+# api 1.0 -- FreeViewer is a GUI program; it has no socket, no MCP server and no library API. What a script can
+# drive today are the command line flags below (each action = one `freeviewer --<flag>` call; the output goes to
+# standard output). Test and diagnostic flags (--camtest, --meet*, --e2evektor, --gputest ...) are NOT part of the
+# API. A real programme API (sessions, address book, meeting rooms) does not exist yet -- see the architecture audit of 03.10.2026 (JARVIS docs/ARCHITEKTUR-AUDIT.md, section 3).
+# tools/check_actions.py checks that every flag named here is really handled in src/main.rs.
+# SemVer: a new flag or optional argument is a minor step, a removed or changed one a major step.
+
+action freeviewer.version read "Print the product name and the version (freeviewer --version)"
+  returns text string "<name> <version>"
+
+action freeviewer.status read "State of version, config folder, autostart, Windows service and the published agent (freeviewer --status). NOTE: the agent line contains the current session ID and PASSWORD"
+  returns text string "Lines Version / Config / Autostart / Dienst / Agent"
+
+action freeviewer.autostart write "Switch autostart on or off from a script (freeviewer --autostart on|off)"
+  arg state string required "on or off"
+  returns text string "Autostart an/aus, then the current state"
+
+action freeviewer.update write "Check the relay for a newer version and install it (freeviewer --update [--dry])"
+  arg dry bool optional "Download and verify the checksum but do not replace the program (--dry)"
+  returns text string "Lines: local version, relay version, download/checksum result, UPDATE OK or schon aktuell"
+  dryrun
+
+action freeviewer.monitors read "Which screens this machine can share (freeviewer --monitors)"
+  returns text string "One line per screen: index, name, size, (primaer)"
+
+action freeviewer.install write "Install into the per-user folder and start the installed copy (freeviewer --install [--with-service]); asks for administrator rights when needed"
+  arg with_service bool optional "Also install the Windows service (--with-service)"
+  returns text string "installiert nach <folder>, or the failure"
+
+action freeviewer.uninstall critical "Remove the installed program (freeviewer --uninstall [--all]); --all also deletes the configuration and the identity backup"
+  arg all bool optional "Also delete configuration and identity backup (--all)"
+  returns text string "deinstalliert, or the failure"
+
+action freeviewer.install_service write "Install and start the Windows service (freeviewer --install-service); asks for administrator rights"
+  returns text string "Dienst installiert und gestartet, or the failure"
+
+action freeviewer.uninstall_service write "Stop and remove the Windows service (freeviewer --uninstall-service); asks for administrator rights"
+  returns text string "Dienst gestoppt und entfernt, or the failure"
+
+action freeviewer.shot write "Write a picture of the own window to a JPEG file and exit (freeviewer --shot <file> [--view start|devices|settings] [--demo])"
+  arg file string required "Where to write the JPEG"
+  arg view string optional "start, devices or settings (--view)"
+  arg demo bool optional "Fill the window with demo data (--demo)"
+  returns file string "The written picture"
