@@ -1,0 +1,12 @@
+{
+ "skip": [],
+ "catalogs": [
+  "src/i18n.rs"
+ ],
+ "words": [
+  "lang",
+  "listen",
+  "attribute"
+ ],
+ "lines": []
+}
