@@ -44,7 +44,8 @@ hmac = "0.12"
 sha2 = "0.10"
 argon2 = "0.5"
 rand = "0.8"
-ed25519-dalek = { version = "2", optional = true }
+# Ed25519: verifies signed update feeds (always on) and licence keys.
+ed25519-dalek = { version = "2" }
 # WebRTC-Kern fuer das native Meeting. Krypto bewusst als reines Rust
 # (rust-crypto): so bauen Windows und Mac ohne cmake/NASM/OpenSSL.
 str0m = { version = "0.21", default-features = false, features = ["rust-crypto"] }
@@ -99,7 +100,7 @@ windows-core = "0.58"
 [features]
 # Lizenz-Pruefung - NUR fuer Marken-Builds (X-Remote). Der normale
 # FreeViewer-Build bleibt ohne dieses Merkmal komplett frei.
-license = ["dep:ed25519-dalek"]
+license = []
 
 [profile.dev]
 # Auf dem Server ist die Platte klein: Debug-Symbole fressen 5 GB.

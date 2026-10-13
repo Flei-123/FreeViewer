@@ -1,7 +1,7 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS tracked (binary crate, reproducible builds + cargo audit)
 
 # IDE
 .vscode/
@@ -50,6 +50,12 @@ build.err
 rel.out
 rel.err
 relay/hosts.json
+relay/upload.token
+relay/setups.json
+relay/accounts/
+relay/dist/
+relay/node_modules/
+relay/*.log
 
 # local test helper scripts (input probe runs, patch scripts)
 t_*.bat

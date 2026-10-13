@@ -1,6 +1,11 @@
 # FreeViewer Relay
 
-A ~200 line Node.js service. It does exactly two things:
+> The code in this folder is the last known **live snapshot** (modules `account.js`, `setups.js`, `buch.js`,
+> update hosting, friends, ...) - see `../docs/RELAY-LIVE-IMPORT.md`. The text below describes the original core.
+> Publishing is hardened (LAN only, token in header, signed releases): `../docs/UPDATE-SIGNING.md`.
+> Tests: `npm install && node test_relay.js && node test_publish.js`.
+
+A small Node.js service. Its core does two things:
 
 1. maps a host secret to a stable 9 digit ID (`sha256(secret) -> id`, stored in `hosts.json`)
 2. pipes binary frames between a host and one viewer

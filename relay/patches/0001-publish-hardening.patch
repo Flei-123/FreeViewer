@@ -1,0 +1,112 @@
+diff --git a/relay/relay.js b/relay/relay.js
+index a994367..cd54027 100644
+--- a/relay/relay.js
++++ b/relay/relay.js
+@@ -33,8 +33,67 @@ const MAX_PAYLOAD = 16 * 1024 * 1024;
+ // ---------- release hosting (auto update) ----------
+ const DIST = process.env.FV_DIST || '/root/fvrelay/dist';
+ const MAX_UPLOAD = 128 * 1024 * 1024;
++const TOKEN_FILE = process.env.FV_UPLOAD_TOKEN_FILE || '/root/fvrelay/upload.token';
+ function uploadToken() {
+-  try { return fs.readFileSync('/root/fvrelay/upload.token', 'utf8').trim(); } catch (_) { return null; }
++  try { return fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch (_) { return null; }
++}
++
++// ---------- publish hardening (r2) ----------
++// Token only in a header (never the URL: it ends up in proxy/access logs),
++// compared in constant time. Publishing is LAN-only: the reverse proxy adds
++// X-Forwarded-For / X-Real-IP to every public request, so their presence (or a
++// non-private peer address) means "from the internet" -> refuse.
++// Rollout switches (see docs/UPDATE-SIGNING.md):
++//   FV_PUBLISH_QUERY_TOKEN=1  also accept ?token= (old publish scripts), logs a warning
++//   FV_PUBLISH_LAN_ONLY=0     disable the LAN check (not recommended)
++//   FV_UPDATE_PUBKEY=<hex>    verify the uploaded signature before publishing
++//   FV_REQUIRE_SIG=1          refuse unsigned uploads
++const PUBLISH_QUERY_TOKEN = process.env.FV_PUBLISH_QUERY_TOKEN === '1';
++const PUBLISH_LAN_ONLY = process.env.FV_PUBLISH_LAN_ONLY !== '0';
++const UPDATE_PUBKEY = (process.env.FV_UPDATE_PUBKEY || '').trim().toLowerCase();
++const REQUIRE_SIG = process.env.FV_REQUIRE_SIG === '1';
++
++function tokenEquals(given, expected) {
++  // hash first: equal length for timingSafeEqual, no length leak
++  const a = crypto.createHash('sha256').update(String(given || '')).digest();
++  const b = crypto.createHash('sha256').update(String(expected || '')).digest();
++  return crypto.timingSafeEqual(a, b);
++}
++function isPrivateAddr(addr) {
++  let a = String(addr || '').toLowerCase();
++  if (a.startsWith('::ffff:')) a = a.slice(7);
++  if (a === '::1' || a === '127.0.0.1') return true;
++  if (/^127\./.test(a) || /^10\./.test(a) || /^192\.168\./.test(a)) return true;
++  const m = /^172\.(\d+)\./.exec(a);
++  if (m && +m[1] >= 16 && +m[1] <= 31) return true;
++  return /^f[cd][0-9a-f]{2}:/.test(a); // IPv6 unique-local
++}
++function publishFromLan(req) {
++  const h = req.headers;
++  if (h['x-forwarded-for'] || h['x-real-ip'] || h['forwarded'] || h['cf-connecting-ip']) return false;
++  return isPrivateAddr(req.socket.remoteAddress);
++}
++function publishToken(req, u) {
++  const auth = String(req.headers['authorization'] || '');
++  if (/^bearer /i.test(auth)) return auth.slice(7).trim();
++  if (req.headers['x-upload-token']) return String(req.headers['x-upload-token']);
++  if (PUBLISH_QUERY_TOKEN && u.searchParams.get('token')) {
++    log('WARNING: publish token in URL (FV_PUBLISH_QUERY_TOKEN=1) - switch the publish script to the Authorization header');
++    return u.searchParams.get('token');
++  }
++  return '';
++}
++// Same bytes as src/update.rs `signed_message` and tools/sign-release.
++function signedMessage(platform, version, sha256, size) {
++  return Buffer.from(['freeviewer-update-v1', platform, version, String(sha256).toLowerCase(), String(size)].join('\n'));
++}
++function verifyUpdateSig(pubHex, msg, sigHex) {
++  try {
++    if (!/^[0-9a-f]{64}$/.test(pubHex) || !/^[0-9a-f]{128}$/.test(sigHex)) return false;
++    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(pubHex, 'hex')]);
++    const key = crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' });
++    return crypto.verify(null, msg, key, Buffer.from(sigHex, 'hex'));
++  } catch (_) { return false; }
+ }
+ function safeName(n) {
+   n = String(n || '').split(/[\\/]/).pop();
+@@ -705,11 +764,17 @@ const server = http.createServer((req, res) => {
+   if (req.method === 'POST' && req.url.startsWith('/fv/publish')) {
+     const u = new URL(req.url, 'http://x');
+     const tok = uploadToken();
+-    if (!tok || u.searchParams.get('token') !== tok) { res.writeHead(403); return res.end('forbidden'); }
++    if (PUBLISH_LAN_ONLY && !publishFromLan(req)) { log('publish refused: not from LAN'); res.writeHead(403); return res.end('forbidden'); }
++    if (!tok || !tokenEquals(publishToken(req, u), tok)) { res.writeHead(403); return res.end('forbidden'); }
+     const name = safeName(u.searchParams.get('name') || 'freeviewer.exe');
+     const version = String(u.searchParams.get('version') || '').slice(0, 32);
+     const notes = String(u.searchParams.get('notes') || '').slice(0, 500);
+     if (!name || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) { res.writeHead(400); return res.end('bad name/version'); }
++    // Signature of the package (hex Ed25519 over signedMessage), made offline
++    // with tools/sign-release; the relay only checks it and passes it through.
++    const sigHex = String(req.headers['x-fv-sig'] || '').trim().toLowerCase();
++    if (sigHex && !/^[0-9a-f]{128}$/.test(sigHex)) { res.writeHead(400); return res.end('bad signature format'); }
++    if (!sigHex && REQUIRE_SIG) { res.writeHead(400); return res.end('signature required'); }
+     fs.mkdirSync(DIST, { recursive: true });
+     const tmp = path.join(DIST, name + '.upload');
+     const out = fs.createWriteStream(tmp);
+@@ -725,6 +790,11 @@ const server = http.createServer((req, res) => {
+       out.end(() => {
+         if (bad) { try { fs.unlinkSync(tmp); } catch (_) {} res.writeHead(413); return res.end('too big'); }
+         const sha = hash.digest('hex');
++        if (sigHex && UPDATE_PUBKEY && !verifyUpdateSig(UPDATE_PUBKEY, signedMessage('win', version, sha, size), sigHex)) {
++          try { fs.unlinkSync(tmp); } catch (_) {}
++          log('publish refused: signature does not verify', version, name);
++          res.writeHead(400); return res.end('signature invalid');
++        }
+         fs.renameSync(tmp, path.join(DIST, name));
+         const meta = {
+           version, sha256: sha, size, notes,
+@@ -734,6 +804,7 @@ const server = http.createServer((req, res) => {
+                                         : 'https://freeviewer.fleitec.com/fv/dist/') + name,
+           published: new Date().toISOString(),
+         };
++        if (sigHex) meta.sig = sigHex;
+         // noversion=1: nur die Datei ablegen (z. B. Mac-Zip aus der CI) -
+         // version.json bleibt dem Haupt-Build vorbehalten.
+         if (u.searchParams.get('noversion') !== '1') {

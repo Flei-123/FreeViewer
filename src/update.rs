@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::shared::Shared;
@@ -22,6 +23,33 @@ const FEED: &str = crate::brand::FEED;
 const EVERY: Duration = Duration::from_secs(30 * 60);
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Ed25519 public key (64 hex chars) that signed update feeds must verify
+/// against. Branded builds can override it with `FV_UPDATE_PUBKEY` at build
+/// time. The private key lives only on the release machine (never in git);
+/// see `tools/sign-release/` and `docs/UPDATE-SIGNING.md`.
+pub const UPDATE_PUBKEY: &str = match option_env!("FV_UPDATE_PUBKEY") {
+    Some(s) => s,
+    None => "6fd3beb25185415730f99e3222f6ded7834e82339d6ba2902ecc8308469e97cd",
+};
+
+/// Migration switch (see `docs/UPDATE-SIGNING.md`).
+/// * `false` (phase 1, default): a feed WITHOUT `sig` is still accepted (old
+///   releases keep working), but a feed WITH a `sig` that does not verify is
+///   always rejected.
+/// * `true` (phase 2, build with `FV_REQUIRE_SIG=1`): unsigned feeds are
+///   rejected too.
+pub const REQUIRE_SIGNATURE: bool = match option_env!("FV_REQUIRE_SIG") {
+    Some(s) => s.len() == 1 && s.as_bytes()[0] == b'1',
+    None => false,
+};
+
+/// Platform label inside the signed message: the signature of the Windows
+/// package can never be replayed for the Mac package (and vice versa).
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "mac";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM: &str = "win";
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Release {
     pub version: String,
@@ -29,6 +57,56 @@ pub struct Release {
     pub url: String,
     pub notes: String,
     pub size: u64,
+    /// Hex Ed25519 signature over `signed_message` (empty = feed is unsigned).
+    pub sig: String,
+}
+
+/// The exact bytes that are signed. Must match `tools/sign-release`:
+/// `freeviewer-update-v1\n<platform>\n<version>\n<sha256 hex>\n<size>`.
+/// The SHA-256 binds the package bytes, so signing the hash signs the file.
+pub fn signed_message(platform: &str, version: &str, sha256: &str, size: u64) -> Vec<u8> {
+    format!(
+        "freeviewer-update-v1\n{}\n{}\n{}\n{}",
+        platform,
+        version,
+        sha256.to_lowercase(),
+        size
+    )
+    .into_bytes()
+}
+
+/// Verifies one Ed25519 signature. Any malformed input is an error.
+pub fn verify_signature(pubkey_hex: &str, message: &[u8], sig_hex: &str) -> Result<()> {
+    let pk: [u8; 32] = hex::decode(pubkey_hex)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| anyhow!("update public key is malformed"))?;
+    let key = VerifyingKey::from_bytes(&pk).map_err(|_| anyhow!("update public key is invalid"))?;
+    let sig: [u8; 64] = hex::decode(sig_hex)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| anyhow!("update signature is malformed"))?;
+    key.verify(message, &Signature::from_bytes(&sig))
+        .map_err(|_| anyhow!("update signature is invalid"))
+}
+
+/// Policy: signed feeds must verify; unsigned feeds only pass while
+/// `require` is false (migration phase 1).
+pub fn check_release_signature(
+    rel: &Release,
+    platform: &str,
+    pubkey_hex: &str,
+    require: bool,
+) -> Result<()> {
+    if rel.sig.is_empty() {
+        return if require {
+            Err(anyhow!("update feed is not signed - update refused"))
+        } else {
+            Ok(())
+        };
+    }
+    let msg = signed_message(platform, &rel.version, &rel.sha256, rel.size);
+    verify_signature(pubkey_hex, &msg, &rel.sig)
 }
 
 /// "0.6.1" is newer than "0.6", "0.10.0" is newer than "0.9.9".
@@ -67,7 +145,12 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
 /// Asks the relay what the newest build is.
 pub fn check() -> Result<Release> {
     let body = fetch(FEED)?;
-    let v: serde_json::Value = serde_json::from_slice(&body)?;
+    parse_feed(&body)
+}
+
+/// Parses + verifies a feed document (split from `check` so tests can feed it).
+pub fn parse_feed(body: &[u8]) -> Result<Release> {
+    let v: serde_json::Value = serde_json::from_slice(body)?;
     let s = |k: &str| -> String {
         v.get(k)
             .and_then(|x| x.as_str())
@@ -78,16 +161,18 @@ pub fn check() -> Result<Release> {
     // der Mac. Nie wieder die falsche Datei ziehen - eine Windows-Exe wuerde
     // einen Mac sonst beim Tausch zerstoeren.
     #[cfg(target_os = "macos")]
-    let (url, hash, size) = (
+    let (url, hash, size, sig) = (
         s("mac_url"),
         s("mac_sha256").to_lowercase(),
         v.get("mac_size").and_then(|x| x.as_u64()).unwrap_or(0),
+        s("mac_sig").to_lowercase(),
     );
     #[cfg(not(target_os = "macos"))]
-    let (url, hash, size) = (
+    let (url, hash, size, sig) = (
         s("url"),
         s("sha256").to_lowercase(),
         v.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+        s("sig").to_lowercase(),
     );
     let rel = Release {
         version: s("version"),
@@ -95,6 +180,7 @@ pub fn check() -> Result<Release> {
         url,
         notes: s("notes"),
         size,
+        sig,
     };
     // Fehlt das Paket der eigenen Plattform: kein Update, kein Fehler -
     // einfach nichts anbieten.
@@ -107,6 +193,7 @@ pub fn check() -> Result<Release> {
     if rel.version.is_empty() || rel.sha256.len() != 64 {
         return Err(anyhow!("unvollstaendige Release-Info"));
     }
+    check_release_signature(&rel, PLATFORM, UPDATE_PUBKEY, REQUIRE_SIGNATURE)?;
     Ok(rel)
 }
 
@@ -145,6 +232,9 @@ fn denied(e: &anyhow::Error) -> bool {
 
 /// Downloads the build and writes it into the staging folder.
 pub fn download(rel: &Release) -> Result<PathBuf> {
+    // Defence in depth: the release may come from stored state, not straight
+    // from `check`. Refuse BEFORE downloading anything.
+    check_release_signature(rel, PLATFORM, UPDATE_PUBKEY, REQUIRE_SIGNATURE)?;
     let bytes = fetch(&rel.url)?;
     // Bauchweh-Pruefung: ein Mac darf nie eine Windows-Exe bekommen (und
     // umgekehrt) - sonst frisst sich das Update selbst.
@@ -665,5 +755,148 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    // --- signature verification ---
+
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    // Test-only key: seed = 32 x 0x07. Vectors made by tools/sign-release.
+    const TEST_PUB: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+    const TEST_SIG_WIN: &str = "abbaaec85acdd2df47bb2882565f2e94594eedc921d3862f3f77be0b2973768060b04b5c5f0a4123714f178d74e102157d54db55874bbf54efe3dd4e58d13b0c";
+    const TEST_SIG_MAC: &str = "fcbd04a4a82685c848f8cf5543a213bb8a1847344a49f7ab23b51dcabfc19d52e2c71a34543c3575adb72733987e8648f1c13b5a76865f08b519e7410e80f20a";
+
+    fn signed_rel() -> Release {
+        Release {
+            version: "1.2.3".into(),
+            sha256: ABC.into(),
+            url: "https://example.invalid/x.exe".into(),
+            notes: String::new(),
+            size: 3,
+            sig: TEST_SIG_WIN.into(),
+        }
+    }
+
+    #[test]
+    fn python_signature_verifies() {
+        // cross-language check: signed by tools/sign-release (Python)
+        let r = signed_rel();
+        check_release_signature(&r, "win", TEST_PUB, true).unwrap();
+        let mac = Release {
+            sig: TEST_SIG_MAC.into(),
+            ..r
+        };
+        check_release_signature(&mac, "mac", TEST_PUB, true).unwrap();
+    }
+
+    #[test]
+    fn rust_signed_roundtrip() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let msg = signed_message("win", "0.30.0", ABC, 3);
+        let r = Release {
+            sig: hex::encode(sk.sign(&msg).to_bytes()),
+            ..signed_rel()
+        };
+        let r = Release {
+            version: "0.30.0".into(),
+            ..r
+        };
+        check_release_signature(&r, "win", &pk, true).unwrap();
+        // the production key must not accept it
+        assert!(check_release_signature(&r, "win", UPDATE_PUBKEY, true).is_err());
+    }
+
+    #[test]
+    fn wrong_key_is_rejected() {
+        let r = signed_rel();
+        let other = "6fd3beb25185415730f99e3222f6ded7834e82339d6ba2902ecc8308469e97cd";
+        assert!(check_release_signature(&r, "win", other, false).is_err());
+    }
+
+    #[test]
+    fn tampered_fields_are_rejected() {
+        let base = signed_rel();
+        let mut v = base.clone();
+        v.version = "1.2.4".into();
+        let mut h = base.clone();
+        h.sha256 = sha256_hex(b"evil");
+        let mut z = base.clone();
+        z.size = 4;
+        for r in [v, h, z] {
+            // even in the lenient phase a bad signature is never accepted
+            assert!(check_release_signature(&r, "win", TEST_PUB, false).is_err());
+            assert!(check_release_signature(&r, "win", TEST_PUB, true).is_err());
+        }
+        // upper-case hash in the feed is the same hash
+        let mut up = base.clone();
+        up.sha256 = ABC.to_uppercase();
+        check_release_signature(&up, "win", TEST_PUB, true).unwrap();
+    }
+
+    #[test]
+    fn platform_swap_is_rejected() {
+        // the Windows signature must not unlock the Mac package
+        assert!(check_release_signature(&signed_rel(), "mac", TEST_PUB, false).is_err());
+    }
+
+    #[test]
+    fn flipped_signature_bit_is_rejected() {
+        let mut r = signed_rel();
+        let mut raw = hex::decode(&r.sig).unwrap();
+        raw[10] ^= 1;
+        r.sig = hex::encode(raw);
+        assert!(check_release_signature(&r, "win", TEST_PUB, false).is_err());
+    }
+
+    #[test]
+    fn malformed_inputs_are_errors_not_panics() {
+        for bad in ["zz", "abcd", &"0".repeat(128), &"0".repeat(130)] {
+            let r = Release {
+                sig: bad.into(),
+                ..signed_rel()
+            };
+            assert!(check_release_signature(&r, "win", TEST_PUB, false).is_err());
+        }
+        assert!(verify_signature("not-hex", b"x", TEST_SIG_WIN).is_err());
+        assert!(verify_signature("abcd", b"x", TEST_SIG_WIN).is_err());
+    }
+
+    #[test]
+    fn unsigned_feed_follows_migration_switch() {
+        let r = Release {
+            sig: String::new(),
+            ..signed_rel()
+        };
+        // phase 1: legacy feed still works
+        check_release_signature(&r, "win", TEST_PUB, false).unwrap();
+        // phase 2: refused
+        assert!(check_release_signature(&r, "win", TEST_PUB, true).is_err());
+    }
+
+    #[test]
+    fn built_in_key_is_a_valid_ed25519_key() {
+        let raw: [u8; 32] = hex::decode(UPDATE_PUBKEY).unwrap().try_into().unwrap();
+        VerifyingKey::from_bytes(&raw).unwrap();
+    }
+
+    #[test]
+    fn parse_feed_handles_signed_and_unsigned() {
+        // unsigned (old relay): accepted while REQUIRE_SIGNATURE is false
+        let unsigned = format!(
+            r#"{{"version":"9.9.9","url":"https://x.invalid/a.exe","sha256":"{ABC}","size":3}}"#
+        );
+        let r = parse_feed(unsigned.as_bytes());
+        assert_eq!(r.is_ok(), !REQUIRE_SIGNATURE);
+        // signed with a key that is not the built-in one: always refused
+        let bad = format!(
+            r#"{{"version":"1.2.3","url":"https://x.invalid/a.exe","sha256":"{ABC}","size":3,"sig":"{TEST_SIG_WIN}","mac_url":"https://x.invalid/m","mac_sha256":"{ABC}","mac_size":3,"mac_sig":"{TEST_SIG_MAC}"}}"#
+        );
+        assert!(parse_feed(bad.as_bytes()).is_err());
+        // no package for this platform: not an error, nothing offered
+        let none = parse_feed(br#"{"version":"9.9.9"}"#).unwrap();
+        assert!(none.url.is_empty());
+        // garbage
+        assert!(parse_feed(b"not json").is_err());
     }
 }

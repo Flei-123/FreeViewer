@@ -1,5 +1,10 @@
 {
- "skip": [],
+ "skip": [
+  "relay/relay.js",
+  "relay/account.js",
+  "relay/setups.js",
+  "relay/buch.js"
+ ],
  "catalogs": [
   "src/i18n.rs"
  ],
