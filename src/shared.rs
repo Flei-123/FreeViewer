@@ -30,6 +30,12 @@ pub struct Knock {
     /// four digits both sides can compare
     pub code: String,
     pub at: std::time::Instant,
+    /// The name is chosen freely by the other side - nothing proves it.
+    /// Always true today; the UI says so.
+    pub unverified: bool,
+    /// The name equals the display name of a friend in the address book
+    /// (a hint only - a stranger can type the same name).
+    pub friend_like: bool,
 }
 
 pub struct Shared {
@@ -58,6 +64,9 @@ pub struct Shared {
     pub session_code: Mutex<String>,
     // viewer side
     pub viewer_status: Mutex<String>,
+    /// The last viewer run ended on its own (error, refusal, gave up) -
+    /// the UI offers "try again". Reset at the start of every run.
+    pub viewer_failed: AtomicBool,
     pub frame: Mutex<Option<FrameData>>,
     pub remote_size: Mutex<(u32, u32)>,
     /// Remote pointer, normalized 0..10000 plus visibility.
@@ -122,6 +131,7 @@ impl Shared {
             knock_answer: AtomicU8::new(0),
             session_code: Mutex::new(String::new()),
             viewer_status: Mutex::new(String::new()),
+            viewer_failed: AtomicBool::new(false),
             frame: Mutex::new(None),
             remote_size: Mutex::new((1920, 1080)),
             remote_resolutions: Mutex::new(Vec::new()),

@@ -409,6 +409,19 @@ pub struct Buch {
     pub stand: u64,
 }
 
+/// Same display name (ignoring case) as a friend in the address book?
+/// A hint for the "someone is knocking" dialog - not a proof of identity.
+pub fn has_friend_named(name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    Buch::load()
+        .freunde
+        .iter()
+        .any(|f| f.anzeige().trim().to_lowercase() == name)
+}
+
 impl Buch {
     pub fn path() -> std::path::PathBuf {
         crate::ident::config_dir().join("freunde.json")

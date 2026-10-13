@@ -227,7 +227,15 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                         if let Some(s) = sess.take() {
                             s.stop();
                         }
-                        sess = Some(Session::new());
+                        let from = v
+                            .get("from")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(64)
+                            .collect::<String>();
+                        sess = Some(Session::new(from));
                         *shared.host_peer.lock().unwrap() =
                             "Eingehende Verbindung - Authentifizierung...".to_string();
                     }
@@ -271,6 +279,23 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
     Ok(())
 }
 
+/// Name a viewer announces for itself: no control or invisible
+/// formatting characters (bidi overrides could flip the text), trimmed,
+/// at most 48 characters.
+fn clean_peer_name(raw: &str) -> String {
+    let s: String = raw
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c,
+                    '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+                    | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        })
+        .take(48)
+        .collect();
+    s.trim().to_string()
+}
+
 enum Stage {
     WaitHello,
     WaitProof {
@@ -290,6 +315,9 @@ enum Stage {
 
 struct Session {
     stage: Stage,
+    /// What the relay told us about the other end (its address). Key for
+    /// the brute-force guard; empty when the relay does not say.
+    peer_key: String,
     cipher: Option<Arc<Mutex<Cipher>>>,
     stop: Arc<AtomicBool>,
     input_tx: Option<std::sync::mpsc::Sender<Msg>>,
@@ -323,9 +351,10 @@ pub fn monitor_list(prefer_fast: bool) -> Vec<proto::MonitorInfo> {
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(peer_key: String) -> Self {
         Self {
             stage: Stage::WaitHello,
+            peer_key,
             cipher: None,
             stop: Arc::new(AtomicBool::new(false)),
             input_tx: None,
@@ -388,11 +417,28 @@ impl Session {
                 },
                 crypto::TAG_PROOF,
             ) => {
-                // Es gilt das Sitzungspasswort UND jedes feste Passwort aus
-                // den Einstellungen. Der Beweis verraet nicht, welches gemeint
-                // war, also bleibt nur der Reihe nach ausprobieren. Argon2
-                // kostet Zeit, darum ist die Liste bei 10 Eintraegen gedeckelt.
-                let session_pw = shared.password.lock().unwrap().clone();
+                // The session password AND every fixed password from the
+                // settings are valid. The proof does not reveal which one was
+                // meant, so they are tried in turn. Argon2 is expensive, so
+                // the list is capped at 10 entries and the whole check is
+                // rate limited (see authguard.rs) against brute force.
+                let verdict = crate::authguard::global().check(&self.peer_key, Instant::now());
+                match verdict {
+                    crate::authguard::Verdict::Allow => {}
+                    crate::authguard::Verdict::Locked(d) | crate::authguard::Verdict::Busy(d) => {
+                        let secs = d.as_secs().max(1);
+                        tx.send(WsMsg::Binary(vec![crypto::TAG_FAIL].into()))?;
+                        return Err(anyhow!(
+                            "Zu viele Fehlversuche - Anmeldung gesperrt fuer {} s",
+                            secs
+                        ));
+                    }
+                }
+                let session_pw = shared
+                    .password
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
                 let mut ok = false;
                 for cand in std::iter::once(session_pw)
                     .chain(crate::pwlist::candidates())
@@ -409,9 +455,21 @@ impl Session {
                     }
                 }
                 if !ok {
+                    let locked = crate::authguard::global().failure(&self.peer_key, Instant::now());
+                    if let Some(d) = locked {
+                        crate::tray::balloon(
+                            crate::brand::NAME,
+                            crate::i18n::t("net.pw_locked"),
+                        );
+                        capture::log_line(&format!(
+                            "auth: too many wrong passwords, locked {} s",
+                            d.as_secs()
+                        ));
+                    }
                     tx.send(WsMsg::Binary(vec![crypto::TAG_FAIL].into()))?;
                     return Err(anyhow!("falsches Passwort"));
                 }
+                crate::authguard::global().success(&self.peer_key);
                 let key = crypto::session_key(secret, client_pub, salt);
                 self.go_live(key, tx, shared)
             }
@@ -428,22 +486,22 @@ impl Session {
                 // sitting in front of this machine decides. The key exchange
                 // already happened, so both sides can show the same four
                 // digit code and see they are talking to each other.
-                let from: String = String::from_utf8_lossy(&data[1..])
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(48)
-                    .collect();
+                let from = clean_peer_name(&String::from_utf8_lossy(&data[1..]));
+                let friend_like = crate::freunde::has_friend_named(&from);
                 let key = crypto::session_key(secret, client_pub, salt);
                 let code = crypto::session_code(&key);
                 shared.knock_answer.store(0, Ordering::Relaxed);
                 *shared.knock.lock().unwrap() = Some(crate::shared::Knock {
-                    from: if from.trim().is_empty() {
+                    from: if from.is_empty() {
                         "Unbekanntes Geraet".to_string()
                     } else {
-                        from.trim().to_string()
+                        from
                     },
                     code,
                     at: Instant::now(),
+                    // the name is just a string the other side typed
+                    unverified: true,
+                    friend_like,
                 });
                 *shared.host_peer.lock().unwrap() =
                     "Verbindungsanfrage - bitte bestaetigen".to_string();
@@ -1924,5 +1982,13 @@ mod verbindungstests {
         }
         host.abort();
         assert!(offline, "ohne Relay muss der Zustand offline sein");
+    }
+    #[test]
+    fn peer_name_is_cleaned() {
+        assert_eq!(clean_peer_name("  Laptop \n"), "Laptop");
+        // right-to-left override and zero width chars are dropped
+        assert_eq!(clean_peer_name("ab\u{202E}cd\u{200B}"), "abcd");
+        assert_eq!(clean_peer_name(&"x".repeat(100)).chars().count(), 48);
+        assert_eq!(clean_peer_name("\u{202E}"), "");
     }
 }

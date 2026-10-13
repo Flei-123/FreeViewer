@@ -9,6 +9,7 @@
 //! the session password with FV_PASSWORD.
 
 mod audio;
+mod authguard;
 mod brand;
 mod autostart;
 mod capture;
@@ -1328,6 +1329,8 @@ fn main() -> eframe::Result<()> {
             from: "Pait Laptop".to_string(),
             code: "1234".to_string(),
             at: std::time::Instant::now(),
+            unverified: true,
+            friend_like: false,
         });
         let mut ok = true;
         for (name, view, stab) in [
@@ -1788,7 +1791,16 @@ fn main() -> eframe::Result<()> {
     // headless host mode (no window) - handy for servers and for testing
     if std::env::args().any(|a| a == "--headless") {
         println!("{} headless host, relay = {}", crate::brand::NAME, shared.relay_url);
-        println!("password = {}", shared.password.lock().unwrap());
+        // The password only goes to the console when explicitly asked for
+        // (logs and process lists tend to end up in places they should not).
+        if std::env::args().any(|a| a == "--show-password") {
+            println!(
+                "password = {}",
+                shared.password.lock().unwrap_or_else(|p| p.into_inner())
+            );
+        } else {
+            println!("password hidden (start with --show-password to print it)");
+        }
         loop {
             std::thread::sleep(Duration::from_secs(2));
             let id = shared.my_id.lock().unwrap().clone();
@@ -1936,7 +1948,7 @@ fn main() -> eframe::Result<()> {
                 std::process::exit(0);
             }
             let status = shared.viewer_status.lock().unwrap().clone();
-            if status.starts_with("Fehler") {
+            if shared.viewer_failed.load(Ordering::Relaxed) {
                 println!("FAIL: {}", status);
                 std::process::exit(1);
             }
@@ -1982,7 +1994,7 @@ fn main() -> eframe::Result<()> {
                 std::process::exit(0);
             }
             let status = shared.viewer_status.lock().unwrap().clone();
-            if status.starts_with("Fehler") {
+            if shared.viewer_failed.load(Ordering::Relaxed) {
                 println!("FAIL: {}", status);
                 std::process::exit(1);
             }
@@ -2052,6 +2064,8 @@ fn main() -> eframe::Result<()> {
                         from: "Laptop von Justin".to_string(),
                         code: "1234".to_string(),
                         at: std::time::Instant::now(),
+                        unverified: true,
+                        friend_like: true,
                     });
                 }
                 app.view = match want.as_deref() {
@@ -2544,6 +2558,12 @@ struct App {
     pw_new_label: String,
     /// Welcher Eintrag gerade im Klartext zu sehen ist.
     pw_show: Option<usize>,
+    /// Session password on the start page: shown in clear text?
+    pw_visible: bool,
+    /// The last viewer try knocked ("ask") instead of using a password.
+    last_ask: bool,
+    /// A change that would replace the permanent password waits for a yes.
+    pw_overwrite: Option<PwOverwrite>,
     /// Soll beim Installieren gleich der Dienst mit eingerichtet werden?
     install_service: bool,
     /// Wann zuletzt im Briefkasten nachgesehen wurde.
@@ -2708,6 +2728,9 @@ impl App {
             pw_list: pwlist::load(),
             pw_new: String::new(),
             pw_new_label: String::new(),
+            pw_visible: false,
+            last_ask: false,
+            pw_overwrite: None,
             pw_show: None,
             install_service: true,
             link_check: std::time::Instant::now() - Duration::from_secs(2),
@@ -2847,6 +2870,7 @@ impl App {
         }
         let sh = self.shared.clone();
         let pw = self.partner_pw.clone();
+        self.last_ask = false;
         self.tex = None;
         self.last_seq = 0;
         self.book.started(&id, &pw, self.remember_pw);
@@ -2876,6 +2900,7 @@ impl App {
             return;
         }
         let sh = self.shared.clone();
+        self.last_ask = true;
         self.tex = None;
         self.last_seq = 0;
         self.book.started(&id, "", false);
@@ -3330,9 +3355,16 @@ impl App {
                 // Passwoerter stehen in den Einstellungen unter "Zugriff".
                 let pw_now = self.shared.password.lock().unwrap().clone();
                 ui.horizontal(|ui| {
+                    // hidden by default: a screen share or screenshot must not
+                    // leak the password
+                    let shown_pw = if self.pw_visible {
+                        pw_now.clone()
+                    } else {
+                        pwlist::masked(&pw_now)
+                    };
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(pw_now.clone())
+                            egui::RichText::new(shown_pw)
                                 .size(20.0)
                                 .family(egui::FontFamily::Monospace)
                                 .color(p.text),
@@ -3341,11 +3373,25 @@ impl App {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_ghost(ui, "refresh", i18n::t("start.new_pw")).clicked() {
-                            *self.shared.password.lock().unwrap() = ident::random_password();
                             if self.pw_fixed {
-                                let fresh = self.shared.password.lock().unwrap().clone();
-                                let _ = ident::set_fixed_password(Some(fresh.as_str()));
+                                // replaces the stored permanent password: ask first
+                                self.pw_overwrite = Some(PwOverwrite::Regenerate);
+                            } else {
+                                *self.shared.password.lock().unwrap() = ident::random_password();
                             }
+                        }
+                        if icon_ghost(
+                            ui,
+                            "eye",
+                            if self.pw_visible {
+                                i18n::t("set.pw_hide")
+                            } else {
+                                i18n::t("set.pw_show")
+                            },
+                        )
+                        .clicked()
+                        {
+                            self.pw_visible = !self.pw_visible;
                         }
                         if icon_ghost(ui, "copy", i18n::t("start.copy")).clicked() {
                             ui.ctx().copy_text(pw_now.clone());
@@ -3424,6 +3470,31 @@ impl App {
                         self.start_ask_session();
                     }
                 });
+                // what happened to the last try, in plain words
+                let failed = self.shared.viewer_failed.load(Ordering::Relaxed);
+                if connecting || failed {
+                    let vs = self
+                        .shared
+                        .viewer_status
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    if !vs.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(vs).size(12.0).color(if failed {
+                            egui::Color32::from_rgb(230, 110, 90)
+                        } else {
+                            p.muted
+                        }));
+                    }
+                    if failed && !connecting && ghost_button(ui, i18n::t("viewer.retry")).clicked() {
+                        if self.last_ask {
+                            self.start_ask_session();
+                        } else {
+                            self.start_session();
+                        }
+                    }
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let mut remember = self.remember_pw;
@@ -6992,9 +7063,15 @@ if let Some(path) = self.shot.clone() {
                     *self.shared.device_name.lock().unwrap() = name.clone();
                     let _ = presence::save_device_name(&name);
                     if !r.password.is_empty() {
-                        *self.shared.password.lock().unwrap() = r.password.clone();
-                        let _ = ident::set_fixed_password(Some(&r.password));
-                        self.pw_fixed = true;
+                        let current = self.shared.password.lock().unwrap().clone();
+                        if self.pw_fixed && current != r.password {
+                            // never replace an existing permanent password silently
+                            self.pw_overwrite = Some(PwOverwrite::Setup(r.password.clone()));
+                        } else {
+                            *self.shared.password.lock().unwrap() = r.password.clone();
+                            let _ = ident::set_fixed_password(Some(&r.password));
+                            self.pw_fixed = true;
+                        }
                     }
                     dlg.owner = if r.owner.is_empty() { r.name_hint } else { r.owner };
                     dlg.done = true;
@@ -7493,6 +7570,44 @@ if let Some(path) = self.shot.clone() {
         chrome::paint_from_theme();
     }
 
+    /// Confirmation before a permanent password is replaced.
+    fn pw_overwrite_ui(&mut self, ctx: &egui::Context) {
+        let Some(what) = self.pw_overwrite.clone() else {
+            return;
+        };
+        let mut yes = false;
+        let mut no = false;
+        egui::Window::new(i18n::t("pw.overwrite_title"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(340.0);
+                ui.label(i18n::t("pw.overwrite_text"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, i18n::t("pw.overwrite_yes"), true).clicked() {
+                        yes = true;
+                    }
+                    if ui.add(ghost(egui::vec2(110.0, 34.0), i18n::t("pw.overwrite_no"))).clicked() {
+                        no = true;
+                    }
+                });
+            });
+        if yes {
+            let fresh = match what {
+                PwOverwrite::Regenerate => ident::random_password(),
+                PwOverwrite::Setup(pw) => pw,
+            };
+            *self.shared.password.lock().unwrap() = fresh.clone();
+            let _ = ident::set_fixed_password(Some(fresh.as_str()));
+            self.pw_fixed = true;
+            self.pw_overwrite = None;
+        } else if no {
+            self.pw_overwrite = None;
+        }
+    }
+
     fn knock_ui(&mut self, ctx: &egui::Context) {
         let knock = self.shared.knock.lock().unwrap().clone();
         let Some(k) = knock else {
@@ -7517,6 +7632,17 @@ if let Some(path) = self.shot.clone() {
                         .size(16.0)
                         .strong(),
                 );
+                if k.unverified {
+                    ui.label(
+                        egui::RichText::new(i18n::t(if k.friend_like {
+                            "knock.friend_like"
+                        } else {
+                            "knock.unverified"
+                        }))
+                        .color(egui::Color32::from_rgb(230, 160, 40))
+                        .size(12.0),
+                    );
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     label_small(ui, "Sitzungscode");
@@ -8268,6 +8394,7 @@ impl eframe::App for App {
         #[cfg(feature = "license")]
         self.license_modal(ctx);
         self.knock_ui(ctx);
+        self.pw_overwrite_ui(ctx);
         self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);
         self.pull_frame(ctx);
@@ -8554,6 +8681,16 @@ struct DevEdit {
     password: String,
     note: String,
     folder: String,
+}
+
+/// A password change that needs a confirmation because it would replace the
+/// permanent password of this machine.
+#[derive(Clone, PartialEq)]
+enum PwOverwrite {
+    /// "Create a new password" while a permanent password is stored.
+    Regenerate,
+    /// A setup link wants to set this password.
+    Setup(String),
 }
 
 /// Zustand des Einrichtungs-Dialogs (freeviewer://setup/<code>).

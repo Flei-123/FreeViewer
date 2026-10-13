@@ -12,13 +12,23 @@
 //! reicht dafuer nicht. Die Datei liegt im Konfigurationsordner, den nur
 //! Administratoren beschreiben koennen. Wer Zugriff auf diese Datei hat, hat
 //! ohnehin schon den Rechner.
+//!
+//! Why not hashed / encrypted (r10): the proof the viewer sends is
+//! Argon2id(password, per-session salt) -> HMAC. The host has to recompute it
+//! from the plain password for every session, so any stored form must be
+//! reversible by the host itself. Encrypting it needs a machine-bound key
+//! (Windows DPAPI, machine scope, because the service runs as SYSTEM and the
+//! UI as the user) and cannot be tested on this build host; a hash would
+//! break the protocol (needs a PAKE). So: plain text, protected by the file
+//! ACL, until a protocol revision allows verifier-based auth.
 
 use std::path::PathBuf;
 
 /// Mehr als das ist keine Verwaltung mehr, sondern ein Datenleck.
 pub const MAX: usize = 10;
 /// Kuerzer nimmt ein Angreifer im Vorbeigehen mit.
-pub const MIN_LEN: usize = 6;
+pub const MIN_LEN: usize = 8;
+// Existing shorter passwords keep working; the limit only applies to new ones.
 
 #[derive(Clone, PartialEq, Default)]
 pub struct Entry {
@@ -119,6 +129,8 @@ mod tests {
     #[test]
     fn short_password_is_refused() {
         assert_eq!(why_not(&[], "kurz"), Some("set.pw_min"));
+        assert_eq!(why_not(&[], "1234567"), Some("set.pw_min"));
+        assert_eq!(why_not(&[], "12345678"), None);
         assert_eq!(why_not(&[], "langgenug"), None);
     }
 

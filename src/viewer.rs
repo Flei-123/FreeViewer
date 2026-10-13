@@ -92,24 +92,164 @@ pub async fn run_viewer_ask(shared: Arc<Shared>, id: String) {
     run_viewer_auth(shared, id, Auth::Ask).await
 }
 
-pub async fn run_viewer_auth(shared: Arc<Shared>, id: String, auth: Auth) {
-    shared.connecting.store(true, Ordering::Relaxed);
-    shared.set_viewer_status(format!("Verbinde mit {} ...", id));
+/// Why a viewer session ended. Typed so the UI can show a plain sentence
+/// and the reconnect logic can tell "try again" from "give up".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fail {
+    /// The relay says the host ID is not online.
+    Offline,
+    /// The host already has a session.
+    Busy,
+    /// The host refused our password proof (or locked us out after too
+    /// many wrong ones - the wire cannot tell the two apart).
+    WrongPassword,
+    /// "Ask" mode: the person at the host said no or did not answer.
+    Declined,
+    /// The relay reported that the host side left.
+    PeerEnded,
+    /// The relay closed the connection cleanly.
+    Closed,
+    /// Socket / TLS / WebSocket trouble on our side or on the way.
+    Network(String),
+    /// The other side said something we do not understand.
+    Protocol(String),
+}
 
-    let result = viewer_once(&shared, &id, &auth).await;
-
-    shared.connected.store(false, Ordering::Relaxed);
-    shared.connecting.store(false, Ordering::Relaxed);
-    if let Some(mut x) = shared.xfer.lock().unwrap().take() {
-        x.shutdown();
+impl std::fmt::Display for Fail {
+    /// Technical text, for the log only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fail::Network(d) => write!(f, "network: {}", d),
+            Fail::Protocol(d) => write!(f, "protocol: {}", d),
+            other => write!(f, "{:?}", other),
+        }
     }
-    *shared.input_tx.lock().unwrap() = None;
-    *shared.frame.lock().unwrap() = None;
-    crate::vinput::set_active(false);
+}
 
-    match result {
-        Ok(()) => shared.set_viewer_status("Sitzung beendet"),
-        Err(e) => shared.set_viewer_status(format!("Fehler: {}", e)),
+impl std::error::Error for Fail {}
+
+impl Fail {
+    /// Sentence for the person in front of the screen.
+    pub fn user_text(&self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Fail::Offline => t("viewer.err.offline"),
+            Fail::Busy => t("viewer.err.busy"),
+            Fail::WrongPassword => t("viewer.err.wrong_pw"),
+            Fail::Declined => t("viewer.err.declined"),
+            Fail::PeerEnded => t("viewer.err.peer_ended"),
+            Fail::Closed => t("viewer.err.closed"),
+            Fail::Network(_) => t("viewer.err.network"),
+            Fail::Protocol(_) => t("viewer.err.protocol"),
+        }
+    }
+
+    /// Worth trying again by itself? A wrong password or a "no" never is.
+    pub fn retryable(&self) -> bool {
+        !matches!(
+            self,
+            Fail::WrongPassword | Fail::Declined | Fail::Protocol(_)
+        )
+    }
+
+    /// Typed error if there is one, otherwise it is socket trouble.
+    pub fn from_error(e: &anyhow::Error) -> Fail {
+        match e.downcast_ref::<Fail>() {
+            Some(f) => f.clone(),
+            None => Fail::Network(e.to_string()),
+        }
+    }
+}
+
+/// Reconnects in a row without a live session before we give up.
+pub const MAX_RECONNECTS: u32 = 6;
+
+/// Wait before reconnect number `attempt` (1-based): 1, 2, 4, 8, 16, 30 s.
+pub fn backoff(attempt: u32) -> Duration {
+    let secs = 1u64 << attempt.saturating_sub(1).min(5);
+    Duration::from_secs(secs.min(30))
+}
+
+/// Should the viewer reconnect by itself? `ever_live`: this run had a
+/// working session before. `attempt`: reconnects already tried since then.
+/// Only a session that was working gets rebuilt - a first connect that fails
+/// shows its error right away. "Ask" mode never reconnects silently: every
+/// new try would pop a question on the other screen.
+pub fn next_retry(fail: &Fail, ever_live: bool, ask: bool, attempt: u32) -> Option<Duration> {
+    if ask || !ever_live || !fail.retryable() || attempt >= MAX_RECONNECTS {
+        return None;
+    }
+    Some(backoff(attempt + 1))
+}
+
+fn reconnect_text(secs: u64, attempt: u32) -> String {
+    crate::i18n::t("viewer.reconnecting")
+        .replacen("{}", &secs.to_string(), 1)
+        .replacen("{}", &attempt.to_string(), 1)
+        .replacen("{}", &MAX_RECONNECTS.to_string(), 1)
+}
+
+pub async fn run_viewer_auth(shared: Arc<Shared>, id: String, auth: Auth) {
+    let ask = matches!(auth, Auth::Ask);
+    let mut ever_live = false;
+    let mut attempt: u32 = 0;
+    shared.viewer_failed.store(false, Ordering::Relaxed);
+
+    loop {
+        shared.connecting.store(true, Ordering::Relaxed);
+        if attempt == 0 {
+            shared.set_viewer_status(format!("Verbinde mit {} ...", id));
+        } else {
+            shared.set_viewer_status(format!("Verbinde neu mit {} ...", id));
+        }
+
+        let result = viewer_once(&shared, &id, &auth).await;
+        let was_live = shared.connected.load(Ordering::Relaxed);
+
+        shared.connected.store(false, Ordering::Relaxed);
+        if let Some(mut x) = shared.xfer.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            x.shutdown();
+        }
+        *shared.input_tx.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        crate::vinput::set_active(false);
+
+        let fail = match &result {
+            Ok(()) => Fail::Closed,
+            Err(e) => Fail::from_error(e),
+        };
+        crate::capture::log_line(&format!("viewer ended: {} (live: {})", fail, was_live));
+        if was_live {
+            // a working session: the counter starts over
+            ever_live = true;
+            attempt = 0;
+        }
+
+        match next_retry(&fail, ever_live, ask, attempt) {
+            Some(wait) => {
+                attempt += 1;
+                // keep the last picture and the "connecting" state while
+                // waiting, so the window does not jump around
+                let total = wait.as_secs().max(1);
+                for left in (1..=total).rev() {
+                    shared.set_viewer_status(reconnect_text(left, attempt));
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+            None => {
+                shared.connecting.store(false, Ordering::Relaxed);
+                *shared.frame.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                shared.viewer_failed.store(true, Ordering::Relaxed);
+                let text = if ever_live && attempt >= MAX_RECONNECTS {
+                    crate::i18n::t("viewer.gave_up").to_string()
+                } else if was_live && matches!(fail, Fail::Closed) {
+                    crate::i18n::t("viewer.ended").to_string()
+                } else {
+                    fail.user_text().to_string()
+                };
+                shared.set_viewer_status(text);
+                return;
+            }
+        }
     }
 }
 
@@ -152,7 +292,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
         };
         let msg = match item {
             Ok(m) => m,
-            Err(e) => break Err(anyhow!(e.to_string())),
+            Err(e) => break Err(anyhow::Error::new(Fail::Network(e.to_string()))),
         };
 
         match msg {
@@ -169,13 +309,13 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                     }
                     "error" => {
                         let m = v.get("msg").and_then(|x| x.as_str()).unwrap_or("?");
-                        break Err(anyhow!(match m {
-                            "offline" => "ID ist nicht online".to_string(),
-                            "busy" => "Host hat bereits eine Sitzung".to_string(),
-                            other => other.to_string(),
+                        break Err(anyhow::Error::new(match m {
+                            "offline" => Fail::Offline,
+                            "busy" => Fail::Busy,
+                            other => Fail::Protocol(other.to_string()),
                         }));
                     }
-                    "peer_gone" => break Err(anyhow!("Gegenstelle hat die Sitzung beendet")),
+                    "peer_gone" => break Err(anyhow::Error::new(Fail::PeerEnded)),
                     _ => {}
                 }
             }
@@ -187,7 +327,9 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                 match data[0] {
                     crypto::TAG_HELLO_ACK => {
                         if data.len() < 49 {
-                            break Err(anyhow!("ungueltige Antwort vom Host"));
+                            break Err(anyhow::Error::new(Fail::Protocol(
+                                "short hello ack".to_string(),
+                            )));
                         }
                         let mut host_pub = [0u8; 32];
                         host_pub.copy_from_slice(&data[1..33]);
@@ -227,7 +369,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                     crypto::TAG_OK => {
                         let c = match cipher.as_ref() {
                             Some(c) => c.clone(),
-                            None => break Err(anyhow!("Handshake nicht abgeschlossen")),
+                            None => {
+                                break Err(anyhow::Error::new(Fail::Protocol(
+                                    "ok before handshake".to_string(),
+                                )))
+                            }
                         };
                         shared.connected.store(true, Ordering::Relaxed);
                         shared.set_viewer_status("Verbunden");
@@ -353,9 +499,9 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                         }));
                     }
                     crypto::TAG_FAIL => {
-                        break Err(anyhow!(match auth {
-                            Auth::Password(_) => "Passwort falsch",
-                            Auth::Ask => "Anfrage abgelehnt oder nicht beantwortet",
+                        break Err(anyhow::Error::new(match auth {
+                            Auth::Password(_) => Fail::WrongPassword,
+                            Auth::Ask => Fail::Declined,
                         }))
                     }
                     crypto::TAG_DATA => {
@@ -642,5 +788,77 @@ fn video_worker(
                 shared.send_input(Msg::NeedKeyframe);
             }
         }
+    }
+}
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_and_is_capped() {
+        let secs: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn wrong_password_and_refusal_never_retry() {
+        for f in [Fail::WrongPassword, Fail::Declined, Fail::Protocol("x".into())] {
+            assert!(next_retry(&f, true, false, 0).is_none(), "{:?}", f);
+        }
+    }
+
+    #[test]
+    fn dropped_live_session_retries_with_backoff_then_gives_up() {
+        let f = Fail::Network("reset".into());
+        assert_eq!(next_retry(&f, true, false, 0), Some(Duration::from_secs(1)));
+        assert_eq!(next_retry(&f, true, false, 2), Some(Duration::from_secs(4)));
+        assert!(next_retry(&f, true, false, MAX_RECONNECTS).is_none());
+        // the same holds for the other transient reasons
+        for f in [Fail::Offline, Fail::Busy, Fail::PeerEnded, Fail::Closed] {
+            assert!(next_retry(&f, true, false, 0).is_some(), "{:?}", f);
+        }
+    }
+
+    #[test]
+    fn first_connect_failure_is_shown_not_retried() {
+        assert!(next_retry(&Fail::Offline, false, false, 0).is_none());
+        assert!(next_retry(&Fail::Network("x".into()), false, false, 0).is_none());
+    }
+
+    #[test]
+    fn ask_mode_never_reconnects_silently() {
+        assert!(next_retry(&Fail::Network("x".into()), true, true, 0).is_none());
+    }
+
+    #[test]
+    fn plain_errors_count_as_network_and_typed_ones_survive() {
+        let plain = anyhow!("connection refused");
+        assert!(matches!(Fail::from_error(&plain), Fail::Network(_)));
+        let typed = anyhow::Error::new(Fail::Busy);
+        assert_eq!(Fail::from_error(&typed), Fail::Busy);
+    }
+
+    #[test]
+    fn every_failure_has_a_plain_sentence() {
+        for f in [
+            Fail::Offline,
+            Fail::Busy,
+            Fail::WrongPassword,
+            Fail::Declined,
+            Fail::PeerEnded,
+            Fail::Closed,
+            Fail::Network("x".into()),
+            Fail::Protocol("x".into()),
+        ] {
+            let t = f.user_text();
+            assert!(!t.starts_with("viewer.err."), "missing text for {:?}", f);
+            assert!(!t.contains("Fehler:"));
+        }
+    }
+
+    #[test]
+    fn reconnect_text_fills_all_placeholders() {
+        let t = reconnect_text(4, 3);
+        assert!(!t.contains("{}"), "{}", t);
     }
 }
