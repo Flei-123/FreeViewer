@@ -229,7 +229,10 @@ fn main() -> eframe::Result<()> {
     if std::env::args().any(|a| a == "--e2evektor") {
         let roh: [u8; 32] = std::array::from_fn(|i| (i * 7 % 251) as u8);
         let k = meete2e::Schluessel::aus_roh(roh);
+        // Fixed sender salt, so the output is reproducible (format v2).
+        let salt: meete2e::Salt = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8];
         println!("SCHLUESSEL {}", k.als_text());
+        println!("SALT {}", hex::encode(salt));
         // H.264-Vektor: derselbe Rahmen, den der Browser rechnen muss.
         {
             let mut f: Vec<u8> = Vec::new();
@@ -239,7 +242,7 @@ fn main() -> eframe::Result<()> {
             f.extend((0..200u32).map(|i| (i * 13 % 256) as u8));
             f.extend_from_slice(&[0, 0, 1, 0x41]);
             f.extend((0..120u32).map(|i| (i * 29 % 256) as u8));
-            let g = k.schuetzen_h264(42, &f);
+            let g = k.seal_h264_at(&salt, 42, &f);
             println!("H264 42 {} {}", hex::encode(&f), hex::encode(&g));
         }
         for (spur, name, zaehler, key, klar) in [
@@ -247,7 +250,7 @@ fn main() -> eframe::Result<()> {
             (meete2e::Spur::Bild, "bild", 1, true, "Ein Schluesselbild"),
             (meete2e::Spur::Bild, "bild", 4294967295, false, "Zaehler am Anschlag"),
         ] {
-            let g = k.schuetzen(spur, zaehler, key, klar.as_bytes());
+            let g = k.seal_audio_at(spur, &salt, zaehler, key, klar.as_bytes());
             println!(
                 "VEKTOR {} {} {} {} {}",
                 name,
