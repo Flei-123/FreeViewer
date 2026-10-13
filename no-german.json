@@ -3,7 +3,8 @@
   "relay/relay.js",
   "relay/account.js",
   "relay/setups.js",
-  "relay/buch.js"
+  "relay/buch.js",
+  "web-patch/"
  ],
  "catalogs": [
   "src/i18n.rs"
