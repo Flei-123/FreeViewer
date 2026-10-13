@@ -329,11 +329,14 @@ fn lauf(
     )
     .map_err(|e| anyhow!("Opus-Kodierer: {:?}", e))?;
     let mut dekodierer: HashMap<u64, audiopus::coder::Decoder> = HashMap::new();
-    // Ende-zu-Ende: je Spur ein eigener, streng steigender Zaehler. Doppelte
-    // Zaehler waeren bei AES-GCM fatal, deshalb wird nie zurueckgesetzt.
-    let mut e2e_ton_zaehler: u32 = 0;
-    let mut e2e_bild_zaehler: u32 = 0;
-    let mut e2e_schirm_zaehler: u32 = 0;
+    // End-to-end: one `Sender` per outgoing stream (microphone, camera,
+    // screen share). Each draws its own random salt, so no two streams -
+    // nor a later rejoin - can ever repeat a (key, nonce) pair (roadmap r1).
+    let mut e2e_ton = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Ton));
+    let mut e2e_video = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Bild));
+    let mut e2e_schirm = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Bild));
+    // Audio mids from which we already saw old-format (v1) frames.
+    let mut e2e_old_format_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Und je eingehender Spur eine Wache gegen Wiedereinspielen.
     let mut e2e_wachen: HashMap<String, crate::meete2e::Wache> = HashMap::new();
     let mut puffer = vec![0u8; 4000];
@@ -452,16 +455,10 @@ fn lauf(
                         .encode(&pcm, &mut aus_puffer)
                         .map_err(|e| anyhow!("Opus: {:?}", e))?;
                     let mut paket = aus_puffer[..n].to_vec();
-                    if let Some(k) = &e2e {
-                        // Ton ganz verschluesseln - Opus wird vom Server
-                        // nicht inhaltlich angefasst.
-                        paket = k.schuetzen(
-                            crate::meete2e::Spur::Ton,
-                            e2e_ton_zaehler,
-                            false,
-                            &paket,
-                        );
-                        e2e_ton_zaehler = e2e_ton_zaehler.wrapping_add(1);
+                    if let Some(s) = e2e_ton.as_mut() {
+                        // Encrypt audio completely - the server does not
+                        // touch Opus content.
+                        paket = s.schuetzen(false, &paket);
                     }
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(rtp_zeit, str0m::media::Frequency::FORTY_EIGHT_KHZ);
@@ -504,12 +501,8 @@ fn lauf(
                     // Bild: nur die INHALTE der NAL-Einheiten werden geheim,
                     // die Struktur bleibt lesbar - sonst kann der Server die
                     // Pakete nicht packen.
-                    let daten = match &e2e {
-                        Some(k) => {
-                            let g = k.schuetzen_h264(e2e_bild_zaehler, &daten);
-                            e2e_bild_zaehler = e2e_bild_zaehler.wrapping_add(1);
-                            g
-                        }
+                    let daten = match e2e_video.as_mut() {
+                        Some(s) => s.schuetzen_h264(&daten),
                         None => daten,
                     };
                     let laenge = daten.len() as u64;
@@ -546,12 +539,8 @@ fn lauf(
                 if let (Some(p), Some(mut w)) = (spt, rtc.writer(vid2)) {
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(schirm_zeit, str0m::media::Frequency::NINETY_KHZ);
-                    let daten = match &e2e {
-                        Some(k) => {
-                            let g = k.schuetzen_h264(e2e_schirm_zaehler, &daten);
-                            e2e_schirm_zaehler = e2e_schirm_zaehler.wrapping_add(1);
-                            g
-                        }
+                    let daten = match e2e_schirm.as_mut() {
+                        Some(s) => s.schuetzen_h264(&daten),
                         None => daten,
                     };
                     let laenge = daten.len() as u64;
@@ -681,11 +670,24 @@ fn lauf(
                         // koennte jemand alte Tonschnipsel erneut einspeisen.
                         let ton_inhalt: Vec<u8> = match &e2e {
                             Some(k) => {
-                                let z = crate::meete2e::zaehler_von(&d.data);
+                                let kopf = crate::meete2e::salz_von(&d.data)
+                                    .zip(crate::meete2e::zaehler_von(&d.data));
                                 let wache = e2e_wachen.entry(d.mid.to_string()).or_default();
-                                match (z, k.oeffnen(crate::meete2e::Spur::Ton, &d.data)) {
-                                    (Some(zz), Some(klar)) if wache.pruefen(zz) => klar,
-                                    _ => continue,
+                                match (kopf, k.oeffnen(crate::meete2e::Spur::Ton, &d.data)) {
+                                    (Some((salz, zz)), Some(klar)) if wache.pruefen(&salz, zz) => klar,
+                                    _ => {
+                                        // A participant on the old, nonce-reusing
+                                        // format: tell the user once per stream.
+                                        if crate::meete2e::ist_altes_format(&d.data)
+                                            && e2e_old_format_seen.insert(d.mid.to_string())
+                                        {
+                                            let _ = ev.send(TonEreignis::Fehler(
+                                                "A participant uses an outdated end-to-end format - they must update."
+                                                    .to_string(),
+                                            ));
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
                             None => d.data.to_vec(),

@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Reference implementation of the FreeMeet E2E frame format v2.
+
+Independent of the Rust and JS code on purpose: both of those are tested
+against the vectors this script writes (tests/freemeet-e2e-vectors.json).
+Spec: docs/FREEMEET-E2E-NONCE.md
+
+  python3 tools/freemeet-e2e/ref.py            # (re)write the vectors
+  python3 tools/freemeet-e2e/ref.py --check    # fail if the file is stale
+"""
+import json
+import os
+import sys
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+VERSION = 0xE3          # first byte of every v2 frame / per-NAL blob
+LEGACY = 0xE2           # v1 marker (nonce-reuse bug), never accepted
+KDF_SALT = b"freemeet-e2e-v2"
+SPUR = {"ton": 1, "bild": 2}
+AUDIO_HEAD = 14         # ver(1) flags(1) salt(8) counter(4)
+NAL_HEAD = 15           # ver(1) salt(8) counter(4) nal index(2)
+
+
+def derive_key(root: bytes, spur: str, salt: bytes) -> bytes:
+    info = spur.encode() + b"\x00" + salt
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=KDF_SALT, info=info).derive(root)
+
+
+def make_nonce(spur: str, nal: int, salt: bytes, counter: int) -> bytes:
+    n = bytearray(12)
+    n[0] = SPUR[spur]
+    n[1:3] = nal.to_bytes(2, "big")
+    n[3:8] = salt[:5]
+    n[8:12] = counter.to_bytes(4, "big")
+    return bytes(n)
+
+
+def seal_audio(root, salt, counter, keyframe, plain, spur="ton"):
+    head = bytes([VERSION, 1 if keyframe else 0]) + salt + counter.to_bytes(4, "big")
+    key = derive_key(root, spur, salt)
+    ct = AESGCM(key).encrypt(make_nonce(spur, 0, salt, counter), plain, head)
+    return head + ct
+
+
+def open_audio(root, frame, spur="ton"):
+    if len(frame) <= AUDIO_HEAD + 16 or frame[0] != VERSION:
+        return None
+    head = frame[:AUDIO_HEAD]
+    salt = frame[2:10]
+    counter = int.from_bytes(frame[10:14], "big")
+    key = derive_key(root, spur, salt)
+    try:
+        return AESGCM(key).decrypt(make_nonce(spur, 0, salt, counter), frame[AUDIO_HEAD:], head)
+    except Exception:
+        return None
+
+
+# ---- H.264 (Annex B) ------------------------------------------------------
+
+def next_start(d: bytes, at: int):
+    i = at
+    while i + 3 <= len(d):
+        if d[i] == 0 and d[i + 1] == 0:
+            if d[i + 2] == 1:
+                return i, i + 3
+            if i + 4 <= len(d) and d[i + 2] == 0 and d[i + 3] == 1:
+                return i, i + 4
+        i += 1
+    return None
+
+
+def nal_units(d: bytes):
+    out, at, open_ = [], 0, None
+    while True:
+        t = next_start(d, at)
+        if t is None:
+            break
+        if open_:
+            out.append((open_[0], open_[1], t[0]))
+        open_ = t
+        at = t[1]
+    if open_:
+        out.append((open_[0], open_[1], len(d)))
+    return out
+
+
+def epb_in(d: bytes) -> bytes:
+    out, zeros = bytearray(), 0
+    for b in d:
+        if zeros >= 2 and b <= 3:
+            out.append(3)
+            zeros = 0
+        out.append(b)
+        zeros = zeros + 1 if b == 0 else 0
+    return bytes(out)
+
+
+def epb_out(d: bytes) -> bytes:
+    out, zeros, i = bytearray(), 0, 0
+    while i < len(d):
+        b = d[i]
+        if zeros >= 2 and b == 3 and i + 1 < len(d) and d[i + 1] <= 3:
+            zeros = 0
+            i += 1
+            continue
+        out.append(b)
+        zeros = zeros + 1 if b == 0 else 0
+        i += 1
+    return bytes(out)
+
+
+def seal_h264(root, salt, counter, frame: bytes) -> bytes:
+    units = nal_units(frame)
+    if not units:
+        return frame
+    key = derive_key(root, "bild", salt)
+    out = bytearray()
+    for nr, (sc, db, end) in enumerate(units):
+        hdr_byte = frame[db]
+        out += frame[sc:db + 1]
+        body = frame[db + 1:end]
+        if (hdr_byte & 0x1F) in (7, 8, 9) or not body:
+            out += body
+            continue
+        blob_head = bytes([VERSION]) + salt + counter.to_bytes(4, "big") + nr.to_bytes(2, "big")
+        aad = bytes([hdr_byte]) + blob_head
+        ct = AESGCM(key).encrypt(make_nonce("bild", nr, salt, counter), body, aad)
+        out += epb_in(blob_head + ct)
+    return bytes(out)
+
+
+def open_h264(root, frame: bytes):
+    units = nal_units(frame)
+    if not units:
+        return None
+    out = bytearray()
+    for sc, db, end in units:
+        hdr_byte = frame[db]
+        out += frame[sc:db + 1]
+        body = frame[db + 1:end]
+        if (hdr_byte & 0x1F) in (7, 8, 9) or not body:
+            out += body
+            continue
+        raw = epb_out(body)
+        if len(raw) < NAL_HEAD + 16 or raw[0] != VERSION:
+            return None
+        salt = raw[1:9]
+        counter = int.from_bytes(raw[9:13], "big")
+        nr = int.from_bytes(raw[13:15], "big")
+        key = derive_key(root, "bild", salt)
+        try:
+            out += AESGCM(key).decrypt(make_nonce("bild", nr, salt, counter), raw[NAL_HEAD:],
+                                       bytes([hdr_byte]) + raw[:NAL_HEAD])
+        except Exception:
+            return None
+    return bytes(out)
+
+
+def sample_frame() -> bytes:
+    f = bytearray()
+    f += bytes([0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1F, 0x96, 0x54])      # SPS
+    f += bytes([0, 0, 0, 1, 0x68, 0xCE, 0x3C, 0x80])                   # PPS
+    f += bytes([0, 0, 0, 1, 0x65])                                     # IDR
+    f += bytes((i * 13) % 256 for i in range(400))
+    f += bytes([0, 0, 1, 0x41])                                        # non-IDR, 3-byte start code
+    f += bytes((i * 29) % 256 for i in range(250))
+    return bytes(f)
+
+
+def build() -> dict:
+    root = bytes(range(32))
+    salt_a = bytes.fromhex("a1a2a3a4a5a6a7a8")
+    salt_b = bytes.fromhex("0102030405060708")
+    v = {
+        "_doc": "FreeMeet E2E v2 vectors, written by tools/freemeet-e2e/ref.py (independent reference). "
+                "Rust (src/meete2e.rs tests) and JS (web-patch/e2e.test.mjs) must reproduce every value.",
+        "root_hex": root.hex(),
+        "keys": [],
+        "nonces": [],
+        "audio": [],
+        "h264": [],
+    }
+    for spur in ("ton", "bild"):
+        for salt in (salt_a, salt_b):
+            v["keys"].append({"spur": spur, "salt": salt.hex(),
+                              "key": derive_key(root, spur, salt).hex()})
+    for spur, nal, salt, counter in [("ton", 0, salt_a, 0), ("bild", 0, salt_a, 0),
+                                     ("bild", 3, salt_b, 0x01020304), ("ton", 0, salt_b, 0xFFFFFFFF)]:
+        v["nonces"].append({"spur": spur, "nal": nal, "salt": salt.hex(), "counter": counter,
+                            "nonce": make_nonce(spur, nal, salt, counter).hex()})
+    for salt, counter, key, plain in [
+        (salt_a, 0, False, b"opus frame zero"),
+        (salt_a, 1, True, b"keyframe flag set"),
+        (salt_b, 0x01020304, False, bytes(range(60))),
+        (salt_b, 0xFFFFFFFF, False, b"last counter value"),
+    ]:
+        fr = seal_audio(root, salt, counter, key, plain)
+        assert open_audio(root, fr) == plain
+        v["audio"].append({"salt": salt.hex(), "counter": counter, "keyframe": key,
+                           "plain": plain.hex(), "frame": fr.hex()})
+    sample = sample_frame()
+    for salt, counter in [(salt_a, 0), (salt_b, 77)]:
+        fr = seal_h264(root, salt, counter, sample)
+        assert open_h264(root, fr) == sample
+        v["h264"].append({"salt": salt.hex(), "counter": counter, "plain": sample.hex(),
+                          "frame": fr.hex()})
+    return v
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(here, "..", "..", "tests", "freemeet-e2e-vectors.json")
+    text = json.dumps(build(), indent=1) + "\n"
+    if "--check" in sys.argv:
+        with open(out, encoding="utf-8") as fh:
+            if fh.read() != text:
+                print("vectors are stale: run tools/freemeet-e2e/ref.py")
+                sys.exit(1)
+        print("vectors up to date")
+        return
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print("wrote", os.path.normpath(out))
+
+
+if __name__ == "__main__":
+    main()

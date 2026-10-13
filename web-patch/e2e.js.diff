@@ -1,0 +1,541 @@
+--- .scratch/live_e2e.js	2026-10-13 20:33:11.303804551 +0000
++++ web-patch/e2e.js	2026-10-13 20:34:26.853595550 +0000
+@@ -1,22 +1,42 @@
+-// Ende-zu-Ende-Verschluesselung im Browser.
++// End-to-end encryption in the browser - frame format v2.
+ //
+-// Muss BYTE FUER BYTE zum nativen Client passen (siehe meete2e.rs) - sonst
+-// sehen sich Browser und Programm gegenseitig nur als Bildsalat.
++// Must match the native client (src/meete2e.rs) BYTE FOR BYTE, otherwise
++// browser and program only see noise from each other. Spec, test vectors and
++// migration plan: docs/FREEMEET-E2E-NONCE.md, tests/freemeet-e2e-vectors.json.
+ //
+-// Rahmenformat:
+-//   Byte 0      0xE2      Kennung
+-//   Byte 1      Merker    Bit 0 = Schluesselbild
+-//   Byte 2..6   Zaehler   32 Bit, gross-endisch
+-//   ab Byte 6   AES-256-GCM: Geheimtext + 16 Byte Pruefsumme
++// WHY v2 (roadmap r1): v1 used one key per track kind for ALL participants and
++// the nonce was `track kind + counter` starting at 0 in every sender. Two
++// senders, camera + screen share, or a rejoin therefore repeated (key, nonce)
++// pairs - fatal for AES-GCM. v2:
++//   * every outgoing stream draws a fresh random 8-byte SENDER SALT,
++//   * stream key = HKDF-SHA256(root, salt "freemeet-e2e-v2",
++//                              info = kind || 0x00 || sender salt),
++//   * nonce = kind | NAL index (16 bit) | salt[0..5] | counter (32 bit),
++//   * a stream switches to a new salt BEFORE its counter would wrap.
+ //
+-// Der Kopf geht als "zusaetzliche Daten" in die Pruefsumme ein. Der Server
+-// DARF ihn lesen - er braucht den Schluesselbild-Merker, um zwischen
+-// Qualitaetsstufen umzuschalten - kann ihn aber nicht faelschen.
+-
+-const E2E_KENNUNG = 0xE2;
+-const E2E_KOPF = 6;
++// Audio frame:
++//   byte 0       0xE3      version (v1 frames start with 0xE2 and are dropped)
++//   byte 1       flags     bit 0 = key frame
++//   byte 2..10   sender salt
++//   byte 10..14  counter   32 bit, big endian
++//   from 14      AES-256-GCM: ciphertext + 16 byte tag
++// The header is the GCM associated data: the server MAY read the key frame
++// flag (it needs it to switch quality layers) but cannot forge it.
++//
++// Video: per NAL unit blob (inside the emulation-prevention escaping):
++//   byte 0 version 0xE3 | 1..9 salt | 9..13 counter | 13..15 NAL index | tag...
++//   associated data = NAL header byte + the 15 byte blob header.
++
++const E2E_KENNUNG = 0xE3;
++const E2E_KENNUNG_V1 = 0xE2;
++const E2E_KOPF = 14;
++const E2E_SALZ = 8;
++const E2E_NAL_KOPF = 1 + E2E_SALZ + 4 + 2;
++const E2E_KDF_SALZ = 'freemeet-e2e-v2';
++const E2E_KEY_CACHE_MAX = 64;
++const E2E_WACHE_SALZE_MAX = 16;
+ 
+-/** 43 Zeichen URL-sicheres Base64 -> 32 Bytes. */
++/** 43 characters of URL-safe base64 -> 32 bytes. */
+ function schluesselBytes(text) {
+   const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+   const roh = String(text || '').trim().replace(/=+$/, '');
+@@ -35,34 +55,128 @@
+   return aus.length === 32 ? new Uint8Array(aus) : null;
+ }
+ 
+-/** Zwei Spurschluessel ableiten - genau wie HKDF-SHA256 im nativen Client. */
++const hexVon = (u8) => Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join('');
++
++/**
++ * Room key handle. Holds the HKDF base key and a cache of derived stream
++ * keys. Opaque to app.js (it only passes it to spurSchuetzen).
++ */
+ async function ableiten(roh) {
+-  const salz = new TextEncoder().encode('freemeet-e2e-v1');
+   const basis = await crypto.subtle.importKey('raw', roh, 'HKDF', false, ['deriveBits']);
+-  const mach = async (zweck) => {
+-    const bits = await crypto.subtle.deriveBits(
+-      { name: 'HKDF', hash: 'SHA-256', salt: salz, info: new TextEncoder().encode(zweck) },
+-      basis, 256);
+-    return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt', 'decrypt']);
+-  };
+-  return { ton: await mach('ton'), bild: await mach('bild') };
++  return { basis, cache: new Map(), version: 2 };
++}
++
++/** Derive the AES-GCM key of one stream. `art` is 'audio' or 'video'. */
++async function streamKey(schluessel, art, salz) {
++  const kind = art === 'audio' ? 'ton' : 'bild';
++  const id = kind + ':' + hexVon(salz);
++  const hit = schluessel.cache.get(id);
++  if (hit) return hit;
++  const key = await deriveStreamKey(schluessel, kind, salz);
++  rememberKey(schluessel, id, key);
++  return key;
++}
++
++async function deriveStreamKey(schluessel, kind, salz) {
++  const enc = new TextEncoder();
++  const info = new Uint8Array(kind.length + 1 + E2E_SALZ);
++  info.set(enc.encode(kind), 0);
++  info[kind.length] = 0;
++  info.set(salz, kind.length + 1);
++  const bits = await crypto.subtle.deriveBits(
++    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(E2E_KDF_SALZ), info },
++    schluessel.basis, 256);
++  return crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['encrypt', 'decrypt']);
++}
++
++function rememberKey(schluessel, id, key) {
++  // Starting over is always safe: keys are re-derived on demand.
++  if (schluessel.cache.size >= E2E_KEY_CACHE_MAX) schluessel.cache.clear();
++  schluessel.cache.set(id, key);
+ }
+ 
+-/** Zufallswert: Spurart vorn, Zaehler hinten - genau wie nativ. */
+-function nonce(spurNr, zaehler) {
++/**
++ * Key for OPENING a frame. The salt is attacker-controlled until the tag
++ * checks out, so a freshly derived key is only remembered by the caller after
++ * a successful decryption (see `merken`).
++ */
++async function oeffnenKey(schluessel, art, salz) {
++  const kind = art === 'audio' ? 'ton' : 'bild';
++  const id = kind + ':' + hexVon(salz);
++  const hit = schluessel.cache.get(id);
++  if (hit) return { key: hit, merken: null };
++  const key = await deriveStreamKey(schluessel, kind, salz);
++  return { key, merken: () => rememberKey(schluessel, id, key) };
++}
++
++/** Fresh random sender salt. */
++function neuesSalz() {
++  const s = new Uint8Array(E2E_SALZ);
++  crypto.getRandomValues(s);
++  return s;
++}
++
++/** GCM nonce: kind | NAL index | first 5 salt bytes | counter. */
++function nonce(spurNr, nal, salz, zaehler) {
+   const n = new Uint8Array(12);
+   n[0] = spurNr;
++  new DataView(n.buffer).setUint16(1, nal, false);
++  n.set(salz.subarray(0, 5), 3);
+   new DataView(n.buffer).setUint32(8, zaehler >>> 0, false);
+   return n;
+ }
+ 
+-// ------------------------------------------------------- H.264 (Bild) ----
++// ---------------------------------------------------------- audio ---------
++
++/** Encrypt one audio frame with an explicit salt + counter (LOW LEVEL). */
++async function schuetzenTon(schluessel, salz, zaehler, schluesselbild, klar) {
++  const key = await streamKey(schluessel, 'audio', salz);
++  const kopf = new Uint8Array(E2E_KOPF);
++  kopf[0] = E2E_KENNUNG;
++  kopf[1] = schluesselbild ? 0x01 : 0x00;
++  kopf.set(salz, 2);
++  new DataView(kopf.buffer).setUint32(2 + E2E_SALZ, zaehler >>> 0, false);
++  const geheim = new Uint8Array(await crypto.subtle.encrypt(
++    { name: 'AES-GCM', iv: nonce(1, 0, salz, zaehler), additionalData: kopf }, key, klar));
++  const aus = new Uint8Array(E2E_KOPF + geheim.length);
++  aus.set(kopf, 0);
++  aus.set(geheim, E2E_KOPF);
++  return aus;
++}
++
++/** Header fields of an audio frame, or null if it is not a v2 frame. */
++function tonKopf(daten) {
++  if (daten.length <= E2E_KOPF + 16 || daten[0] !== E2E_KENNUNG) return null;
++  return {
++    salz: daten.slice(2, 2 + E2E_SALZ),
++    zaehler: new DataView(daten.buffer, daten.byteOffset).getUint32(2 + E2E_SALZ, false),
++  };
++}
++
++/** Decrypt one audio frame. Returns {klar, salz, zaehler} or null. */
++async function oeffnenTon(schluessel, daten) {
++  const k = tonKopf(daten);
++  if (!k) return null;
++  const { key, merken } = await oeffnenKey(schluessel, 'audio', k.salz);
++  let klar;
++  try {
++    klar = new Uint8Array(await crypto.subtle.decrypt(
++      { name: 'AES-GCM', iv: nonce(1, 0, k.salz, k.zaehler),
++        additionalData: daten.slice(0, E2E_KOPF) },
++      key, daten.slice(E2E_KOPF)));
++  } catch (e) {
++    return null;
++  }
++  if (merken) merken();
++  return { klar, salz: k.salz, zaehler: k.zaehler };
++}
++
++// ------------------------------------------------------- H.264 (video) ----
+ //
+-// Der Medienserver setzt die Bilder neu zu RTP-Paketen zusammen und muss
+-// dazu die H.264-Struktur verstehen. Verschluesselt man den ganzen Rahmen,
+-// scheitert er ("NaluTypeIsNotHandled") und beim Gegenueber kommt kein Bild
+-// an - gemessen am 07.08.2026. Deshalb bleibt die STRUKTUR sichtbar und nur
+-// der INHALT wird geheim. Muss Byte fuer Byte zu meete2e.rs passen.
++// The media server repacks images into RTP and must understand the H.264
++// structure (measured 07.08.2026: a fully encrypted payload fails with
++// "NaluTypeIsNotHandled"). So the STRUCTURE stays visible and only the
++// CONTENT is encrypted. Must match meete2e.rs byte for byte.
+ 
+ function naechsterStartcode(d, ab) {
+   let i = ab;
+@@ -90,10 +204,10 @@
+   return aus;
+ }
+ 
+-/** SPS, PPS und AUD bleiben im Klartext - der Packer im Server braucht sie. */
++/** SPS, PPS and AUD stay in the clear - the packer in the server needs them. */
+ const nalBleibtKlar = (typ) => typ === 7 || typ === 8 || typ === 9;
+ 
+-/** Schutz gegen falsche Startcodes (wie H.264 selbst). */
++/** Protection against false start codes (like H.264 itself). */
+ function epbEin(d) {
+   const aus = [];
+   let nullen = 0;
+@@ -117,17 +231,20 @@
+   return Uint8Array.from(aus);
+ }
+ 
+-function bildNonce(zaehler, nalNr) {
+-  const n = new Uint8Array(12);
+-  n[0] = 2;
+-  n[7] = nalNr;
+-  new DataView(n.buffer).setUint32(8, zaehler >>> 0, false);
+-  return n;
++function zusammen(stuecke) {
++  let n = 0; for (const s of stuecke) n += s.length;
++  const aus = new Uint8Array(n);
++  let o = 0; for (const s of stuecke) { aus.set(s, o); o += s.length; }
++  return aus;
+ }
+ 
+-async function schuetzenH264(key, zaehler, rahmen) {
++/** Encrypt one H.264 frame with an explicit salt + counter (LOW LEVEL). */
++async function schuetzenH264(schluessel, salz, zaehler, rahmen) {
+   const teile = nalEinheiten(rahmen);
+   if (!teile.length) return rahmen;
++  // The NAL index is part of the nonce; it must not repeat inside a frame.
++  if (teile.length > 0xffff) return new Uint8Array(0);
++  const key = await streamKey(schluessel, 'video', salz);
+   const stuecke = [];
+   for (let nr = 0; nr < teile.length; nr++) {
+     const [sc, db, ende] = teile[nr];
+@@ -135,24 +252,24 @@
+     stuecke.push(rahmen.slice(sc, db + 1));
+     const inhalt = rahmen.slice(db + 1, ende);
+     if (nalBleibtKlar(kopf & 0x1f) || inhalt.length === 0) { stuecke.push(inhalt); continue; }
+-    const nr8 = nr & 0xff;
+-    const aad = new Uint8Array([kopf, nr8, (zaehler >>> 24) & 0xff, (zaehler >>> 16) & 0xff,
+-                                (zaehler >>> 8) & 0xff, zaehler & 0xff]);
++    const blobKopf = new Uint8Array(E2E_NAL_KOPF);
++    blobKopf[0] = E2E_KENNUNG;
++    blobKopf.set(salz, 1);
++    const dv = new DataView(blobKopf.buffer);
++    dv.setUint32(1 + E2E_SALZ, zaehler >>> 0, false);
++    dv.setUint16(1 + E2E_SALZ + 4, nr, false);
++    const aad = new Uint8Array(1 + E2E_NAL_KOPF);
++    aad[0] = kopf;
++    aad.set(blobKopf, 1);
+     const geheim = new Uint8Array(await crypto.subtle.encrypt(
+-      { name: 'AES-GCM', iv: bildNonce(zaehler, nr8), additionalData: aad }, key, inhalt));
+-    const roh = new Uint8Array(5 + geheim.length);
+-    roh[0] = nr8;
+-    new DataView(roh.buffer).setUint32(1, zaehler >>> 0, false);
+-    roh.set(geheim, 5);
+-    stuecke.push(epbEin(roh));
++      { name: 'AES-GCM', iv: nonce(2, nr, salz, zaehler), additionalData: aad }, key, inhalt));
++    stuecke.push(epbEin(zusammen([blobKopf, geheim])));
+   }
+-  let n = 0; for (const s of stuecke) n += s.length;
+-  const aus = new Uint8Array(n);
+-  let o = 0; for (const s of stuecke) { aus.set(s, o); o += s.length; }
+-  return aus;
++  return zusammen(stuecke);
+ }
+ 
+-async function oeffnenH264(key, rahmen) {
++/** Open one encrypted H.264 frame. Returns Uint8Array or null (old/foreign/forged). */
++async function oeffnenH264(schluessel, rahmen) {
+   const teile = nalEinheiten(rahmen);
+   if (!teile.length) return null;
+   const stuecke = [];
+@@ -162,120 +279,151 @@
+     const inhalt = rahmen.slice(db + 1, ende);
+     if (nalBleibtKlar(kopf & 0x1f) || inhalt.length === 0) { stuecke.push(inhalt); continue; }
+     const roh = epbRaus(inhalt);
+-    if (roh.length < 21) return null;
+-    const nr8 = roh[0];
+-    const zaehler = new DataView(roh.buffer, roh.byteOffset).getUint32(1, false);
+-    const aad = new Uint8Array([kopf, nr8, roh[1], roh[2], roh[3], roh[4]]);
+-    const klar = new Uint8Array(await crypto.subtle.decrypt(
+-      { name: 'AES-GCM', iv: bildNonce(zaehler, nr8), additionalData: aad }, key, roh.slice(5)));
++    // An old (v1) blob starts with the NAL index, not with the version byte.
++    if (roh.length < E2E_NAL_KOPF + 16 || roh[0] !== E2E_KENNUNG) return null;
++    const salz = roh.slice(1, 1 + E2E_SALZ);
++    const dv = new DataView(roh.buffer, roh.byteOffset);
++    const zaehler = dv.getUint32(1 + E2E_SALZ, false);
++    const nr = dv.getUint16(1 + E2E_SALZ + 4, false);
++    const aad = new Uint8Array(1 + E2E_NAL_KOPF);
++    aad[0] = kopf;
++    aad.set(roh.subarray(0, E2E_NAL_KOPF), 1);
++    const { key, merken } = await oeffnenKey(schluessel, 'video', salz);
++    let klar;
++    try {
++      klar = new Uint8Array(await crypto.subtle.decrypt(
++        { name: 'AES-GCM', iv: nonce(2, nr, salz, zaehler), additionalData: aad },
++        key, roh.slice(E2E_NAL_KOPF)));
++    } catch (e) {
++      return null;
++    }
++    if (merken) merken();
+     stuecke.push(klar);
+   }
+-  let n = 0; for (const s of stuecke) n += s.length;
+-  const aus = new Uint8Array(n);
+-  let o = 0; for (const s of stuecke) { aus.set(s, o); o += s.length; }
+-  return aus;
++  return zusammen(stuecke);
+ }
+ 
++// ------------------------------------------------------- replay guard -----
++
+ /**
+- * Haengt Ver- und Entschluesselung an EINEN Sender oder Empfaenger.
+- *
+- * `art` ist 'audio' oder 'video'. Ton und Bild bekommen getrennte
+- * Schluessel, damit ein Tonrahmen nie als Bildrahmen durchgeht.
++ * Replay guard with a 64-number window PER SENDER SALT (each stream counts on
++ * its own). Remembers the last E2E_WACHE_SALZE_MAX salts; a replay of a stream
++ * evicted since is not detected (documented limit). Call it only AFTER a
++ * frame decrypted.
+  */
+-function spurSchuetzen(schluessel, art, lesbar, schreibbar, richtung) {
+-  const istTon = art === 'audio';
+-  const key = istTon ? schluessel.ton : schluessel.bild;
+-  const spurNr = istTon ? 1 : 2;
+-  let zaehler = 0;
+-  // Wiedereinspiel-Schutz mit 64er-Fenster (wie struct Wache nativ).
+-  let hoechste = 0, fenster = 0n, gesehen = false;
+-  const neuGenug = (z) => {
+-    if (!gesehen) { gesehen = true; hoechste = z; return true; }
+-    if (z > hoechste) {
+-      const schritt = z - hoechste;
+-      fenster = schritt >= 64 ? 0n : ((fenster << BigInt(schritt)) | (1n << BigInt(schritt - 1)));
+-      hoechste = z;
++function neueWache() {
++  const fenster = new Map(); // salt hex -> {hoechste, bits}
++  return function pruefen(salz, z) {
++    const id = hexVon(salz);
++    let f = fenster.get(id);
++    if (!f) {
++      if (fenster.size >= E2E_WACHE_SALZE_MAX) fenster.delete(fenster.keys().next().value);
++      fenster.set(id, { hoechste: z, bits: 0n });
++      return true;
++    }
++    if (z > f.hoechste) {
++      const schritt = z - f.hoechste;
++      f.bits = schritt >= 64 ? 0n : ((f.bits << BigInt(schritt)) | (1n << BigInt(schritt - 1)));
++      f.hoechste = z;
+       return true;
+     }
+-    const zurueck = hoechste - z;
++    const zurueck = f.hoechste - z;
+     if (zurueck === 0 || zurueck > 64) return false;
+     const bit = 1n << BigInt(zurueck - 1);
+-    if (fenster & bit) return false;
+-    fenster |= bit;
++    if (f.bits & bit) return false;
++    f.bits |= bit;
+     return true;
+   };
++}
++
++/**
++ * One OUTGOING stream: owns the salt and the counter, so a (key, nonce) pair
++ * never repeats. Rotates to a new salt right before the 32-bit counter would
++ * wrap. Create one per sender (microphone, camera, screen share, rejoin).
++ */
++function neuerSender(salz) {
++  let aktuell = salz || neuesSalz();
++  let naechster = 0;
++  return {
++    salz: () => aktuell,
++    nimm() {
++      if (naechster > 0xffffffff) { aktuell = neuesSalz(); naechster = 0; }
++      return { salz: aktuell, zaehler: naechster++ };
++    },
++    setzeNaechsten(n) { naechster = n; },   // test hook
++  };
++}
++
++/**
++ * Attach encryption/decryption to ONE sender or receiver.
++ *
++ * `art` is 'audio' or 'video'. Audio and video get separate keys, so an audio
++ * frame never passes as video. Every call creates its own sender salt.
++ */
++function spurSchuetzen(schluessel, art, lesbar, schreibbar, richtung) {
++  const istTon = art === 'audio';
++  const sender = neuerSender();
++  const wache = neueWache();
+ 
+   const durch = new TransformStream({
+     async transform(rahmen, weiter) {
+       const daten = new Uint8Array(rahmen.data);
+       try {
+         if (richtung === 'raus') {
+-          const z = zaehler++ >>> 0;
++          const { salz, zaehler } = sender.nimm();
+           if (!istTon) {
+-            // Bild: Struktur bleibt sichtbar, nur der Inhalt wird geheim.
+-            rahmen.data = (await schuetzenH264(key, z, daten)).buffer;
++            // Video: structure stays visible, only the content is encrypted.
++            rahmen.data = (await schuetzenH264(schluessel, salz, zaehler, daten)).buffer;
+             weiter.enqueue(rahmen);
+             return;
+           }
+-          const kopf = new Uint8Array(E2E_KOPF);
+-          kopf[0] = E2E_KENNUNG;
+-          // Schluesselbild: der Browser sagt es uns direkt.
+-          kopf[1] = (rahmen.type === 'key' || rahmen.type === undefined && istTon) ? 0x01 : 0x00;
+-          if (rahmen.type === 'key') kopf[1] |= 0x01;
+-          new DataView(kopf.buffer).setUint32(2, z, false);
+-          const geheim = new Uint8Array(await crypto.subtle.encrypt(
+-            { name: 'AES-GCM', iv: nonce(spurNr, z), additionalData: kopf }, key, daten));
+-          const aus = new Uint8Array(E2E_KOPF + geheim.length);
+-          aus.set(kopf, 0);
+-          aus.set(geheim, E2E_KOPF);
+-          rahmen.data = aus.buffer;
++          // Key frame flag: the browser tells us directly (audio frames have
++          // no `type`, they are flagged like before).
++          const schluesselbild = rahmen.type === 'key' || rahmen.type === undefined;
++          rahmen.data = (await schuetzenTon(schluessel, salz, zaehler, schluesselbild, daten)).buffer;
+           weiter.enqueue(rahmen);
+           return;
+         }
+-        // ---- herein ----
++        // ---- incoming ----
+         if (!istTon) {
+-          const klar = await oeffnenH264(key, daten);
+-          if (!klar) return;          // falscher Schluessel oder verfaelscht
++          const klar = await oeffnenH264(schluessel, daten);
++          if (!klar) return;          // wrong key, forged, or old format
+           rahmen.data = klar.buffer;
+           weiter.enqueue(rahmen);
+           return;
+         }
+         if (daten.length <= E2E_KOPF + 16 || daten[0] !== E2E_KENNUNG) {
+-          // Nicht unser Format: das ist ein Gegenueber OHNE Verschluesselung.
+-          // Durchlassen waere bequem - aber dann saehe man Bilder, die der
+-          // Server mitlesen konnte, ohne es zu merken. Also verwerfen.
++          // Not our format: a peer WITHOUT encryption or on the OLD format
++          // (0xE2). Passing it through would show media the server could
++          // read, so drop it.
+           return;
+         }
+-        const kopf = daten.slice(0, E2E_KOPF);
+-        const z = new DataView(kopf.buffer, kopf.byteOffset).getUint32(2, false);
+-        if (!neuGenug(z)) return;   // Wiederholung oder uralt
+-        const klar = await crypto.subtle.decrypt(
+-          { name: 'AES-GCM', iv: nonce(spurNr, z), additionalData: kopf },
+-          key, daten.slice(E2E_KOPF));
+-        rahmen.data = klar;
++        const offen = await oeffnenTon(schluessel, daten);
++        if (!offen) return;           // wrong key or forged
++        if (!wache(offen.salz, offen.zaehler)) return;   // repeat or ancient
++        rahmen.data = offen.klar.buffer;
+         weiter.enqueue(rahmen);
+       } catch (e) {
+-        // Falscher Schluessel oder verfaelscht: NICHT durchlassen.
++        // Wrong key or forged: do NOT let it through.
+       }
+     },
+   });
+-  lesbar.pipeThrough(durch).pipeTo(schreibbar);
++  // Returned so tests can wait for the end of the stream; app.js ignores it.
++  return lesbar.pipeThrough(durch).pipeTo(schreibbar);
+ }
+ 
+-/** Schluessel aus dem Fragment des Links holen (#k=...).
++/** Get the key from the fragment of the link (#k=...).
+  *
+- * SCHARF seit 08.08.2026. Zwei Dinge mussten vorher stimmen:
+- * 1. Es werden nur die INHALTE der NAL-Einheiten verschluesselt, ihre Koepfe
+- *    bleiben lesbar - sonst kann der Medienserver die Bilder nicht mehr zu
+- *    RTP packen ("NaluTypeIsNotHandled") und beim Empfaenger kaeme nichts an.
+- * 2. Ende-zu-Ende ist eine bewusste Wahl beim Anlegen des Meetings, und der
+- *    Server handelt sie aus: in einen verschluesselten Raum kommt nur, wessen
+- *    Programm das kann - der Rest wird mit klarer Ansage abgewiesen statt
+- *    schwarze Kacheln zu sehen.
++ * LIVE since 08.08.2026. Two things had to hold before:
++ * 1. Only the CONTENT of the NAL units is encrypted, their headers stay
++ *    readable - otherwise the media server cannot repack the images into RTP
++ *    ("NaluTypeIsNotHandled") and nothing would arrive.
++ * 2. End-to-end is a deliberate choice when the meeting is created and the
++ *    server negotiates it: only clients that can do it enter an encrypted
++ *    room, the rest is refused with a clear message instead of black tiles.
+  *
+- * Steht ein Schluessel im Fragment, wird also verschluesselt. Der zusaetzliche
+- * Schalter "&e2e=1" ist damit hinfaellig; wer ihn noch im alten Link stehen
+- * hat, dem schadet er nicht.
++ * A key in the fragment therefore means: encrypt. The extra switch "&e2e=1"
++ * is obsolete; it does no harm in an old link.
+  */
+ function schluesselAusLink() {
+   const frag = (location.hash || '').replace(/^#/, '');
+@@ -288,12 +436,12 @@
+   return null;
+ }
+ 
+-/** Aus 32 Bytes die beiden Spurschluessel machen. */
++/** Build the room key handle from the 32 key bytes. */
+ async function schluesselAufbauen(roh) {
+   return ableiten(roh);
+ }
+ 
+-/** Kann dieser Browser ueberhaupt Ende-zu-Ende? */
++/** Can this browser do end-to-end at all? */
+ function moeglich() {
+   return typeof RTCRtpSender !== 'undefined' &&
+     (typeof RTCRtpScriptTransform !== 'undefined' ||
+@@ -301,10 +449,11 @@
+ }
+ 
+ 
+-// Als globales Objekt bereitstellen - app.js ist kein ES-Modul.
++// Expose as a global object - app.js is not an ES module.
+ window.FreeMeetE2E = {
+   spurSchuetzen, schluesselAusLink, schluesselAufbauen, moeglich,
+-  schluesselBytes, E2E_KENNUNG, E2E_KOPF,
+-  // fuer den Abgleich gegen die Pruefvektoren des nativen Clients
+-  schuetzenH264, oeffnenH264, nalEinheiten, epbEin, epbRaus,
++  schluesselBytes, E2E_KENNUNG, E2E_KENNUNG_V1, E2E_KOPF,
++  // for the check against the shared test vectors (tests/freemeet-e2e-vectors.json)
++  schuetzenTon, oeffnenTon, schuetzenH264, oeffnenH264, nalEinheiten, epbEin, epbRaus,
++  neuerSender, neueWache, neuesSalz, streamKey, nonce,
+ };
