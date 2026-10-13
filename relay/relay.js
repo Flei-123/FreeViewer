@@ -8,6 +8,17 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+let account = null;
+let setups = null;
+try { account = require(path.join(__dirname, 'account.js')); } catch (e) { console.log('account module missing:', e.message); }
+try { setups = require(path.join(__dirname, 'setups.js')); if (account) setups.init(account); } catch (e) { console.log('setups module missing:', e.message); }
+// r7: people with an account keep their friends in the ONE Fleitec address
+// book (fleikontakte); buch.js translates. FV_BUCH=0 switches it off.
+let buch = null;
+if (process.env.FV_BUCH !== '0') {
+  try { buch = require(require('path').join(__dirname, 'buch.js')); } catch (e) { console.log('buch module missing:', e.message); }
+}
+
 let WebSocket;
 try {
   WebSocket = require('ws');
@@ -16,8 +27,20 @@ try {
 }
 
 const PORT = parseInt(process.env.FV_PORT || '7180', 10);
-const DATA = process.env.FV_DATA || path.join(__dirname, 'hosts.json');
+const DATA = process.env.FV_DATA || '/root/fvrelay/hosts.json';
 const MAX_PAYLOAD = 16 * 1024 * 1024;
+
+// ---------- release hosting (auto update) ----------
+const DIST = process.env.FV_DIST || '/root/fvrelay/dist';
+const MAX_UPLOAD = 128 * 1024 * 1024;
+function uploadToken() {
+  try { return fs.readFileSync('/root/fvrelay/upload.token', 'utf8').trim(); } catch (_) { return null; }
+}
+function safeName(n) {
+  n = String(n || '').split(/[\\/]/).pop();
+  return /^[A-Za-z0-9._-]{1,64}$/.test(n) ? n : null;
+}
+
 
 // ---------- persistent id directory: sha256(host_secret) -> id ----------
 let dir = {};
@@ -37,13 +60,32 @@ function usedIds() { return new Set(Object.values(dir)); }
 function newId() {
   const used = usedIds();
   for (;;) {
-    const n = 100000000 + crypto.randomInt(0, 900000000);
+    const n = 1000000000 + crypto.randomInt(0, 9000000000); // 10 Stellen wie TeamViewer
     const id = String(n);
     if (!used.has(id)) return id;
   }
 }
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
+
+// ---------- device directory: id -> { name, seen } ----------
+// Only what a partner list needs: the machine name a host reports about
+// itself and when it was last online. No screens, no passwords - the relay
+// still cannot decrypt anything.
+const META = process.env.FV_META || path.join(path.dirname(DATA), 'devices.json');
+let meta = {};
+try { meta = JSON.parse(fs.readFileSync(META, 'utf8')); } catch (_) { meta = {}; }
+let metaTimer = null;
+function saveMeta() {
+  if (metaTimer) return;
+  metaTimer = setTimeout(() => {
+    metaTimer = null;
+    try { fs.writeFileSync(META, JSON.stringify(meta)); } catch (e) { log('meta save failed: ' + e.message); }
+  }, 1000);
+}
+function cleanName(s) {
+  return String(s || '').replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 40);
+}
 
 // ---------- live state ----------
 const hosts = new Map();    // id -> ws (host connection)
@@ -70,7 +112,553 @@ function unpair(ws, reason) {
   }
 }
 
+// ==========================================================================
+// Freunde - Freundschaftsanfragen, Freundesliste, Blockliste
+//
+// Eine Freundschaft entsteht NUR, wenn beide Seiten zugestimmt haben: einer
+// fragt (/fv/freunde/anfragen), der andere nimmt an (/fv/freunde/annehmen).
+// Vorher gibt es nur eine offene Anfrage, keine Verbindung.
+//
+// Wer jemand ist, weist der Anrufer genauso nach wie beim WebSocket
+// (host_register): mit dem Geheimnis seiner Installation. Das Relay kennt nur
+// dessen SHA-256 (hosts.json) und findet darueber die FreeViewer-ID. Das
+// Geheimnis steht IMMER im Rumpf der Anfrage, nie in der Adresse - es soll
+// nicht in Zugriffsprotokollen landen. Neue IDs werden hier NICHT vergeben;
+// wer noch nie verbunden war, bekommt 401.
+//
+// OHNE KONTO haengt die Freundesliste an der FreeViewer-ID. MIT KONTO wird
+// zusaetzlich der Kontoname (ueber JARVIS, wie in account.js) an der eigenen
+// Seite vermerkt - damit sieht dasselbe Konto seine Freunde auf jedem Geraet.
+//
+// Das Relay gibt NIEMALS die Liste eines anderen heraus: jede Antwort wird
+// aus der Sicht des Anrufers gebaut, es gibt keinen Parameter "Liste von X".
+//
+// Geloescht wird nichts hart - Freundschaften bekommen einen Grabstein
+// (entfernt = true), damit der Abgleich auf allen Geraeten aufraeumt.
+// ==========================================================================
+
+const FREUNDE = process.env.FV_FREUNDE || path.join(path.dirname(DATA), 'freunde.json');
+
+const FR_KURZ_MS = 60 * 1000;                  // kurzes Spam-Fenster
+const FR_KURZ_MAX = 5;                         // so viele Anfragen darin
+const FR_TAG_MS = 24 * 3600 * 1000;
+const FR_TAG_MAX = 30;                         // so viele Anfragen pro Tag
+const FR_MAX_OFFEN_AUS = 50;                   // offene Anfragen, die einer verschickt hat
+const FR_MAX_OFFEN_EIN = 200;                  // offene Anfragen, die bei einem liegen
+const FR_MAX_FREUNDE = 500;
+const FR_ANFRAGE_TTL = 30 * 24 * 3600 * 1000;  // unbeantwortete Anfragen
+const FR_GRAB_TTL = 90 * 24 * 3600 * 1000;     // Grabsteine geloeschter Freundschaften
+const FR_MAX_BODY = 64 * 1024;
+
+let fr = null;
+let frGeaendert = false;
+
+function frLog(...a) { log('[freunde]', ...a); }
+function frMerk() { frGeaendert = true; }
+
+function frLaden() {
+  if (fr) return fr;
+  try { fr = JSON.parse(fs.readFileSync(FREUNDE, 'utf8')); } catch (_) { fr = null; }
+  if (!fr || typeof fr !== 'object') fr = {};
+  fr.version = 1;
+  if (!Array.isArray(fr.freundschaften)) fr.freundschaften = [];
+  if (!Array.isArray(fr.anfragen)) fr.anfragen = [];
+  if (!Array.isArray(fr.blocks)) fr.blocks = [];
+  if (!fr.konten || typeof fr.konten !== 'object') fr.konten = {};
+  if (!fr.takt || typeof fr.takt !== 'object') fr.takt = {};
+  return fr;
+}
+
+/** Atomar: erst daneben schreiben, dann umbenennen - eine halbe Datei kann
+ *  es damit nie geben, auch nicht bei Stromausfall mitten im Schreiben. */
+function frSichern() {
+  if (!fr) return;
+  try {
+    fs.mkdirSync(path.dirname(FREUNDE), { recursive: true });
+    const tmp = FREUNDE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(fr, null, 1));
+    fs.renameSync(tmp, FREUNDE);
+    try { fs.chmodSync(FREUNDE, 0o600); } catch (_) {}
+  } catch (e) { frLog('speichern fehlgeschlagen: ' + e.message); }
+}
+
+/** Abgelaufene Anfragen, alte Grabsteine und alte Zaehler wegraeumen. */
+function frAufraeumen(db) {
+  const jetzt = Date.now();
+  const vorher = db.anfragen.length + db.freundschaften.length;
+  db.anfragen = db.anfragen.filter((a) => jetzt - (a.wann || 0) < FR_ANFRAGE_TTL);
+  db.freundschaften = db.freundschaften.filter(
+    (f) => !f.entfernt || jetzt - (f.entfernt_am || 0) < FR_GRAB_TTL);
+  for (const k of Object.keys(db.takt)) {
+    const v = (db.takt[k] || []).filter((t) => jetzt - t < FR_TAG_MS);
+    if (v.length) db.takt[k] = v; else delete db.takt[k];
+  }
+  return vorher !== db.anfragen.length + db.freundschaften.length;
+}
+
+// ------------------------------------------------------------- wer ruft an?
+
+/**
+ * Nachweis wie beim host_register: Geheimnis -> SHA-256 -> ID aus hosts.json.
+ * Zusaetzlich (freiwillig) ein Konto-Zeichen wie in account.js.
+ * cb(null, { fvid, konto }) oder cb(null, null, grund).
+ */
+function frWer(b, cb) {
+  const secret = String((b && b.secret) || '');
+  if (!/^[0-9a-fA-F]{32,128}$/.test(secret))
+    return cb(null, null, 'Geheimnis fehlt oder ist ungueltig');
+  const h = crypto.createHash('sha256').update(secret.toLowerCase(), 'utf8').digest('hex');
+  const fvid = dir[h];
+  if (!fvid) return cb(null, null, 'Unbekanntes Geraet - bitte zuerst verbinden');
+  const token = String((b && b.token) || '');
+  if (!token || !account) return cb(null, { fvid, konto: '' });
+  account.whoIs(token, (err, user) => {
+    // Konto nicht erreichbar oder Zeichen abgelaufen: es geht ohne Konto
+    // weiter, die ID allein reicht. Der Anrufer sieht am Feld "konto", ob
+    // seine Anmeldung erkannt wurde.
+    if (err) return cb(null, { fvid, konto: '' });
+    cb(null, { fvid, konto: user ? String(user).toLowerCase() : '' });
+  });
+}
+
+/** Welches Konto gehoert zu dieser ID? (gelernt, wenn sie angemeldet anfragt) */
+function frKontoVon(db, fvid) {
+  const e = db.konten[fvid];
+  return (e && e.konto) || '';
+}
+
+function frKontoMerken(db, ich) {
+  if (!ich.konto) return false;
+  const alt = db.konten[ich.fvid];
+  if (alt && alt.konto === ich.konto) return false;
+  db.konten[ich.fvid] = { konto: ich.konto, at: Date.now() };
+  return true;
+}
+
+/** Alle IDs, die zu mir gehoeren (eigene + alle Geraete meines Kontos). */
+function frMeineIds(db, ich) {
+  const s = new Set([ich.fvid]);
+  if (ich.konto) {
+    for (const id of Object.keys(db.konten)) {
+      if (db.konten[id] && db.konten[id].konto === ich.konto) s.add(id);
+    }
+  }
+  return [...s];
+}
+
+/** Ist diese Seite einer Freundschaft meine? */
+function frMeins(seite, ich) {
+  if (!seite) return false;
+  if (seite.fvid && seite.fvid === ich.fvid) return true;
+  return !!(ich.konto && seite.konto && seite.konto === ich.konto);
+}
+
+function frAnMich(a, ich) {
+  if (a.an_fvid === ich.fvid) return true;
+  return !!(ich.konto && a.an_konto && a.an_konto === ich.konto);
+}
+
+function frVonMir(a, ich) {
+  if (a.von_fvid === ich.fvid) return true;
+  return !!(ich.konto && a.von_konto && a.von_konto === ich.konto);
+}
+
+function frFreundeVon(db, ich) {
+  return db.freundschaften.filter((f) => !f.entfernt && (frMeins(f.a, ich) || frMeins(f.b, ich)));
+}
+
+/** Die (lebende) Freundschaft zwischen mir und dieser ID, falls es sie gibt. */
+function frFreundschaft(db, ich, anderer) {
+  return db.freundschaften.find((f) => !f.entfernt
+    && ((frMeins(f.a, ich) && f.b.fvid === anderer) || (frMeins(f.b, ich) && f.a.fvid === anderer)));
+}
+
+/** Hat irgendeine ID von A irgendeine ID von B blockiert? */
+function frBlockiert(db, a, b) {
+  const va = frMeineIds(db, a);
+  const vb = frMeineIds(db, b);
+  return db.blocks.some((x) => va.includes(x.wer) && vb.includes(x.wen));
+}
+
+function frName(fvid, gespeichert) {
+  const n = cleanName(gespeichert);
+  if (n) return n;
+  const e = meta[fvid] || {};
+  return cleanName(e.name || '');
+}
+
+// ------------------------------------------------------------- Antwortform
+
+function frFreundAus(db, f, ich) {
+  const anderer = frMeins(f.a, ich) ? f.b : f.a;
+  const e = meta[anderer.fvid] || {};
+  return {
+    fvid: anderer.fvid,
+    name: frName(anderer.fvid, anderer.name),
+    seit: Math.floor((f.seit || 0) / 1000),
+    online: hosts.has(anderer.fvid),
+    gesehen: e.seen || 0,
+  };
+}
+
+function frAnfrageAus(a, ich) {
+  const eingehend = frAnMich(a, ich);
+  const gegen = eingehend ? a.von_fvid : a.an_fvid;
+  return {
+    fvid: gegen,
+    name: frName(gegen, eingehend ? a.von_name : ''),
+    wann: Math.floor((a.wann || 0) / 1000),
+    richtung: eingehend ? 'eingehend' : 'ausgehend',
+    nachricht: a.nachricht || '',
+    online: hosts.has(gegen),
+  };
+}
+
+function frLies(req, cb) {
+  let n = 0;
+  const teile = [];
+  req.on('data', (c) => {
+    n += c.length;
+    if (n > FR_MAX_BODY) { req.destroy(); return; }
+    teile.push(c);
+  });
+  req.on('end', () => {
+    try { cb(null, JSON.parse(Buffer.concat(teile).toString('utf8') || '{}')); }
+    catch (e) { cb(e); }
+  });
+  req.on('error', (e) => cb(e));
+}
+
+function frAus(res, code, obj) {
+  const s = JSON.stringify(obj);
+  res.writeHead(code, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(s),
+  });
+  res.end(s);
+}
+
+/** Antworten und dabei speichern, falls sich etwas geaendert hat. */
+function frAntwort(res, code, obj) {
+  if (frGeaendert) { frGeaendert = false; frSichern(); }
+  frAus(res, code, obj);
+}
+
+// ------------------------------------------------------------- die Schritte
+
+/** Eine Freundschaft schliessen (beide haben zugestimmt). */
+function frSchliessen(db, a, ich, meinName) {
+  // offene Anfragen zwischen den beiden fallen weg (in beide Richtungen)
+  db.anfragen = db.anfragen.filter((x) =>
+    !(x.von_fvid === a.von_fvid && frAnMich(x, ich)) &&
+    !(x.an_fvid === a.von_fvid && frVonMir(x, ich)));
+  const da = frFreundschaft(db, ich, a.von_fvid);
+  if (da) { frMerk(); return da; }
+  const jetzt = Date.now();
+  const f = {
+    id: crypto.randomBytes(8).toString('hex'),
+    a: {
+      fvid: a.von_fvid,
+      konto: a.von_konto || frKontoVon(db, a.von_fvid),
+      name: cleanName(a.von_name),
+    },
+    b: { fvid: ich.fvid, konto: ich.konto, name: meinName || frName(ich.fvid, '') },
+    seit: jetzt,
+    at: jetzt,
+    entfernt: false,
+    entfernt_am: 0,
+  };
+  db.freundschaften.push(f);
+  frMerk();
+  frLog('Freundschaft', f.a.fvid, '<->', f.b.fvid);
+  return f;
+}
+
+function frAnfragen(res, db, ich, b) {
+  const an = String(b.an || b.fvid || '').replace(/\D/g, '');
+  const meinName = cleanName(b.name);
+  const nachricht = String(b.nachricht || '').replace(/[\x00-\x1f]/g, '').slice(0, 200);
+  if (!an) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  if (an === ich.fvid) return frAntwort(res, 400, { error: 'Das ist die eigene ID' });
+  if (frMeineIds(db, ich).includes(an))
+    return frAntwort(res, 400, { error: 'Das ist ein eigenes Geraet' });
+  if (!usedIds().has(an))
+    return frAntwort(res, 404, { error: 'Diese FreeViewer-ID gibt es nicht' });
+  if (frFreundschaft(db, ich, an))
+    return frAntwort(res, 409, { error: 'Ihr seid schon befreundet' });
+
+  const ziel = { fvid: an, konto: frKontoVon(db, an) };
+  // Wer blockiert wurde, erfaehrt das nicht - sonst wird die Blockliste zum
+  // Melder. Nach aussen sieht es aus, als waere die Anfrage nicht moeglich.
+  if (frBlockiert(db, ziel, ich))
+    return frAntwort(res, 403, { error: 'Anfrage nicht moeglich' });
+  if (frBlockiert(db, ich, ziel))
+    return frAntwort(res, 403, { error: 'Diese ID steht auf deiner Blockliste' });
+
+  const meine = frMeineIds(db, ich);
+  const schon = db.anfragen.find((x) => frVonMir(x, ich) && x.an_fvid === an);
+  if (schon)
+    return frAntwort(res, 409, { error: 'Anfrage laeuft schon', anfrage: frAnfrageAus(schon, ich) });
+
+  // Der andere hat MICH schon gefragt: dann sind sich beide einig.
+  const gegen = db.anfragen.find((x) => x.von_fvid === an && frAnMich(x, ich));
+  if (gegen) {
+    const f = frSchliessen(db, gegen, ich, meinName);
+    return frAntwort(res, 200, {
+      ok: true, konto: ich.konto, angenommen: true, freund: frFreundAus(db, f, ich),
+    });
+  }
+
+  const jetzt = Date.now();
+  const takt = (db.takt[ich.fvid] || []).filter((t) => jetzt - t < FR_TAG_MS);
+  if (takt.filter((t) => jetzt - t < FR_KURZ_MS).length >= FR_KURZ_MAX)
+    return frAntwort(res, 429, { error: 'Zu viele Anfragen - bitte kurz warten' });
+  if (takt.length >= FR_TAG_MAX)
+    return frAntwort(res, 429, { error: 'Zu viele Anfragen heute' });
+  if (db.anfragen.filter((x) => meine.includes(x.von_fvid)).length >= FR_MAX_OFFEN_AUS)
+    return frAntwort(res, 429, { error: 'Zu viele offene Anfragen' });
+  if (db.anfragen.filter((x) => x.an_fvid === an).length >= FR_MAX_OFFEN_EIN)
+    return frAntwort(res, 429, { error: 'Der Empfaenger hat zu viele offene Anfragen' });
+  if (frFreundeVon(db, ich).length >= FR_MAX_FREUNDE)
+    return frAntwort(res, 429, { error: 'Freundesliste ist voll' });
+
+  const a = {
+    id: crypto.randomBytes(8).toString('hex'),
+    von_fvid: ich.fvid,
+    von_konto: ich.konto,
+    von_name: meinName || frName(ich.fvid, ''),
+    an_fvid: an,
+    an_konto: ziel.konto,
+    nachricht,
+    wann: jetzt,
+  };
+  db.anfragen.push(a);
+  takt.push(jetzt);
+  db.takt[ich.fvid] = takt;
+  frMerk();
+  frLog('Anfrage', ich.fvid, '->', an);
+  frAntwort(res, 200, { ok: true, konto: ich.konto, anfrage: frAnfrageAus(a, ich) });
+}
+
+function frOffen(res, db, ich) {
+  frNachziehen(db, ich);
+  const eingehend = db.anfragen.filter((a) => frAnMich(a, ich)).map((a) => frAnfrageAus(a, ich));
+  const ausgehend = db.anfragen.filter((a) => frVonMir(a, ich)).map((a) => frAnfrageAus(a, ich));
+  frAntwort(res, 200, { ok: true, fvid: ich.fvid, konto: ich.konto, eingehend, ausgehend });
+}
+
+function frAnnehmen(res, db, ich, b) {
+  const von = String(b.von || b.fvid || '').replace(/\D/g, '');
+  if (!von) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  const a = db.anfragen.find((x) => x.von_fvid === von && frAnMich(x, ich));
+  if (!a) {
+    // Schon befreundet? Dann war es ein zweiter Klick, kein Fehler.
+    const da = frFreundschaft(db, ich, von);
+    if (da) return frAntwort(res, 200, { ok: true, konto: ich.konto, freund: frFreundAus(db, da, ich) });
+    return frAntwort(res, 404, { error: 'Keine offene Anfrage von dieser ID' });
+  }
+  const f = frSchliessen(db, a, ich, cleanName(b.name));
+  frAntwort(res, 200, { ok: true, konto: ich.konto, freund: frFreundAus(db, f, ich) });
+}
+
+/** Ablehnen (eingehend) bzw. die eigene Anfrage zurueckziehen (ausgehend). */
+function frAblehnen(res, db, ich, b) {
+  const wen = String(b.von || b.fvid || b.an || '').replace(/\D/g, '');
+  if (!wen) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  const vorher = db.anfragen.length;
+  db.anfragen = db.anfragen.filter((a) =>
+    !(a.von_fvid === wen && frAnMich(a, ich)) &&
+    !(a.an_fvid === wen && frVonMir(a, ich)));
+  const weg = vorher - db.anfragen.length;
+  if (weg) frMerk();
+  frAntwort(res, 200, { ok: true, konto: ich.konto, weg });
+}
+
+function frEntfernen(res, db, ich, b) {
+  const wen = String(b.fvid || b.freund || '').replace(/\D/g, '');
+  if (!wen) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  const f = frFreundschaft(db, ich, wen);
+  if (!f) return frAntwort(res, 404, { error: 'Kein Freund mit dieser ID' });
+  f.entfernt = true;
+  f.entfernt_am = Date.now();
+  f.at = f.entfernt_am;
+  frMerk();
+  frLog('entfernt', f.a.fvid, '<->', f.b.fvid);
+  frAntwort(res, 200, { ok: true, konto: ich.konto });
+}
+
+function frBlockieren(res, db, ich, b) {
+  const wen = String(b.fvid || '').replace(/\D/g, '');
+  const an = b.an === undefined ? true : !!b.an;
+  if (!wen) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  if (wen === ich.fvid) return frAntwort(res, 400, { error: 'Sich selbst blockieren geht nicht' });
+  const da = db.blocks.findIndex((x) => x.wer === ich.fvid && x.wen === wen);
+  if (an && da < 0) {
+    db.blocks.push({ wer: ich.fvid, wen, at: Date.now() });
+    db.anfragen = db.anfragen.filter((a) =>
+      !(a.von_fvid === wen && frAnMich(a, ich)) &&
+      !(a.an_fvid === wen && frVonMir(a, ich)));
+    frMerk();
+  } else if (!an && da >= 0) {
+    db.blocks.splice(da, 1);
+    frMerk();
+  }
+  frAntwort(res, 200, { ok: true, konto: ich.konto, blockiert: an });
+}
+
+/** Alles in einem Zug - das holt sich der Client beim Abgleich. */
+function frStand(res, db, ich) {
+  frAntwort(res, 200, frStandDaten(db, ich));
+}
+
+function frStandDaten(db, ich) {
+  frNachziehen(db, ich);
+  const meine = frMeineIds(db, ich);
+  return {
+    ok: true,
+    fvid: ich.fvid,
+    konto: ich.konto,
+    freunde: frFreundeVon(db, ich).map((f) => frFreundAus(db, f, ich)),
+    eingehend: db.anfragen.filter((a) => frAnMich(a, ich)).map((a) => frAnfrageAus(a, ich)),
+    ausgehend: db.anfragen.filter((a) => frVonMir(a, ich)).map((a) => frAnfrageAus(a, ich)),
+    blockiert: db.blocks.filter((x) => meine.includes(x.wer))
+      .map((x) => ({ fvid: x.wen, seit: Math.floor(x.at / 1000) })),
+  };
+}
+
+/**
+ * Konto an der eigenen Seite nachtragen. Wer sich erst nach der Freundschaft
+ * anmeldet, sieht sie danach auch auf seinen anderen Geraeten.
+ */
+function frNachziehen(db, ich) {
+  if (!ich.konto) return;
+  for (const a of db.anfragen) {
+    if (a.an_fvid === ich.fvid && !a.an_konto) { a.an_konto = ich.konto; frMerk(); }
+    if (a.von_fvid === ich.fvid && !a.von_konto) { a.von_konto = ich.konto; frMerk(); }
+  }
+  for (const f of db.freundschaften) {
+    for (const s of [f.a, f.b]) {
+      if (s.fvid === ich.fvid && s.konto !== ich.konto) { s.konto = ich.konto; frMerk(); }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ Routen
+
+/** Gibt true zurueck, wenn die Anfrage hier beantwortet wurde. */
+function freundeHandle(req, res) {
+  const p = new URL(req.url, 'http://x').pathname;
+  if (!p.startsWith('/fv/freunde')) return false;
+  if (req.method !== 'POST') { frAus(res, 405, { error: 'nur POST' }); return true; }
+  frLies(req, (e, b) => {
+    if (e) return frAus(res, 400, { error: 'ungueltige Anfrage' });
+    frWer(b, (e2, ich, grund) => {
+      if (!ich) return frAus(res, 401, { error: grund || 'nicht angemeldet' });
+      frGeaendert = false;
+      const db = frLaden();
+      if (frAufraeumen(db)) frMerk();
+      if (frKontoMerken(db, ich)) frMerk();
+      if (buch && b.token) {
+        const alt = {
+          stand: () => frStandDaten(db, ich),
+          weiter: () => frWeiter(p, res, db, ich, b),
+          antwort: frAntwort,
+          zustand: (id) => {
+            const e = meta[id] || {};
+            return { online: hosts.has(id), gesehen: e.seen || 0, name: cleanName(e.name || '') };
+          },
+        };
+        buch.handle(p, b, ich, res, alt).then((erledigt) => {
+          if (!erledigt) frWeiter(p, res, db, ich, b);
+        }).catch((e3) => {
+          frLog('Buch-Fehler: ' + e3.message);
+          if (!res.headersSent) frAus(res, 500, { error: 'Fehler' });
+        });
+        return;
+      }
+      frWeiter(p, res, db, ich, b);
+    });
+  });
+  return true;
+}
+
+/** Der alte Weg: freunde.json (Geraete ohne Konto, IDs ohne Konto). */
+function frWeiter(p, res, db, ich, b) {
+  try {
+    switch (p) {
+      case '/fv/freunde/anfragen': return frAnfragen(res, db, ich, b);
+      case '/fv/freunde/offen': return frOffen(res, db, ich);
+      case '/fv/freunde/annehmen': return frAnnehmen(res, db, ich, b);
+      case '/fv/freunde/ablehnen': return frAblehnen(res, db, ich, b);
+      case '/fv/freunde/entfernen': return frEntfernen(res, db, ich, b);
+      case '/fv/freunde/liste': return frStand(res, db, ich);
+      case '/fv/freunde/stand': return frStand(res, db, ich);
+      case '/fv/freunde/blockieren': return frBlockieren(res, db, ich, b);
+      default: return frAntwort(res, 404, { error: 'unbekannt' });
+    }
+  } catch (e3) {
+    frLog('Fehler: ' + e3.message);
+    frAus(res, 500, { error: 'Fehler' });
+  }
+}
+
 const server = http.createServer((req, res) => {
+  // optionales Konto (Adressbuch-Abgleich) - siehe account.js
+  if (account && req.url.startsWith('/fv/account')) {
+    try { if (account.handle(req, res)) return; }
+    catch (e) { log('account error: ' + e.message); res.writeHead(500); return res.end('account error'); }
+  }
+  // Freunde (Anfragen, Freundesliste, Blockliste) - Abschnitt weiter oben
+  if (req.url.startsWith('/fv/freunde')) {
+    try { if (freundeHandle(req, res)) return; }
+    catch (e) { log('freunde error: ' + e.message); res.writeHead(500); return res.end('freunde error'); }
+  }
+  // Einmal-Links zum Einrichten neuer Geraete - siehe setups.js
+  // ---- public info for the setup page (which brand, no secrets) ----
+  if (req.method === 'GET' && req.url.startsWith('/fv/setup/info/')) {
+    const u = new URL(req.url, 'http://x');
+    const code = u.pathname.slice('/fv/setup/info/'.length).replace(/[^A-Za-z0-9_-]/g, '');
+    const inf = setups ? setups.info(code) : null;
+    if (!inf) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"unbekannt"}'); }
+    const body = JSON.stringify(inf);
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+    return res.end(body);
+  }
+
+  // ---- personalised setup download: exe with the setup ticket attached ----
+  // The setup page lets a fresh machine download FreeViewer with code + name
+  // appended (marker FVSETUP1:<json> at the very end of the file). On first
+  // start the client finds it and sets itself up - nothing to type.
+  if (req.method === 'GET' && req.url.startsWith('/fv/setup/dl/')) {
+    const u = new URL(req.url, 'http://x');
+    const code = u.pathname.slice('/fv/setup/dl/'.length).replace(/[^A-Za-z0-9_-]/g, '');
+    if (!code || !setups || !setups.claimable(code)) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('Link unbekannt oder schon aufgebraucht');
+    }
+    const name = (u.searchParams.get('name') || '').replace(/[\x00-\x1f"\\]/g, '').slice(0, 40);
+    // Marke des Codes (beim Erzeugen gespeichert) - sonst bekaeme ein
+    // Xoffi-Geraet die FreeViewer-Datei. ?brand= bleibt als Uebersteuerung.
+    const MARKEN = { freeviewer: 'freeviewer.exe', xoffi: 'x-remote.exe' };
+    const marke = (u.searchParams.get('brand') || (setups ? setups.brand_of(code) : 'freeviewer')).toLowerCase();
+    const file = path.join(DIST, MARKEN[marke] || 'freeviewer.exe');
+    if (!fs.existsSync(file)) { res.writeHead(500); return res.end('build fehlt'); }
+    const exe = fs.readFileSync(file);
+    const paket = Buffer.from('\nFVSETUP1:' + JSON.stringify({ code, name }), 'utf8');
+    const out = Buffer.concat([exe, paket]);
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': out.length,
+      'content-disposition': 'attachment; filename="FreeViewer-Einrichtung.exe"',
+    });
+    return res.end(out);
+  }
+
+  if (setups && req.url.startsWith('/fv/setup')) {
+    try { if (setups.handle(req, res)) return; }
+    catch (e) { log('setup error: ' + e.message); res.writeHead(500); return res.end('setup error'); }
+  }
   if (req.url === '/fv/health' || req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
@@ -82,6 +670,105 @@ const server = http.createServer((req, res) => {
       uptime_s: Math.round((Date.now() - stats.started) / 1000),
       relayed_mb: +(stats.bytes / 1048576).toFixed(1),
     }));
+    return;
+  }
+  // ---- what is the newest build? ----
+  if (req.method === 'GET' && req.url === '/fv/version') {
+    // JEDE MARKE IHREN EIGENEN FEED. Frueher stand hier hart 'version.json':
+    // damit bekam auch ein X-Remote-Client die FreeViewer-Datei angeboten und
+    // haette sich beim naechsten Update in eine andere Marke verwandelt.
+    // Entschieden wird nach der Adresse, ueber die gefragt wurde.
+    const host = String(req.headers.host || '').toLowerCase();
+    const feed = /(^|\.)remote\.fleitec\.com|xoffi/.test(host) ? 'version-xoffi.json' : 'version.json';
+    let j = null;
+    try { j = fs.readFileSync(path.join(DIST, feed), 'utf8'); } catch (_) {}
+    if (!j) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"no release"}'); }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    return res.end(j);
+  }
+
+  // ---- download a published build ----
+  if (req.method === 'GET' && req.url.startsWith('/fv/dist/')) {
+    const name = safeName(req.url.slice('/fv/dist/'.length).split('?')[0]);
+    const file = name && path.join(DIST, name);
+    if (!file || !fs.existsSync(file)) { res.writeHead(404); return res.end('not found'); }
+    const st = fs.statSync(file);
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': st.size,
+      'content-disposition': 'attachment; filename="' + name + '"',
+    });
+    return fs.createReadStream(file).pipe(res);
+  }
+
+  // ---- publish a new build:  POST /fv/publish?token=..&version=..&name=..&notes=.. ----
+  if (req.method === 'POST' && req.url.startsWith('/fv/publish')) {
+    const u = new URL(req.url, 'http://x');
+    const tok = uploadToken();
+    if (!tok || u.searchParams.get('token') !== tok) { res.writeHead(403); return res.end('forbidden'); }
+    const name = safeName(u.searchParams.get('name') || 'freeviewer.exe');
+    const version = String(u.searchParams.get('version') || '').slice(0, 32);
+    const notes = String(u.searchParams.get('notes') || '').slice(0, 500);
+    if (!name || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) { res.writeHead(400); return res.end('bad name/version'); }
+    fs.mkdirSync(DIST, { recursive: true });
+    const tmp = path.join(DIST, name + '.upload');
+    const out = fs.createWriteStream(tmp);
+    const hash = crypto.createHash('sha256');
+    let size = 0, bad = false;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_UPLOAD) { bad = true; req.destroy(); return; }
+      hash.update(c);
+      out.write(c);
+    });
+    req.on('end', () => {
+      out.end(() => {
+        if (bad) { try { fs.unlinkSync(tmp); } catch (_) {} res.writeHead(413); return res.end('too big'); }
+        const sha = hash.digest('hex');
+        fs.renameSync(tmp, path.join(DIST, name));
+        const meta = {
+          version, sha256: sha, size, notes,
+          file: name,
+          // Jede Marke zeigt auf ihre eigene Adresse.
+          url: (/^x-remote/i.test(name) ? 'https://remote.fleitec.com/fv/dist/'
+                                        : 'https://freeviewer.fleitec.com/fv/dist/') + name,
+          published: new Date().toISOString(),
+        };
+        // noversion=1: nur die Datei ablegen (z. B. Mac-Zip aus der CI) -
+        // version.json bleibt dem Haupt-Build vorbehalten.
+        if (u.searchParams.get('noversion') !== '1') {
+          // Feed je nach Datei: x-remote.* -> version-xoffi.json (mac_*-Felder erhalten)
+          const feed = /^x-remote/i.test(name) ? 'version-xoffi.json' : 'version.json';
+          // Mac-Felder gehoeren dem Mac-Build: sie bleiben IMMER erhalten,
+          // egal welche Marke gerade eine Windows-Exe veroeffentlicht.
+          let outmeta = Object.assign({}, meta);
+          try {
+            const old = JSON.parse(fs.readFileSync(path.join(DIST, feed), 'utf8'));
+            for (const k of Object.keys(old)) { if (k.startsWith('mac_')) outmeta[k] = old[k]; }
+          } catch (_) {}
+          fs.writeFileSync(path.join(DIST, feed), JSON.stringify(outmeta, null, 1));
+        }
+        log('published', version, name, size + ' bytes', sha.slice(0, 12));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(meta));
+      });
+    });
+    req.on('error', () => { try { fs.unlinkSync(tmp); } catch (_) {} });
+    return;
+  }
+
+  // ---- who is online:  GET /fv/online?ids=1,2,3 ----
+  if (req.method === 'GET' && req.url.startsWith('/fv/online')) {
+    const q = new URL(req.url, 'http://x').searchParams.get('ids') || '';
+    const out = {};
+    for (const raw of q.split(',').slice(0, 200)) {
+      const id = raw.replace(/\D/g, '');
+      if (!id) continue;
+      const e = meta[id] || {};
+      out[id] = { online: hosts.has(id), name: e.name || '', seen: e.seen || 0 };
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ids: out }));
     return;
   }
   res.writeHead(404); res.end('freeviewer-relay');
@@ -122,6 +809,14 @@ wss.on('connection', (ws, req) => {
         ws.fvRole = 'host';
         ws.fvId = id;
         hosts.set(id, ws);
+        {
+          const nm = cleanName(m.name);
+          const e = meta[id] || {};
+          if (nm) e.name = nm;
+          e.seen = Date.now();
+          meta[id] = e;
+          saveMeta();
+        }
         log('host online', id, req.socket.remoteAddress);
         return send(ws, { t: 'registered', id });
       }
@@ -159,6 +854,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (ws.fvRole === 'host' && ws.fvId && hosts.get(ws.fvId) === ws) {
       hosts.delete(ws.fvId);
+      if (meta[ws.fvId]) { meta[ws.fvId].seen = Date.now(); saveMeta(); }
       log('host offline', ws.fvId);
     }
     unpair(ws, 'closed');
