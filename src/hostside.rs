@@ -546,11 +546,17 @@ impl Session {
                 tx.send(WsMsg::Binary(vec![crypto::TAG_OK].into()))?;
 
                 // direct UDP path for the video stream (best effort)
-                let p2p = match crate::p2p::P2p::new(key, true, self.stop.clone()) {
-                    Ok(p) => Some(p),
-                    Err(e) => {
-                        capture::log_line(&format!("p2p aus: {}", e));
-                        None
+                // FV_TESTHOST=1 (synthetic test host, see testhost.rs): relay path only
+                let testhost = crate::testhost::enabled();
+                let p2p = if testhost {
+                    None
+                } else {
+                    match crate::p2p::P2p::new(key, true, self.stop.clone()) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            capture::log_line(&format!("p2p aus: {}", e));
+                            None
+                        }
                     }
                 };
 
@@ -606,7 +612,7 @@ impl Session {
                 }
                 self.p2p = p2p;
                 // voice link: speech in both directions, same encrypted channel
-                {
+                if !testhost {
                     let vtx = out_tx.clone();
                     let vsend: std::sync::Arc<dyn Fn(Msg) + Send + Sync> =
                         std::sync::Arc::new(move |m: Msg| {
@@ -617,6 +623,22 @@ impl Session {
 
                 let screen = Arc::new(Mutex::new(ScreenRect::default()));
                 let (in_tx, in_rx) = std::sync::mpsc::channel::<Msg>();
+
+                if testhost {
+                    // synthetic screen + logged input instead of capture/injection
+                    crate::testhost::spawn(
+                        self.stop.clone(),
+                        out_tx.clone(),
+                        in_rx,
+                        self.force_key.clone(),
+                    );
+                    self.cipher = Some(cipher);
+                    self.input_tx = Some(in_tx);
+                    self.stage = Stage::Live;
+                    *shared.host_peer.lock().unwrap() =
+                        "Connected - synthetic test screen".to_string();
+                    return Ok(());
+                }
 
                 // input worker (SendInput must live on one dedicated thread)
                 let screen_in = screen.clone();

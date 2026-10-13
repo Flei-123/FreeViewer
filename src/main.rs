@@ -55,10 +55,13 @@ mod setup;
 mod shared;
 mod theme;
 mod tray;
+mod testhost;
 mod update;
 mod viewer;
 mod vinput;
 mod xfer;
+#[cfg(test)]
+mod vectors;
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};

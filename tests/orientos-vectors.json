@@ -1,0 +1,624 @@
+{
+  "_doc": "FreeViewer test vectors for third-party viewers (OrientOS/Firn). TEST DATA ONLY - every secret below is public.\nAll binary values are lowercase hex strings. Generated and verified by src/vectors.rs (cargo test).\nSections:\n  primitives  : standard known-answer tests (RFC 7748 X25519, RFC 5869 HKDF-SHA256, RFC 4231 HMAC-SHA256, AES-256-GCM zero key).\n  handshake   : fixed viewer/host secrets + salt -> public keys, X25519 shared secret, session key, udp key, 4-digit code, handshake frames.\n                session_key = HKDF-SHA256(ikm = shared, salt = salt(16), info = 'freeviewer-v1 session') -> 32 bytes.\n                udp_key     = HKDF-SHA256(ikm = session_key, salt = none (zeros), info = 'freeviewer-v1 udp') -> 32 bytes.\n                session_code = SHA-256('freeviewer-v1 code' || session_key)[0..4] as u32 big endian, mod 10000, zero padded to 4 digits.\n                Frames: V->H 0x01||client_pub, H->V 0x02||host_pub||salt, V->H 0x03||proof, V->H 0x06||device_name(utf8), H->V 0x04 ok / 0x05 fail.\n  argon2      : password_key = Argon2id(password utf8, salt(16)), version 0x13, m=19456 KiB, t=2, p=1, no secret, no associated data, 32 byte output\n                (argon2 crate 0.5.3 Argon2::default()). proof = HMAC-SHA256(password_key, 'fv-auth' || client_pub || host_pub || salt). Uses client_pub/host_pub from 'handshake'.\n  cipher      : data frame = 0x10 || nonce(12) || AES-256-GCM(key = session_key, nonce, plaintext, no AAD) = ciphertext || tag(16).\n                nonce = direction byte (host->viewer = 1, viewer->host = 2) || 000000 || counter u64 big endian. Counter starts at 1 per direction, the receiver\n                rejects counter <= last accepted. plaintext_hex = proto encoding of the message named in 'msg'.\n  proto       : encode() bytes (hex) of every message type. Integers little endian; blobs/strings = u32 length + bytes. 'fields' is informative only.\n                dir: 'H->V' host sends, 'V->H' viewer sends, 'both'. Blob contents in this section are fake bytes (not real JPEG/H.264).\n  proto_reject: byte strings that decode() must reject (no crash, no message).\n  sample_jpeg : the real 16x16 JPEG used inside the cipher vectors Frame/Tiles (decodes to 16x16 RGB).\nLimits: max 4096 tiles per Tiles, max 8 MiB per Video, max 256 KiB clipboard text, max 512 KiB file chunk, max 32 monitors, max 64 resolutions.",
+  "argon2": {
+    "cases": [
+      {
+        "name": "ascii",
+        "password_key": "3dc9809842b5a78779a549d7fe44ad626726437145d2254bf6c3eff09a4afac6",
+        "password_note": "hunter2",
+        "password_utf8_hex": "68756e74657232",
+        "proof": "dae18fb715492ecc419ce836982ba36b6bf9bd2392d3e3b215189c4f17d98c70",
+        "proof_frame_V_to_H": "03dae18fb715492ecc419ce836982ba36b6bf9bd2392d3e3b215189c4f17d98c70",
+        "salt": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+      },
+      {
+        "name": "umlaut",
+        "password_key": "8a654be2fd9a25c0390fe3f7d1c14d387a198d2f829a195a9a01d2e8a69c8f5b",
+        "password_note": "Grüße-Pässwörd",
+        "password_utf8_hex": "4772c3bcc39f652d50c3a4737377c3b67264",
+        "proof": "a3c69670d1207d1c4261081de84f52fb1f553585a5826ec2cac05d32391c5c75",
+        "proof_frame_V_to_H": "03a3c69670d1207d1c4261081de84f52fb1f553585a5826ec2cac05d32391c5c75",
+        "salt": "101112131415161718191a1b1c1d1e1f"
+      },
+      {
+        "name": "long",
+        "password_key": "d580b2008d4aeca952383c8312ff51e609edff6e9f8d9fffa9189a5b1d82d78a",
+        "password_note": "correct horse battery staple 0123456789",
+        "password_utf8_hex": "636f727265637420686f727365206261747465727920737461706c652030313233343536373839",
+        "proof": "c76c7a09dcc117caa7b36d4030d9e48fa5b8deaa5edf34b345b5dcaa487f476b",
+        "proof_frame_V_to_H": "03c76c7a09dcc117caa7b36d4030d9e48fa5b8deaa5edf34b345b5dcaa487f476b",
+        "salt": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "params": {
+      "algorithm": "argon2id",
+      "m_cost_kib": 19456,
+      "output_len": 32,
+      "p_cost": 1,
+      "t_cost": 2,
+      "version": "0x13"
+    }
+  },
+  "cipher": {
+    "host_to_viewer": [
+      {
+        "counter": 1,
+        "dir": "H->V",
+        "frame_hex": "100100000000000000000000012b1ab63006d30b5666f0e983cc01f59a02c674b2572ef41d6b",
+        "msg": "ScreenInfo",
+        "nonce": "010000000000000000000001",
+        "plaintext_hex": "2080020000e0010000"
+      },
+      {
+        "counter": 2,
+        "dir": "H->V",
+        "frame_hex": "100100000000000000000000020ab4a22e3049b95402f529e43ca556f93c9ca57a37a9e56903f1e3dbd8f501f72cc3f27a9dcf67588e167a",
+        "msg": "Monitors",
+        "nonce": "010000000000000000000002",
+        "plaintext_hex": "2400010000000800000054455354484f535480020000e001000001"
+      },
+      {
+        "counter": 3,
+        "dir": "H->V",
+        "frame_hex": "100100000000000000000000037c5fee4f76130c791b22d6662827d04de2d19f7554afca457e0f3cda4934bcfeb0de49e070a6ad6afb90db65a7771a64e46ab9d0aed7bbbc9b0aa8a6d53919fdd1548f94bef9777cf7437f40c34cf0ff9aef65440753d6a3acbb26d5f185a130a7b567af60f1a517c146b1fc6527927d32101af0d30fa824ce3938f070729d88ec12b0469f66dbce72376e6060a8d8ee99d03ef12257dcadbdaed88feaaed5fb324645c431c96c53cc2113cd9293912ffd0f50ac51a237502449fc34d58198505cc6d4073e64849a7dde4e2e3bc9f6f79ad30719aee4393484e0b0f64d377d0453cf36cf6d2f7647308d9b3cfd64a5bf836e29e1e7b4032ca43c4039006724b9e5320281a91a0586a4a7ffd672d3b19dcc0c0c68f701b4c3fde535770ef217aae20d52b4ea33156ceee5405325715e8aa901023c88ece80c87ba69510cffadfe717140fc7e0f8a9e64bf5f3fa00dd5e45cd9ddbdf60b043851125a3caf3c58d42080aa8e277ea063b1212b924401026e68b96a73b852cfd1b7e16541b0e10bf620d6c0edd290f09822bd59ff5ce832e3ee6cae18b8f6a5587ecb4ac3ed58ca8e6079940dd5f8edbbd44a63d5a68af004750b15698430be9538e1a22bb8a802df63f2122905bf2e30935ab96b312f29de260d49bedeed9b1aeab5bb75ce71945682cf8c1e07a1b544a86f07323c15939e6e66535b26d370ac5bf600ef1d8fdc4b951f8f243f5b5862bfe04829fd700ca5e428d25da1a3e1793aa64dc253501a914b0a418de492d488d43fe5cd0ef8100d442fd25768aafefe4b6fa02f6908f26a94dc67f5f572dc74729776b8ce0b4eace0c005602a88aefda1eb95b0d444268e388ccb6b5c5c2bc1a4e2769c781867352373bca7964e03366b114738f07cfef38be5735bb5f2028d81da677935e70cfd0ab37b39507ab60c1ea50a003284875fc203894438e4f86c4dca3f81171b8e1d81c7195ece48935ad7af8c9114fd9635191b0424578fab8208dfd5dd057b0574d293c6325e35fb3b3ce9",
+        "msg": "Frame (sample_jpeg)",
+        "nonce": "010000000000000000000003",
+        "plaintext_hex": "211000000010000000bd020000ffd8ffe000104a46494600010200000100010000ffc00011080010001003011100021101031101ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f2ad27c3bf77e4fd2bea6be3bccc32acc76d4ecf49f0ef4f93f4af1abe3bccfd272acc76d4ec749f0efddf93f4af22be3bccfe79cab31db53b3d27c3bf77e4fd2bc6af8ef33f49cab31db53fffd9"
+      },
+      {
+        "counter": 4,
+        "dir": "H->V",
+        "frame_hex": "10010000000000000000000004d86cb0b3166f1e3f169df2101047d2fa683af5682098b4ab0e6185b9bf80fe34fdf55f80cb76ff81b8b73489ee8bc52b2601d8dd5c1e8f51ff872093d7e83cc2d6d65ae9cb5531ad9f4476babcea215e69634a0fc03189e6a7cfaa87c25e6cb419b36440ac56ac10f58af0afe4fd0818213208df060e88a84fb6078185bb38a5d35302f03dbc1e73ccfb5aae4d2b7dbfad2a88761a514c0d96776e147fa594dcc2783ef165576bcdc345bdd31a2d550c6c079bb0bcf67c6a497590ea11fc85f06fc2ef1d67d9d8da9fac6d69000eaa691e3db081d980ab89823de0ebc004c1d4a888372b77983cac5b9d0ae59b3563360b464ed48c767ddb17387a7d6f5eabbad1da83c9c5e565b435d4bcb3839465f339749b16a969ee933a619cf24bb8e394d5cab30bf0cafdd19dd0a9f0c7b817003aa2ced658d91f93e50dbe0404fa5179983eb1e6ae3faedeaeb8d418244561b317c48259b86234b99ca3f16e9e5fb06b5ed56162298670e2e1bb4a307b650e89d86aeb5254bdfe99c47ea1ebbc662a0f9651095fd31dcd679129d1035e4f2a923511dfb33d8017362e0adad246f01f19d01b9b3f17e4ac17d72f9c21680a6000226129b21e769bdc90e03ba4ee854218c669fc24d97dfb6518fd486fb84feceb0195d5f609014bfc92b12bb668cca95d812b6042018614ca70f790dbfb78ec7374d79201e78df2633ec142eb3c19ece35448fac4831f7f1d80321957530967ded430e1b6d5136166cceb10bfd0b8b966e870e6f364299fb8ca9890ecc43fe864368f3fcd899f7774a14cd1275624d811c1e372cb68b1effe4df4970f77a68e8f2deae295ee6ce3d543905ae155b190755ef41995083ddf48368a93c04fabe80d23bac2d4c8b1dbdda14716e3adbcf83af27d2a8ca5ad28a0e62e954fe845ec3458f877b0367e1ce58d5b7a4709ff81e7bfe49b6a9f4e2e6d736c74e77106d2687235341cc27f567b2c3d356db768f47be10b0efdb8515ca9523eb78a85f59409964ffe0fc02da47e050249f8319db7d79574b0527cc0d3576a33a037a70d0d449226bba57c53be408d6a85928fa782b1e3e018fe19a76f497a598b2bcf8ed1ebdd951e282a49160a1736d183039efaf5f158bfe56911d65438639b8fb3674e625bcd74fd885a26fc50851f3bf65a16c785c3de706c86fbd58ce814d704fbbed2f7162b12fde90d778b43e5b0b09c5b483ee65fc2282cbea1e33bba81de9b4533bc04a2a98613f0b907a5f5bad35a0260fcc77bb2e1136a268074ae6213d2ac5b15f82b3a9603f27cd9ea8660c583090089011e6521c7b6a4acdc1289123694515c1d4da10b85ea5d87f9777a9baf0eb6cde3f60875223724fdf31521e582c2833c4e16ca378e5db02c325f47919b19ad1bd41e971dbc9ee410096b768e86f764ffbbb8c6e93bd3491398f8b56bd78d21358d7c482e2318772e9fc0b44e8a37a3acbffe9a6dee3174d859e1384f371518e6385b506628764987ceb5704d4db33267a7c95f10cd70d6e5a099d4c0f1ebf2c6f4bc154eab752a2c9edb48e5ca0198f8dceac57bd4c53c5a7eb3519fd883229ba9e8f0928b89bb0a52a6434cecd015a7103a71d47e7da2b0bed8e05b4acb543d035b9ee6392923482a978ad780fd58234483221681b27dd4da2e0f3e8b9c40bdf467957e7ff5b8b3b476d36a3ebb46815043dc30e092577a5720669c5cb1127cd8f28746423a848d0b3a41d5762b60b1ad3fb174438c74b944e63c5ac9e85fa96ce36b9c9943d8bb6b6f41ee856e4e110fe0b0121d302a8403d261d25e90db6c6d2490db24db406f2c083499c9680b6be16459df829db9abc3f0bc0acbcfd930bf525f8603e2d77030150d3be5e653607dc12d4e6e1730a8a9c5d01837f6c0eb09ba65fa540db20f1dfa05eed2f02858b7e9d7fbd8005085ee4346cf2853e4aa38814a49aef5a84c0faa212d887b77dbc44b323bc8abb413b79cb207fe3d890e727e7fb453ad05917c688087745d40cfc5257e25c350afc71387a32ea7dd9c3bede9119086aef3e4bf6077a8799006feadff0b8c9117e344511dfbc7516b",
+        "msg": "Tiles (2 tiles, sample_jpeg)",
+        "nonce": "010000000000000000000004",
+        "plaintext_hex": "2240000000200000000200000000000000000000001000000010000000bd020000ffd8ffe000104a46494600010200000100010000ffc00011080010001003011100021101031101ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f2ad27c3bf77e4fd2bea6be3bccc32acc76d4ecf49f0ef4f93f4af1abe3bccfd272acc76d4ec749f0efddf93f4af22be3bccfe79cab31db53b3d27c3bf77e4fd2bc6af8ef33f49cab31db53fffd920000000100000001000000010000000bd020000ffd8ffe000104a46494600010200000100010000ffc00011080010001003011100021101031101ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f2ad27c3bf77e4fd2bea6be3bccc32acc76d4ecf49f0ef4f93f4af1abe3bccfd272acc76d4ec749f0efddf93f4af22be3bccfe79cab31db53b3d27c3bf77e4fd2bc6af8ef33f49cab31db53fffd9"
+      },
+      {
+        "counter": 5,
+        "dir": "H->V",
+        "frame_hex": "10010000000000000000000005661fa12344cf659599e08565f802739f64fdc19cdb108692f3fa",
+        "msg": "Cursor",
+        "nonce": "010000000000000000000005",
+        "plaintext_hex": "23881300008813000001"
+      },
+      {
+        "counter": 6,
+        "dir": "H->V",
+        "frame_hex": "100100000000000000000000061d4d2620f2982e97080cd1635c37dd4c5e5a2553a2dc77d7a477c9b2e0efebb390528b88d8bb",
+        "msg": "Clipboard",
+        "nonce": "010000000000000000000006",
+        "plaintext_hex": "371100000068616c6c6f2077656c7420c3a4c3b6c3bc"
+      },
+      {
+        "counter": 7,
+        "dir": "H->V",
+        "frame_hex": "10010000000000000000000007ca6774eaaf76957e2f6df3593094b9b8e37387610f2a13ce12",
+        "msg": "Pong",
+        "nonce": "010000000000000000000007",
+        "plaintext_hex": "41d202964900000000"
+      },
+      {
+        "counter": 72623859790382856,
+        "dir": "H->V",
+        "frame_hex": "10010000000102030405060708729f1f9edae9426d3adb343eb22fee01d410b8542e6b5c992f",
+        "msg": "Ping (large counter 0x0102030405060708)",
+        "nonce": "010000000102030405060708",
+        "plaintext_hex": "402a00000000000000"
+      }
+    ],
+    "key": "14c9af92d9eded9804343544616a3886929c194f1b0b411a8ede8c6bc24cd048",
+    "viewer_to_host": [
+      {
+        "counter": 1,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000001f7354b02382a66e0216854c89b967c36cd11",
+        "msg": "Caps h264=false",
+        "nonce": "020000000000000000000001",
+        "plaintext_hex": "2600"
+      },
+      {
+        "counter": 2,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000002e526eb15598676239253d86a318a2b2f742165ad597f1fa196",
+        "msg": "MouseMove",
+        "nonce": "020000000000000000000002",
+        "plaintext_hex": "3088130000c4090000"
+      },
+      {
+        "counter": 3,
+        "dir": "V->H",
+        "frame_hex": "100200000000000000000000031f5a4ab2f1b9e2e4b5ddcd295a3ad3ab465852",
+        "msg": "MouseButton left down",
+        "nonce": "020000000000000000000003",
+        "plaintext_hex": "310001"
+      },
+      {
+        "counter": 4,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000004e022896e00f34d2cb0371296aa50ae4af393d8c783c3c9",
+        "msg": "Key unicode U+00E4 down",
+        "nonce": "020000000000000000000004",
+        "plaintext_hex": "33e40000000001"
+      },
+      {
+        "counter": 5,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000005626f0a2ef5488c3edab2e83ae5605b882dcc158d9f",
+        "msg": "KeyVk Win (ext) down",
+        "nonce": "020000000000000000000005",
+        "plaintext_hex": "355b000101"
+      },
+      {
+        "counter": 6,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000006717e385ab744773e9f958d6cb9ae09e3e82b04d15617ef4ae374c9e522710bcc7d38c2634b5d",
+        "msg": "Clipboard",
+        "nonce": "020000000000000000000006",
+        "plaintext_hex": "371100000068616c6c6f2077656c7420c3a4c3b6c3bc"
+      },
+      {
+        "counter": 7,
+        "dir": "V->H",
+        "frame_hex": "10020000000000000000000007c0e83b482e1245d27a4e8feabace87cdc3e894b91d53e53b0d",
+        "msg": "Ping",
+        "nonce": "020000000000000000000007",
+        "plaintext_hex": "40d202964900000000"
+      }
+    ]
+  },
+  "handshake": {
+    "ask_device_name": "Dell-OrientOS",
+    "ask_frame_V_to_H": "0644656c6c2d4f7269656e744f53",
+    "client_public": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+    "client_secret": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "fail_frame_H_to_V": "05",
+    "hello_ack_frame_H_to_V": "025869aff450549732cbaaed5e5df9b30a6da31cb0e5742bad5ad4a1a768f1a67ba0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "hello_frame_V_to_H": "0107a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+    "host_public": "5869aff450549732cbaaed5e5df9b30a6da31cb0e5742bad5ad4a1a768f1a67b",
+    "host_secret": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+    "ok_frame_H_to_V": "04",
+    "relay_connect_json": "{\"t\":\"connect\",\"id\":\"123456789\"}",
+    "salt": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "session_code": "0863",
+    "session_key": "14c9af92d9eded9804343544616a3886929c194f1b0b411a8ede8c6bc24cd048",
+    "shared_secret": "a84dc7c3c8f058b1b2dc4cd1e9b5dc0a7987f88b6a9564cde3391fc421159e77",
+    "udp_key": "4257d49d51818211ab1f8f8284bdebb6769dbb48ac1e8fbfd465c8acba73c987"
+  },
+  "primitives": {
+    "aes256gcm_zero": {
+      "ciphertext_and_tag": "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "nonce": "000000000000000000000000",
+      "plaintext": "00000000000000000000000000000000"
+    },
+    "hkdf_sha256_rfc5869_case1": {
+      "ikm": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "info": "f0f1f2f3f4f5f6f7f8f9",
+      "length": 42,
+      "okm": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+      "salt": "000102030405060708090a0b0c"
+    },
+    "hmac_sha256_rfc4231_case2": {
+      "data_ascii": "what do ya want for nothing?",
+      "key_ascii": "Jefe",
+      "mac": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    },
+    "x25519_rfc7748": {
+      "alice_private": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "alice_public": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "bob_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    }
+  },
+  "proto": [
+    {
+      "dir": "H->V",
+      "fields": {
+        "height": 1440,
+        "width": 2560
+      },
+      "hex": "20000a0000a0050000",
+      "name": "ScreenInfo"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "height": 480,
+        "jpeg": "ffd80102ffd9",
+        "width": 640
+      },
+      "hex": "2180020000e001000006000000ffd80102ffd9",
+      "name": "Frame"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "height": 670,
+        "tiles": [
+          {
+            "h": 128,
+            "jpeg": "090807",
+            "w": 64,
+            "x": 0,
+            "y": 64
+          },
+          {
+            "h": 30,
+            "jpeg": "01",
+            "w": 64,
+            "x": 1536,
+            "y": 640
+          }
+        ],
+        "width": 1600
+      },
+      "hex": "22400600009e0200000200000000000000400000004000000080000000030000000908070006000080020000400000001e0000000100000001",
+      "name": "Tiles (2 tiles)"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "height": 480,
+        "tiles": [],
+        "width": 640
+      },
+      "hex": "2280020000e001000000000000",
+      "name": "Tiles (empty)"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "visible": true,
+        "x": 5000,
+        "y": -1
+      },
+      "hex": "2388130000ffffffff01",
+      "name": "Cursor"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "active": 1,
+        "list": [
+          {
+            "h": 1440,
+            "name": "\\\\.\\DISPLAY1",
+            "primary": true,
+            "w": 2560
+          },
+          {
+            "h": 1080,
+            "name": "Screen ä",
+            "primary": false,
+            "w": 1920
+          }
+        ]
+      },
+      "hex": "2401020000000c0000005c5c2e5c444953504c415931000a0000a0050000010900000053637265656e20c3a4800700003804000000",
+      "name": "Monitors"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "list": [
+          [
+            640,
+            480
+          ],
+          [
+            1920,
+            1080
+          ]
+        ]
+      },
+      "hex": "3b0200000080020000e00100008007000038040000",
+      "name": "Resolutions"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "data": "00000001672a",
+        "height": 804,
+        "key": true,
+        "width": 1920
+      },
+      "hex": "258007000024030000010600000000000001672a",
+      "name": "Video (H.264, optional)"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "h264": false
+      },
+      "hex": "2600",
+      "name": "Caps h264=false"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "h264": true
+      },
+      "hex": "2601",
+      "name": "Caps h264=true"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "x": 5000,
+        "y": 2500
+      },
+      "hex": "3088130000c4090000",
+      "name": "MouseMove"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "x": -7,
+        "y": 9999
+      },
+      "hex": "30f9ffffff0f270000",
+      "name": "MouseMove negative"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "dx": -12,
+        "dy": 40
+      },
+      "hex": "34f4ffffff28000000",
+      "name": "MouseDelta"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "button": 0,
+        "down": true
+      },
+      "hex": "310001",
+      "name": "MouseButton left down"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "button": 1,
+        "down": false
+      },
+      "hex": "310100",
+      "name": "MouseButton right up"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "lines": -3
+      },
+      "hex": "32fdffffff",
+      "name": "Wheel"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "code": 97,
+        "down": true,
+        "named": false
+      },
+      "hex": "33610000000001",
+      "name": "Key unicode 'a' down"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "code": 228,
+        "down": false,
+        "named": false
+      },
+      "hex": "33e40000000000",
+      "name": "Key unicode U+00E4 up"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "code": 2,
+        "down": true,
+        "named": true
+      },
+      "hex": "33020000000101",
+      "name": "Key named ENTER down"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "code": 41,
+        "down": false,
+        "named": true
+      },
+      "hex": "33290000000100",
+      "name": "Key named F12 up"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "down": true,
+        "ext": true,
+        "vk": 91
+      },
+      "hex": "355b000101",
+      "name": "KeyVk Win (ext) down"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "code": 1
+      },
+      "hex": "3601",
+      "name": "Special Ctrl+Alt+Del"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "text": "hallo welt äöü"
+      },
+      "hex": "371100000068616c6c6f2077656c7420c3a4c3b6c3bc",
+      "name": "Clipboard"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "text": ""
+      },
+      "hex": "3700000000",
+      "name": "Clipboard empty"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "mode": 1
+      },
+      "hex": "3801",
+      "name": "SetMode game"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "index": 2
+      },
+      "hex": "3902",
+      "name": "SetMonitor"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "height": 720,
+        "width": 1280
+      },
+      "hex": "3a00050000d0020000",
+      "name": "SetResolution"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "id": 7,
+        "name": "trip über alles.zip",
+        "size": 4294967400
+      },
+      "hex": "50070000006800000001000000140000007472697020c3bc62657220616c6c65732e7a6970",
+      "name": "FileOffer"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "data": "0301040105",
+        "id": 7,
+        "off": 65536
+      },
+      "hex": "51070000000000010000000000050000000301040105",
+      "name": "FileChunk"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "id": 7,
+        "msg": "aborted",
+        "ok": false
+      },
+      "hex": "5207000000000700000061626f72746564",
+      "name": "FileEnd"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "got": 131072,
+        "id": 7
+      },
+      "hex": "53070000000000020000000000",
+      "name": "FileAck"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "addrs": [
+          "192.168.1.51:41234",
+          "84.115.1.2:41234"
+        ],
+        "token": 244837814047284
+      },
+      "hex": "603412efbeadde000002000000120000003139322e3136382e312e35313a34313233341000000038342e3131352e312e323a3431323334",
+      "name": "P2pOffer (a viewer may ignore)"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "direct": true,
+        "rtt_ms": 7
+      },
+      "hex": "610107000000",
+      "name": "P2pState"
+    },
+    {
+      "dir": "both",
+      "fields": {
+        "data": "0a0b0c",
+        "seq": 5
+      },
+      "hex": "7005000000030000000a0b0c",
+      "name": "Audio (IMA-ADPCM, optional)"
+    },
+    {
+      "dir": "V->H",
+      "fields": {},
+      "hex": "62",
+      "name": "NeedKeyframe"
+    },
+    {
+      "dir": "V->H",
+      "fields": {
+        "ts": 1234567890
+      },
+      "hex": "40d202964900000000",
+      "name": "Ping"
+    },
+    {
+      "dir": "H->V",
+      "fields": {
+        "ts": 1234567890
+      },
+      "hex": "41d202964900000000",
+      "name": "Pong"
+    }
+  ],
+  "proto_reject": [
+    {
+      "hex": "",
+      "name": "empty"
+    },
+    {
+      "hex": "ff",
+      "name": "unknown type 0xff"
+    },
+    {
+      "hex": "210102",
+      "name": "Frame truncated"
+    },
+    {
+      "hex": "21040000000400000004000000010203",
+      "name": "Frame blob shorter than announced"
+    },
+    {
+      "hex": "226400000064000000ffffffff",
+      "name": "Tiles count u32::MAX"
+    },
+    {
+      "hex": "22640000006400000001100000",
+      "name": "Tiles count 4097"
+    },
+    {
+      "hex": "3701000400",
+      "name": "Clipboard length over 256 KiB"
+    },
+    {
+      "hex": "25800700003804000001ffffffff",
+      "name": "Video length u32::MAX"
+    }
+  ],
+  "sample_jpeg": "ffd8ffe000104a46494600010200000100010000ffc00011080010001003011100021101031101ffdb00430006040506050406060506070706080a100a0a09090a140e0f0c1017141818171416161a1d251f1a1b231c1616202c20232627292a29191f2d302d283025282928ffdb0043010707070a080a130a0a13281a161a2828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f2ad27c3bf77e4fd2bea6be3bccc32acc76d4ecf49f0ef4f93f4af1abe3bccfd272acc76d4ec749f0efddf93f4af22be3bccfe79cab31db53b3d27c3bf77e4fd2bc6af8ef33f49cab31db53fffd9",
+  "version": 1
+}
