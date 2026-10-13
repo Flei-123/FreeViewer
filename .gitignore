@@ -70,3 +70,6 @@ tools/append_selftest.ps1
 # alte Quell-Snapshots und Linux-Binaries gehoeren nicht ins Repo
 *.tgz
 freeviewer-v*
+
+__pycache__/
+*.pyc
