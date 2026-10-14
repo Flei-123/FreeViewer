@@ -8,6 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { clientIp } = require('./clientip');
 let account = null;
 let setups = null;
 try { account = require(path.join(__dirname, 'account.js')); } catch (e) { console.log('account module missing:', e.message); }
@@ -906,7 +907,9 @@ wss.on('connection', (ws, req) => {
         sessions.set(sid, { host, viewer: ws });
         stats.sessionsTotal++;
         log('paired', id, sid);
-        send(host, { t: 'incoming', sid, from: req.socket.remoteAddress });
+        // `from` stays the direct peer (old hosts); `client_ip` is the real viewer
+        // address behind the proxy (r63), optional for hosts that do not know it.
+        send(host, { t: 'incoming', sid, from: req.socket.remoteAddress, client_ip: clientIp(req) });
         return send(ws, { t: 'paired', sid, id });
       }
 

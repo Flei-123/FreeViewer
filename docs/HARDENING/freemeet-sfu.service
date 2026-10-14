@@ -1,0 +1,44 @@
+# PROPOSAL (r13) - NOT applied. For CT111 (FreeMeet SFU). The live unit name/paths were NOT read
+# (no write/ssh access was needed for this proposal) - adjust ExecStart/paths to the live unit first:
+#   systemctl cat <unit>   (read-only)
+# Args from the SFU README: --http 0.0.0.0:7200 --udp 0.0.0.0:7201 --public-ip <ip>
+[Unit]
+Description=FreeMeet SFU
+After=network.target
+
+[Service]
+ExecStart=/opt/freemeet/freemeet-sfu --http 0.0.0.0:7200 --udp 0.0.0.0:7201 --public-ip PUBLIC_IP_HERE
+WorkingDirectory=/opt/freemeet
+Restart=always
+RestartSec=2
+# run as an own user instead of root (r13); ports are > 1024, so no capability is needed
+DynamicUser=yes
+# UDP receive buffer is set by the socket (FM_UDP_RCVBUF), the kernel cap is net.core.rmem_max (sysctl, host-wide)
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+# the web files are read from /opt/freemeet (read-only here); add ReadWritePaths= only if the SFU writes logs there
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

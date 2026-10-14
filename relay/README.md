@@ -64,5 +64,13 @@ WantedBy=multi-user.target
 | `{"t":"connect","id":"123456789"}`       | `{"t":"paired","sid":"..."}` or `{"t":"error","msg":"offline"/"busy"}` |
 | `{"t":"bye"}`                            | -                               |
 
-The host additionally receives `{"t":"incoming"}` when a viewer pairs and
+The host additionally receives `{"t":"incoming","sid":"..","from":"<direct peer>","client_ip":"<real viewer address>"}` when a viewer pairs and
 `{"t":"peer_gone"}` when it leaves. Everything else is binary and opaque.
+
+## Real client address (r63)
+
+`client_ip` comes from `clientip.js`: `X-Forwarded-For` is used only when the direct peer is a private/loopback
+address (our own reverse proxy), only the LAST entry counts (the proxy appends what it saw; earlier entries are
+client-typed), and it must be a valid IP literal. Otherwise it is the direct peer. The proxy must send
+`X-Forwarded-For $proxy_add_x_forwarded_for` (Nginx Proxy Manager does by default). Hosts older than this change
+ignore the field and keep using `from`. Patch: `patches/0002-real-client-ip.patch`; test: `node test_clientip.js`.

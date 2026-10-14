@@ -105,6 +105,9 @@ pub enum Fail {
     WrongPassword,
     /// "Ask" mode: the person at the host said no or did not answer.
     Declined,
+    /// The host's counter-proof was wrong (or missing while required): the
+    /// other end does not know the password - possibly a man in the middle.
+    HostUnverified,
     /// The relay reported that the host side left.
     PeerEnded,
     /// The relay closed the connection cleanly.
@@ -137,6 +140,7 @@ impl Fail {
             Fail::Busy => t("viewer.err.busy"),
             Fail::WrongPassword => t("viewer.err.wrong_pw"),
             Fail::Declined => t("viewer.err.declined"),
+            Fail::HostUnverified => t("viewer.err.host_unverified"),
             Fail::PeerEnded => t("viewer.err.peer_ended"),
             Fail::Closed => t("viewer.err.closed"),
             Fail::Network(_) => t("viewer.err.network"),
@@ -148,7 +152,7 @@ impl Fail {
     pub fn retryable(&self) -> bool {
         !matches!(
             self,
-            Fail::WrongPassword | Fail::Declined | Fail::Protocol(_)
+            Fail::WrongPassword | Fail::Declined | Fail::HostUnverified | Fail::Protocol(_)
         )
     }
 
@@ -271,6 +275,8 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
     let kp = crypto::keypair();
     let mut cipher: Option<Arc<Mutex<Cipher>>> = None;
     let mut session_key: Option<[u8; 32]> = None;
+    // host counter-proof we expect in the host's 0x04 (password mode)
+    let mut expected_host_proof: Option<[u8; 32]> = None;
     let started = Instant::now();
     let mut canvas = Canvas::new();
     // rolling stats for the session bar
@@ -302,9 +308,15 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                 match net::msg_type(&v) {
                     "paired" => {
                         shared.set_viewer_status("Gekoppelt - Authentifizierung...");
-                        let mut hello = Vec::with_capacity(33);
+                        let mut hello = Vec::with_capacity(34);
                         hello.push(crypto::TAG_HELLO);
                         hello.extend_from_slice(&kp.public);
+                        // ask the host for its counter-proof (password mode
+                        // only; ask mode has no shared secret). Old hosts
+                        // ignore the extra byte.
+                        if matches!(auth, Auth::Password(_)) {
+                            hello.push(crypto::CAP_HOST_PROOF);
+                        }
                         tx.send(WsMsg::Binary(hello.into()))?;
                     }
                     "error" => {
@@ -347,6 +359,9 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 let pw_key = crypto::password_key(password, &salt);
                                 let proof =
                                     crypto::auth_proof(&pw_key, &kp.public, &host_pub, &salt);
+                                expected_host_proof = Some(crypto::host_proof(
+                                    &pw_key, &kp.public, &host_pub, &salt, &key,
+                                ));
                                 let mut out = Vec::with_capacity(33);
                                 out.push(crypto::TAG_PROOF);
                                 out.extend_from_slice(&proof);
@@ -375,6 +390,18 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 )))
                             }
                         };
+                        if let Some(expected) = expected_host_proof.as_ref() {
+                            match crypto::check_ok_frame(data, expected, crypto::REQUIRE_HOST_PROOF) {
+                                crypto::HostCheck::Verified => {}
+                                crypto::HostCheck::Legacy => crate::capture::log_line(
+                                    "host did not send a counter-proof (old host version): host not verified",
+                                ),
+                                crypto::HostCheck::Refused => {
+                                    crate::capture::log_line("host counter-proof wrong: refusing session");
+                                    break Err(anyhow::Error::new(Fail::HostUnverified));
+                                }
+                            }
+                        }
                         shared.connected.store(true, Ordering::Relaxed);
                         shared.set_viewer_status("Verbunden");
 
@@ -802,7 +829,7 @@ mod reconnect_tests {
 
     #[test]
     fn wrong_password_and_refusal_never_retry() {
-        for f in [Fail::WrongPassword, Fail::Declined, Fail::Protocol("x".into())] {
+        for f in [Fail::WrongPassword, Fail::Declined, Fail::HostUnverified, Fail::Protocol("x".into())] {
             assert!(next_retry(&f, true, false, 0).is_none(), "{:?}", f);
         }
     }
@@ -845,6 +872,7 @@ mod reconnect_tests {
             Fail::Busy,
             Fail::WrongPassword,
             Fail::Declined,
+            Fail::HostUnverified,
             Fail::PeerEnded,
             Fail::Closed,
             Fail::Network("x".into()),

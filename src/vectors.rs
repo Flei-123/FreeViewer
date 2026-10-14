@@ -510,6 +510,60 @@ pub fn build() -> Value {
     })
 }
 
+/// Host counter-proof vectors (r5). A separate file on purpose:
+/// `orientos-vectors.json` pins the legacy handshake (bare `0x04`) that the
+/// Firn/OrientOS viewer relies on and must stay byte-identical.
+pub fn build_host_proof() -> Value {
+    let client_secret = arr32(seq_bytes(0x01, 32));
+    let host_secret = arr32(seq_bytes(0x21, 32));
+    let salt = arr16(seq_bytes(0xA0, 16));
+    let cs = x25519_dalek::StaticSecret::from(client_secret);
+    let hs = x25519_dalek::StaticSecret::from(host_secret);
+    let client_pub = x25519_dalek::PublicKey::from(&cs).to_bytes();
+    let host_pub = x25519_dalek::PublicKey::from(&hs).to_bytes();
+    let key = crypto::session_key(&cs, &host_pub, &salt);
+    assert_eq!(key, crypto::session_key(&hs, &client_pub, &salt));
+
+    let mut hello_legacy = vec![crypto::TAG_HELLO];
+    hello_legacy.extend_from_slice(&client_pub);
+    let mut hello_cap = hello_legacy.clone();
+    hello_cap.push(crypto::CAP_HOST_PROOF);
+
+    let cases: [(&str, &str, [u8; 16]); 2] = [
+        ("ascii", "hunter2", salt),
+        ("umlaut", "Gr\u{00fc}\u{00df}e-P\u{00e4}ssw\u{00f6}rd", arr16(seq_bytes(0x10, 16))),
+    ];
+    let mut out = Vec::new();
+    for (name, pw, s) in cases {
+        // session key depends on the salt, so recompute per case
+        let k = crypto::session_key(&cs, &host_pub, &s);
+        let pw_key = crypto::password_key(pw, &s);
+        let hp = crypto::host_proof(&pw_key, &client_pub, &host_pub, &s, &k);
+        let mut ok = vec![crypto::TAG_OK];
+        ok.extend_from_slice(&hp);
+        assert_eq!(crypto::check_ok_frame(&ok, &hp, true), crypto::HostCheck::Verified);
+        out.push(json!({
+            "name": name,
+            "password_utf8_hex": h(pw.as_bytes()),
+            "salt": h(&s),
+            "session_key": h(&k),
+            "password_key": h(&pw_key),
+            "host_proof": h(&hp),
+            "ok_frame_with_proof_H_to_V": h(&ok),
+        }));
+    }
+    json!({
+        "_doc": "Host counter-proof (r5, docs/HOST-PROOF-DESIGN.md). host_proof = HMAC-SHA256(password_key, \"fv-host\" || client_public || host_public || salt || session_key). The viewer appends capability byte 0x01 to its hello; only then does the host answer 0x04 || host_proof(32). Hello without the byte and the bare 0x04 stay as in orientos-vectors.json.",
+        "version": 1,
+        "client_public": h(&client_pub),
+        "host_public": h(&host_pub),
+        "hello_legacy_V_to_H": h(&hello_legacy),
+        "hello_with_cap_V_to_H": h(&hello_cap),
+        "ok_frame_legacy_H_to_V": h(&[crypto::TAG_OK]),
+        "cases": out,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,5 +614,34 @@ mod tests {
         let hs = &v["handshake"];
         assert_eq!(hs["session_code"].as_str().unwrap().len(), 4);
         assert_eq!(hs["session_key"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn host_proof_vectors_match_committed_file() {
+        let v = build_host_proof();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/host-proof-vectors.json");
+        if std::env::var("FV_REGEN_HOST_PROOF_VECTORS").ok().as_deref() == Some("1") {
+            std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap() + "\n").unwrap();
+            return;
+        }
+        let text = std::fs::read_to_string(&path).expect("tests/host-proof-vectors.json missing");
+        let on_disk: Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(on_disk, v, "host proof vectors stale (FV_REGEN_HOST_PROOF_VECTORS=1 to regenerate if intended)");
+    }
+
+    #[test]
+    fn legacy_hello_and_ok_frames_are_unchanged() {
+        // the capability byte is purely additive
+        let v = build_host_proof();
+        let legacy = v["hello_legacy_V_to_H"].as_str().unwrap();
+        let cap = v["hello_with_cap_V_to_H"].as_str().unwrap();
+        assert_eq!(cap, format!("{}01", legacy));
+        assert_eq!(legacy.len(), 66);
+        let old: Value = serde_json::from_str(
+            &std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/orientos-vectors.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(old["handshake"]["hello_frame_V_to_H"].as_str().unwrap(), legacy);
+        assert_eq!(old["handshake"]["ok_frame_H_to_V"].as_str().unwrap(), "04");
     }
 }

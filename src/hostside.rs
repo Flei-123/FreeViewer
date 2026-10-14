@@ -227,14 +227,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                         if let Some(s) = sess.take() {
                             s.stop();
                         }
-                        let from = v
-                            .get("from")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .chars()
-                            .filter(|c| !c.is_control())
-                            .take(64)
-                            .collect::<String>();
+                        let from = peer_key_from(&v);
                         sess = Some(Session::new(from));
                         *shared.host_peer.lock().unwrap() =
                             "Eingehende Verbindung - Authentifizierung...".to_string();
@@ -279,6 +272,28 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
     Ok(())
 }
 
+/// Key for the brute-force guard from the relay's `incoming` message.
+/// Prefers `client_ip` (the real viewer address, set by a relay that knows
+/// its reverse proxy); older relays only send `from`, which behind a proxy
+/// is the proxy's own address. Control characters are dropped, 64 chars max.
+fn peer_key_from(v: &serde_json::Value) -> String {
+    let pick = |name: &str| -> String {
+        v.get(name)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect::<String>()
+    };
+    let ip = pick("client_ip");
+    if ip.is_empty() {
+        pick("from")
+    } else {
+        ip
+    }
+}
+
 /// Name a viewer announces for itself: no control or invisible
 /// formatting characters (bidi overrides could flip the text), trimmed,
 /// at most 48 characters.
@@ -318,6 +333,12 @@ struct Session {
     /// What the relay told us about the other end (its address). Key for
     /// the brute-force guard; empty when the relay does not say.
     peer_key: String,
+    /// The viewer's hello carried `CAP_HOST_PROOF`: answer `0x04` with a
+    /// host counter-proof (r5).
+    want_host_proof: bool,
+    /// Counter-proof prepared after the viewer's proof checked out; sent
+    /// with the `0x04` in `go_live`.
+    host_proof: Option<[u8; 32]>,
     cipher: Option<Arc<Mutex<Cipher>>>,
     stop: Arc<AtomicBool>,
     input_tx: Option<std::sync::mpsc::Sender<Msg>>,
@@ -355,6 +376,8 @@ impl Session {
         Self {
             stage: Stage::WaitHello,
             peer_key,
+            want_host_proof: false,
+            host_proof: None,
             cipher: None,
             stop: Arc::new(AtomicBool::new(false)),
             input_tx: None,
@@ -390,6 +413,10 @@ impl Session {
                 }
                 let mut client_pub = [0u8; 32];
                 client_pub.copy_from_slice(&data[1..33]);
+                // optional capability byte after the public key (old viewers
+                // send none, so their frames stay byte-identical)
+                self.want_host_proof =
+                    data.len() > 33 && data[33] & crypto::CAP_HOST_PROOF != 0;
                 let kp = crypto::keypair();
                 let mut salt = [0u8; 16];
                 salt.copy_from_slice(&crypto::random_bytes(16));
@@ -440,6 +467,7 @@ impl Session {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone();
                 let mut ok = false;
+                let mut matched_key: Option<[u8; 32]> = None;
                 for cand in std::iter::once(session_pw)
                     .chain(crate::pwlist::candidates())
                     .take(crate::pwlist::MAX + 1)
@@ -451,6 +479,7 @@ impl Session {
                     let expected = crypto::auth_proof(&pw_key, client_pub, host_pub, salt);
                     if crypto::proof_matches(&expected, &data[1..]) {
                         ok = true;
+                        matched_key = Some(pw_key);
                         break;
                     }
                 }
@@ -471,6 +500,12 @@ impl Session {
                 }
                 crate::authguard::global().success(&self.peer_key);
                 let key = crypto::session_key(secret, client_pub, salt);
+                if self.want_host_proof {
+                    if let Some(pw_key) = matched_key {
+                        self.host_proof =
+                            Some(crypto::host_proof(&pw_key, client_pub, host_pub, salt, &key));
+                    }
+                }
                 self.go_live(key, tx, shared)
             }
             (
@@ -601,7 +636,13 @@ impl Session {
     ) -> Result<()> {
         *shared.session_code.lock().unwrap() = crypto::session_code(&key);
                 let cipher = Arc::new(Mutex::new(Cipher::new(&key, true)));
-                tx.send(WsMsg::Binary(vec![crypto::TAG_OK].into()))?;
+                // 0x04 alone for old viewers and for ask mode (no shared
+                // secret); 0x04 || host_proof when the viewer asked for it
+                let mut ok_frame = vec![crypto::TAG_OK];
+                if let Some(hp) = self.host_proof.take() {
+                    ok_frame.extend_from_slice(&hp);
+                }
+                tx.send(WsMsg::Binary(ok_frame.into()))?;
 
                 // direct UDP path for the video stream (best effort)
                 // FV_TESTHOST=1 (synthetic test host, see testhost.rs): relay path only
@@ -1990,5 +2031,45 @@ mod verbindungstests {
         assert_eq!(clean_peer_name("ab\u{202E}cd\u{200B}"), "abcd");
         assert_eq!(clean_peer_name(&"x".repeat(100)).chars().count(), 48);
         assert_eq!(clean_peer_name("\u{202E}"), "");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn peer_key_prefers_client_ip_and_falls_back_to_from() {
+        // new relay: real address wins over the proxy address
+        let v = json!({"t":"incoming","sid":"s","from":"192.168.1.5","client_ip":"203.0.113.7"});
+        assert_eq!(peer_key_from(&v), "203.0.113.7");
+        // old relay: only `from`
+        let v = json!({"t":"incoming","sid":"s","from":"192.168.1.5"});
+        assert_eq!(peer_key_from(&v), "192.168.1.5");
+        // empty client_ip -> fallback; nothing at all -> empty (guard still has the global budget)
+        let v = json!({"from":"192.168.1.5","client_ip":""});
+        assert_eq!(peer_key_from(&v), "192.168.1.5");
+        assert_eq!(peer_key_from(&json!({})), "");
+        // control characters and length are cleaned
+        let v = json!({"client_ip":"1.2.3.4\n\u{7}"});
+        assert_eq!(peer_key_from(&v), "1.2.3.4");
+        let long = "a".repeat(200);
+        assert_eq!(peer_key_from(&json!({"client_ip": long})).len(), 64);
+    }
+
+    #[test]
+    fn two_viewers_behind_one_proxy_get_separate_guard_keys() {
+        let a = peer_key_from(&json!({"from":"192.168.1.5","client_ip":"203.0.113.7"}));
+        let b = peer_key_from(&json!({"from":"192.168.1.5","client_ip":"203.0.113.8"}));
+        assert_ne!(a, b);
+        let mut g = crate::authguard::AuthGuard::new();
+        let now = Instant::now();
+        for _ in 0..crate::authguard::FAILS_BEFORE_LOCK {
+            g.check(&a, now);
+            g.failure(&a, now);
+        }
+        assert!(matches!(g.check(&a, now), crate::authguard::Verdict::Locked(_)));
+        assert!(matches!(g.check(&b, now), crate::authguard::Verdict::Allow));
     }
 }

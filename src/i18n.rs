@@ -486,6 +486,11 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Unerwartete Antwort vom anderen Computer. Läuft dort dieselbe FreeViewer-Version?",
         "Unexpected answer from the other computer. Is it running the same FreeViewer version?",
     ),
+    (
+        "viewer.err.host_unverified",
+        "Der Computer konnte das Passwort nicht beweisen. Die Verbindung wurde aus Sicherheitsgründen getrennt.",
+        "That computer could not prove it knows the password. The connection was dropped for safety.",
+    ),
     ("pw.overwrite_title", "Festes Passwort ersetzen?", "Replace permanent password?"),
     (
         "pw.overwrite_text",

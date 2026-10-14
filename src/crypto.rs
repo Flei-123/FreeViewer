@@ -4,13 +4,19 @@
 //!   viewer -> host : 0x01 || client_pub(32)
 //!   host -> viewer : 0x02 || host_pub(32) || salt(16)
 //!   viewer -> host : 0x03 || proof(32)
-//!   host -> viewer : 0x04            (password ok)
+//!   host -> viewer : 0x04            (password ok, legacy)
+//!                  | 0x04 || host_proof(32)   (password ok + host knows the password;
+//!                                              only if the viewer's hello carried CAP_HOST_PROOF)
 //!                  | 0x05            (password wrong)
 //!   afterwards     : 0x10 || nonce(12) || AES-256-GCM ciphertext
 //!
 //! Session key  = HKDF-SHA256(ikm = X25519 shared secret, salt, "freeviewer-v1")
 //! Password key = Argon2id(password, salt)
 //! proof        = HMAC-SHA256(password key, "fv-auth" || client_pub || host_pub || salt)
+//! host_proof   = HMAC-SHA256(password key, "fv-host" || client_pub || host_pub || salt || session_key)
+//!
+//! The hello may be `0x01 || client_pub(32) || caps(1)`; old hosts ignore the
+//! extra byte, old viewers never send it (their frames stay byte-identical).
 //!
 //! The relay never learns the password (only a proof bound to this one
 //! session's ephemeral keys) and cannot decrypt the stream.
@@ -35,6 +41,10 @@ pub const TAG_FAIL: u8 = 0x05;
 /// the session by hand (TeamViewer calls this "Bestaetigung anfordern").
 pub const TAG_ASK: u8 = 0x06;
 pub const TAG_DATA: u8 = 0x10;
+
+/// Capability bit in the optional byte after `client_pub` in the viewer hello:
+/// "answer with `0x04 || host_proof` instead of a bare `0x04`".
+pub const CAP_HOST_PROOF: u8 = 0x01;
 
 /// Four digits derived from the session key. Both sides show the same number,
 /// so a connection made without a password can still be verified by reading
@@ -104,6 +114,59 @@ pub fn auth_proof(
     let mut out = [0u8; 32];
     out.copy_from_slice(&mac.finalize().into_bytes());
     out
+}
+
+/// Host counter-proof: proves to the viewer that the host knows the password,
+/// bound to this very key exchange (`session_key`).
+pub fn host_proof(
+    pw_key: &[u8; 32],
+    client_pub: &[u8; 32],
+    host_pub: &[u8; 32],
+    salt: &[u8; 16],
+    session_key: &[u8; 32],
+) -> [u8; 32] {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(pw_key).expect("hmac key");
+    mac.update(b"fv-host");
+    mac.update(client_pub);
+    mac.update(host_pub);
+    mac.update(salt);
+    mac.update(session_key);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&mac.finalize().into_bytes());
+    out
+}
+
+/// Phase switch for the host counter-proof, same idea as
+/// `update::REQUIRE_SIGNATURE`. Phase 1 (false): a bare `0x04` from a legacy
+/// host is accepted (the viewer shows a hint); a WRONG proof is always refused.
+/// Phase 2 (true): a bare `0x04` is refused as well. Note: while false, a man in
+/// the middle can still downgrade by stripping the capability byte.
+pub const REQUIRE_HOST_PROOF: bool = false;
+
+/// What the viewer concluded from the host's `0x04` frame.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum HostCheck {
+    /// Host proved it knows the password.
+    Verified,
+    /// Bare `0x04` from an old host (no proof offered).
+    Legacy,
+    /// Wrong or malformed proof - refuse the session.
+    Refused,
+}
+
+/// Judge a host `0x04` frame. `expected` is the proof the viewer computed.
+pub fn check_ok_frame(frame: &[u8], expected: &[u8; 32], require: bool) -> HostCheck {
+    if frame.first() != Some(&TAG_OK) {
+        return HostCheck::Refused;
+    }
+    if frame.len() == 1 {
+        return if require { HostCheck::Refused } else { HostCheck::Legacy };
+    }
+    if proof_matches(expected, &frame[1..]) {
+        HostCheck::Verified
+    } else {
+        HostCheck::Refused
+    }
 }
 
 pub fn proof_matches(expected: &[u8; 32], got: &[u8]) -> bool {
@@ -338,5 +401,40 @@ mod tests {
         let n = bad.len();
         bad[n - 1] ^= 0xff;
         assert!(v.open(&bad).is_none());
+    }
+
+    #[test]
+    fn host_proof_binds_password_keys_and_session() {
+        let host = keypair();
+        let viewer = keypair();
+        let salt = [9u8; 16];
+        let key = session_key(&host.secret, &viewer.public, &salt);
+        let pw = password_key("hunter2", &salt);
+        let hp = host_proof(&pw, &viewer.public, &host.public, &salt, &key);
+
+        // domain separation from the viewer proof
+        assert_ne!(hp, auth_proof(&pw, &viewer.public, &host.public, &salt));
+        // wrong password / other session key / other keys -> different proof
+        let bad_pw = password_key("wrong", &salt);
+        assert_ne!(hp, host_proof(&bad_pw, &viewer.public, &host.public, &salt, &key));
+        assert_ne!(hp, host_proof(&pw, &viewer.public, &host.public, &salt, &[0u8; 32]));
+        assert_ne!(hp, host_proof(&pw, &host.public, &host.public, &salt, &key));
+
+        let mut ok = vec![TAG_OK];
+        ok.extend_from_slice(&hp);
+        assert_eq!(check_ok_frame(&ok, &hp, false), HostCheck::Verified);
+        assert_eq!(check_ok_frame(&ok, &hp, true), HostCheck::Verified);
+        // legacy host
+        assert_eq!(check_ok_frame(&[TAG_OK], &hp, false), HostCheck::Legacy);
+        assert_eq!(check_ok_frame(&[TAG_OK], &hp, true), HostCheck::Refused);
+        // wrong / truncated / padded proof is always refused
+        let mut wrong = ok.clone();
+        wrong[5] ^= 1;
+        assert_eq!(check_ok_frame(&wrong, &hp, false), HostCheck::Refused);
+        assert_eq!(check_ok_frame(&ok[..20], &hp, false), HostCheck::Refused);
+        let mut long = ok.clone();
+        long.push(0);
+        assert_eq!(check_ok_frame(&long, &hp, false), HostCheck::Refused);
+        assert_eq!(check_ok_frame(&[TAG_FAIL], &hp, false), HostCheck::Refused);
     }
 }

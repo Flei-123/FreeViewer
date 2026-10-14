@@ -1,0 +1,48 @@
+# PROPOSAL (r13) - NOT applied. Install on CT110 as /etc/systemd/system/freeviewer-relay.service
+# after a test run:  systemd-analyze security freeviewer-relay  (aim: score < 3.0 "OK")
+# Paths are the live ones seen read-only on 2026-10-14 (/root/fvrelay). Because the code lives in /root,
+# ProtectHome cannot be used; the better end state is to move it to /opt/freeviewer-relay + a service user
+# (see README.md step 2). This unit therefore has two variants: A (root, works at once), B (own user).
+[Unit]
+Description=FreeViewer Relay
+After=network.target
+
+[Service]
+# --- Variant A: keep root (live today), harden around it ---
+ExecStart=/usr/bin/node /root/fvrelay/relay.js
+Restart=always
+RestartSec=3
+# --- Variant B (preferred): User=fvrelay, code in /opt/freeviewer-relay, data in /var/lib/freeviewer-relay ---
+# User=fvrelay
+# Group=fvrelay
+# StateDirectory=freeviewer-relay
+# Environment=FV_DATA=/var/lib/freeviewer-relay/hosts.json FV_DIST=/var/lib/freeviewer-relay/dist
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+# the relay writes registrations, builds (dist) and the upload token here:
+ReadWritePaths=/root/fvrelay
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# node's JIT needs W+X memory, so MemoryDenyWriteExecute must stay off
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

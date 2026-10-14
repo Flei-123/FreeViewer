@@ -1,4 +1,4 @@
-# Host counter-proof (r5) - design, not implemented
+# Host counter-proof (r5) - implemented (phase 1)
 
 ## Gap
 Only the viewer proves the password (`0x03 || HMAC(Argon2id(pw,salt), "fv-auth"||client_pub||host_pub||salt)`).
@@ -39,3 +39,14 @@ host -> viewer : 0x04 || host_proof(32)        (instead of bare 0x04)
 vector file: add NEW vectors for the capability frames, do not edit the old ones; OrientOS `lib/fv/` follows later.
 Not done now because it touches `hostside.rs`/`viewer.rs`/`crypto.rs` (outside this worker's files) and needs a
 Windows run of a real host+viewer pair.
+
+## Status (14.10.2026)
+Implemented in `crypto.rs` (`host_proof`, `check_ok_frame`, `CAP_HOST_PROOF`, `REQUIRE_HOST_PROOF = false`),
+`hostside.rs` (capability byte, proof prepared after the viewer proof matched, appended in `go_live`),
+`viewer.rs` (sends the capability byte in password mode, verifies; wrong proof -> `Fail::HostUnverified`, never retried).
+New vectors: `tests/host-proof-vectors.json` (`src/vectors.rs::build_host_proof`); `tests/orientos-vectors.json` untouched.
+* Phase 1 keeps accepting a bare `0x04` (old host) and logs "host not verified". A man in the middle can still
+  strip the capability byte (downgrade) until `REQUIRE_HOST_PROOF` is switched to `true` (phase 2, after every host is updated).
+* Firn/OrientOS viewer (`lib/fv/session.fi`) does not send the byte -> frames unchanged, no change needed there.
+  Adopting it later = append `01` to the hello and verify `04||proof` with the same HMAC (vectors in the new file).
+* Needs a real Windows host+viewer pair for the final acceptance (only the unit and vector tests ran here).
