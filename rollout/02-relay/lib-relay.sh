@@ -6,6 +6,8 @@ RELAY_DROPIN_DIR="/etc/systemd/system/${RELAY_UNIT}.service.d"
 RELAY_DROPIN="$RELAY_DROPIN_DIR/r2-publish.conf"
 RELAY_LOCAL_JS="$REPO_ROOT/relay/relay.js"
 RELAY_PATCH="$REPO_ROOT/relay/patches/0001-publish-hardening.patch"
+RELAY_PATCH2="$REPO_ROOT/relay/patches/0002-real-client-ip.patch"   # r63: real viewer IP (X-Forwarded-For) for the host guard
+RELAY_LOCAL_CLIENTIP="$REPO_ROOT/relay/clientip.js"                # required by relay.js after patch 0002 (same directory)
 RELAY_BASE_COMMIT="cc41c25"   # commit that holds the imported live snapshot (docs/RELAY-LIVE-IMPORT.md)
 
 # relay_dropin_text MODE REQUIRE_SIG

@@ -9,10 +9,10 @@ Test of the scripts against fakes: `bash rollout/tests/run-dryrun-tests.sh`.
 | # | Block | Time | Downtime | Depends on |
 |---|-------|------|----------|-----------|
 | 1 | `01-backups` | 30 min + restore test 20 min | none | - |
-| 2A | `02-relay` compat (30-apply) | 15 min | relay restart ~3 s, sessions drop | block 1 snapshots |
+| 2A | `02-relay` compat (30-apply: relay.js r2 + clientip.js r63) | 15 min | relay restart ~3 s, sessions drop | block 1 snapshots |
 | 2B | first signed release (50-publish) | 20 min | none | 2A + a new client build (version bump!) |
 | 3 | `03-freemeet-nonce` | gate: days; switch 20 min | **FreeMeet restart ~1 min, all meetings end** | native release out (2B), block 1 |
-| 4 | `04-sfu-live-merge` | after W19 | same restart as block 3 (combine) | block 3 gate |
+| 4 | `04-sfu-live-merge` (W19 package, ready) | merge+build 20-45 min (no downtime) | **the same single restart as block 3** (`40-swap-binary`, first start `FM_WORKERS=1`) | block 3 gate + stage `file` |
 | 2C | relay strict + require-sig + phase-3 client | later | relay restart | publishers moved (mac-ci-publish.md) |
 
 ## Who clicks what (Boss)
@@ -24,13 +24,13 @@ Everything else is `script --apply`.
 ## Steps
 **Block 1** (`01-backups`): `10-precheck` -> `20-snapshots --apply` -> `30-vzdump-job --apply` -> `40-app-backups --apply`
 -> `50-offsite --offsite ... --apply` (needs target) -> `60-verify` -> `70-restore-test --apply` -> later `80-cleanup-snapshots`. Undo: `90-rollback`.
-**Block 2**: `10-precheck` -> `20-backup --apply` -> `30-apply --mode compat --apply` -> `40-verify --mode compat`
+**Block 2**: `10-precheck` -> `20-backup --apply` -> `30-apply --mode compat --apply` -> `40-verify --mode compat` (also proves clientip.js is live and relay.js sends `client_ip`)
 -> `50-publish-release --platform win --file ... --version ... --apply` (first signed release; re-signs Mac fields)
 -> later: move publishers (`mac-ci-publish.md`), `30-apply --mode strict --only-dropin`, `60-require-sig`, then a client built
 with `FV_REQUIRE_SIG=1` (phase 3), published with `50-publish-release`. Undo: `90-rollback` (`--feed VER`, `--lxc`).
 **Block 3**: `10-precheck` -> `20-gate-native --native-min-version X` -> `30-backup --apply` -> `40-apply --apply` (file, build, restart)
 -> `50-verify` -> `CHECKLIST.md`. Undo: `90-rollback` (`--file-only`, `--lxc`).
-**Block 4**: see its README (combine the restart with block 3).
+**Block 4** (combined with block 3, ONE restart): `03/40-apply --stage file` -> `04/10-precheck` -> `20-merge --apply` -> `30-build --apply` -> maintenance window -> `40-swap-binary --binary /opt/freemeet/freemeet-sfu.w19 --apply` -> `50-verify` + `03/50-verify`. Undo: `04/90-rollback`. Details: `04-sfu-live-merge/README.md`.
 
 ## Findings that change the old docs
 - **Backups already exist** (nightly all-guest vzdump 02:30, 3 daily + 2 weekly, USB disk on the SAME pve). Missing: offsite, longer retention for CT110/111, app-level backup, restore test.

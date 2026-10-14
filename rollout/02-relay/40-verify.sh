@@ -34,6 +34,15 @@ if [ "$mode" = strict ]; then
   grep -q 'FV_PUBLISH_LAN_ONLY=0' <<<"$env" && bad "LAN_ONLY is switched off but mode strict expected" || ok "LAN-only active"
   grep -q 'FV_PUBLISH_QUERY_TOKEN=1' <<<"$env" && bad "query token still allowed" || ok "query token refused"
 fi
+step "files (r2 + r63)"
+if [ -f "$RELAY_LOCAL_JS" ]; then
+  [ "$(rx relay "sha256sum $RELAY_DIR/relay.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "live relay.js == repo relay.js" || bad "live relay.js differs from the repo file"
+fi
+if [ -f "$RELAY_LOCAL_CLIENTIP" ]; then
+  [ "$(rx relay "sha256sum $RELAY_DIR/clientip.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_CLIENTIP")" ] && ok "live clientip.js == repo clientip.js" || bad "live clientip.js missing or different"
+fi
+rx relay "grep -c client_ip $RELAY_DIR/relay.js || true" | grep -qv '^0$' && ok "relay.js sends client_ip to hosts" || bad "relay.js has no client_ip"
+rx relay "tail -n 40 $RELAY_DIR/relay.log | grep -ci 'Cannot find module' || true" | grep -qx 0 && ok "no 'Cannot find module' in the log" || bad "module error in the relay log"
 expect "health" 200 "curl -s -o /dev/null -m5 -w %{http_code} http://127.0.0.1:7180/fv/health"
 expect "feed readable" 200 "curl -s -o /dev/null -m5 -w %{http_code} http://127.0.0.1:7180/fv/version"
 rx relay "tail -n 5 $RELAY_DIR/relay.log | grep -ci 'error\\|exception' || true" | awk '{ if ($1>0) print "  [WARN] error words in the last log lines"; }'

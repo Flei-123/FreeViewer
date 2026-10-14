@@ -7,6 +7,9 @@
 #                  publish only from the LAN, token only in Authorization/X-Upload-Token.
 #   Switching A -> B later: rerun with --mode strict --only-dropin (no file copy, one restart).
 #
+# Files put on CT110: relay.js (r2 + r63) AND clientip.js (new, relay.js requires it from the same directory).
+# clientip.js is moved into place BEFORE relay.js, both before the restart.
+#
 # Downtime: one service restart (~3 s). Running sessions drop, hosts reconnect by themselves.
 # The script restarts only if sessions_active == 0 (override: --force) and undoes itself
 # automatically if the relay is not healthy afterwards.
@@ -29,6 +32,8 @@ act=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("sessio
 if [ "$act" = 0 ]; then ok "no active session"; elif fv_flag force; then warn "sessions_active=$act, --force given"; else bad "sessions_active=$act - wait for 0 or use --force"; fi
 if ! fv_flag only-dropin; then
   node --check "$RELAY_LOCAL_JS" && ok "node --check (local)" || bad "local relay.js broken"
+  [ -f "$RELAY_LOCAL_CLIENTIP" ] && node --check "$RELAY_LOCAL_CLIENTIP" && ok "node --check clientip.js (local)" || bad "local clientip.js missing or broken (patch 0002)"
+  grep -q "require('./clientip')" "$RELAY_LOCAL_JS" && ok "relay.js requires ./clientip" || bad "relay.js does not require ./clientip - repo not at patch 0002?"
   live=$(rx relay "sha256sum $RELAY_DIR/relay.js | cut -d' ' -f1")
   new=$(sha_of "$RELAY_LOCAL_JS")
   if [ "$live" = "$RELAY_LIVE_SHA" ]; then ok "live relay.js is the known snapshot"; elif [ "$live" = "$new" ]; then note "live relay.js already is the new file"; else bad "live relay.js is unknown ($live)"; fi
@@ -41,8 +46,9 @@ gate
 
 if ! fv_flag only-dropin; then
   step "copy + syntax-check the new file on CT110 (service untouched so far)"
+  put relay "$RELAY_LOCAL_CLIENTIP" "$RELAY_DIR/clientip.js.new"
   put relay "$RELAY_LOCAL_JS" "$RELAY_DIR/relay.js.new"
-  mx relay "node --check relay.js.new, then move it into place" "cd $RELAY_DIR && node --check relay.js.new && mv -f relay.js.new relay.js && sha256sum relay.js"
+  mx relay "node --check both, clientip.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f relay.js.new relay.js && node -e \"require('./clientip')\" && sha256sum relay.js clientip.js"
 fi
 
 step "drop-in + restart (mode $mode)"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Block 2 / step 90 - ROLLBACK of the relay patch.
-#   default      : relay.js.bak_r2 back in place, r2 drop-in removed, restart, health check.
+#   default      : relay.js.bak_r2 back in place (clientip.js moved aside), r2 drop-in removed, restart, health check.
 #   --feed VER   : additionally restore the feed from dist/<feed>.pre-VER (a bad publish).
 #   --lxc        : full revert with `pct rollback 110 pre-publish-hardening` (hard: node + app
 #                  + hosts.json go back to the snapshot state, changes since then are LOST;
@@ -37,6 +37,7 @@ else
 cd $RELAY_DIR
 cp -p relay.js relay.js.failed-r2
 cp -p relay.js.bak_r2 relay.js
+[ ! -e clientip.js ] || mv -f clientip.js clientip.js.failed-r2
 rm -f $RELAY_DROPIN $RELAY_DROPIN.prev
 systemctl daemon-reload
 systemctl restart $RELAY_UNIT
