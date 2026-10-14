@@ -177,9 +177,9 @@ pub fn parse_feed(body: &[u8]) -> Result<Release> {
             .unwrap_or_default()
             .to_string()
     };
-    // Jede Plattform hat ihr eigenes Paket: "url" ist Windows, "mac_url"
-    // der Mac. Nie wieder die falsche Datei ziehen - eine Windows-Exe wuerde
-    // einen Mac sonst beim Tausch zerstoeren.
+    // Each platform has its own package: "url" is Windows, "mac_url"
+    // is the Mac. Never pull the wrong file again - a Windows exe would
+    // otherwise destroy a Mac during the swap.
     #[cfg(target_os = "macos")]
     let (url, hash, size, sig) = (
         s("mac_url"),
@@ -202,8 +202,8 @@ pub fn parse_feed(body: &[u8]) -> Result<Release> {
         size,
         sig,
     };
-    // Fehlt das Paket der eigenen Plattform: kein Update, kein Fehler -
-    // einfach nichts anbieten.
+    // If the package for the own platform is missing: no update, no error -
+    // just offer nothing.
     if rel.url.is_empty() {
         return Ok(Release {
             version: VERSION.to_string(),
@@ -223,12 +223,12 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-/// Ordner fuer die frische Datei.
+/// Folder for the fresh file.
 ///
-/// Am liebsten direkt neben der laufenden Exe - dann ist der Tausch ein
-/// simples Umbenennen. Liegt die Installation aber in "C:\Program Files",
-/// darf ein normaler Nutzer dort nicht schreiben (os error 5). Dann weichen
-/// wir in den Temp-Ordner aus; getauscht wird spaeter mit Rechten.
+/// Preferably right next to the running exe - then the swap is a
+/// simple rename. But if the installation is in "C:\Program Files",
+/// a normal user may not write there (os error 5). Then we fall back
+/// to the temp folder; the swap happens later with elevated rights.
 fn staging() -> PathBuf {
     if let Ok(cur) = std::env::current_exe() {
         if let Some(dir) = cur.parent() {
@@ -244,7 +244,7 @@ fn staging() -> PathBuf {
     d
 }
 
-/// Ist das ein "darfst du nicht"-Fehler?
+/// Is this a "you are not allowed" error?
 fn denied(e: &anyhow::Error) -> bool {
     let s = e.to_string();
     s.contains("os error 5") || s.contains("Zugriff verweigert") || s.contains("Access is denied")
@@ -256,8 +256,8 @@ pub fn download(rel: &Release) -> Result<PathBuf> {
     // from `check`. Refuse BEFORE downloading anything.
     check_release_signature(rel, PLATFORM, UPDATE_PUBKEY, REQUIRE_SIGNATURE)?;
     let bytes = fetch(&rel.url)?;
-    // Bauchweh-Pruefung: ein Mac darf nie eine Windows-Exe bekommen (und
-    // umgekehrt) - sonst frisst sich das Update selbst.
+    // Sanity check: a Mac must never get a Windows exe (and
+    // vice versa) - otherwise the update eats itself.
     #[cfg(target_os = "macos")]
     if bytes.starts_with(b"MZ") {
         return Err(anyhow!("Windows-Paket auf einem Mac - Update abgebrochen"));
@@ -290,16 +290,16 @@ pub fn swap(fresh: &Path) -> Result<PathBuf> {
     Ok(cur)
 }
 
-/// Legt `fresh` an die Stelle von `target`. Windows kann eine laufende Exe
-/// nicht ueberschreiben, aber umbenennen - danach ist der Platz frei.
-/// Kopiert wird, nicht umbenannt: die frische Datei kann auf einem anderen
-/// Laufwerk liegen.
+/// Puts `fresh` in the place of `target`. Windows cannot overwrite a running
+/// exe, but it can rename it - after that the spot is free.
+/// It copies, not renames: the fresh file may be on a different
+/// drive.
 pub fn swap_into(fresh: &Path, target: &Path) -> Result<()> {
     let old = target.with_extension("old");
     let _ = std::fs::remove_file(&old);
     std::fs::rename(target, &old).map_err(|e| anyhow!("Umbenennen fehlgeschlagen: {}", e))?;
     if let Err(e) = std::fs::copy(fresh, target) {
-        // die laufende Installation wieder herstellen, sonst ist alles kaputt
+        // restore the running installation, otherwise everything is broken
         let _ = std::fs::rename(&old, target);
         return Err(anyhow!("Ersetzen fehlgeschlagen: {}", e));
     }
@@ -307,12 +307,12 @@ pub fn swap_into(fresh: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Raeumt weg, was ein frueheres Update liegen gelassen hat (bei jedem Start).
+/// Cleans up whatever an earlier update left behind (at every start).
 ///
-/// Frueher wurden nur ".old" und ".new" geloescht. Konnte die alte Datei nicht
-/// weg (weil sie noch lief), blieben Reste wie "freeviewer.old2" fuer immer im
-/// Programmordner liegen - deshalb wird jetzt alles aufgeraeumt, was neben der
-/// Exe mit demselben Namen und einer Update-Endung steht.
+/// Previously only ".old" and ".new" were deleted. If the old file could not
+/// be removed (because it was still running), leftovers like "freeviewer.old2" stayed forever in the
+/// program folder - so now everything next to the
+/// exe with the same name and an update extension is cleaned up.
 pub fn cleanup() {
     let Ok(cur) = std::env::current_exe() else {
         return;
@@ -361,9 +361,9 @@ pub fn restart_into(exe: &Path) -> ! {
 
 /// Download + verify + swap + restart.
 ///
-/// Liegt FreeViewer in einem geschuetzten Ordner ("C:\Program Files"), macht
-/// den Tausch ein kurzer Helfer mit Administrator-Rechten - gestartet aus der
-/// FRISCHEN Datei, damit auch alte Staende diesen Weg nehmen koennen.
+/// If FreeViewer is in a protected folder ("C:\Program Files"), a short helper
+/// with administrator rights does the swap - started from the
+/// FRESH file, so that old versions can take this path too.
 pub fn install(rel: &Release) -> Result<()> {
     let fresh = download(rel)?;
     let target = std::env::current_exe()?;
@@ -378,8 +378,8 @@ pub fn install(rel: &Release) -> Result<()> {
     }
 }
 
-/// Startet die frische Exe mit Administrator-Rechten, damit sie sich selbst
-/// an die richtige Stelle legt.
+/// Starts the fresh exe with administrator rights so that it puts itself
+/// in the right place.
 #[cfg(windows)]
 pub fn elevated_swap(fresh: &Path, target: &Path) -> Result<()> {
     use windows::core::{w, PCWSTR};
@@ -420,13 +420,13 @@ pub fn elevated_swap(_fresh: &Path, _target: &Path) -> Result<()> {
     Err(anyhow!("nur unter Windows"))
 }
 
-/// `freeviewer --apply-update <frisch> <ziel> <pid>`
+/// `freeviewer --apply-update <fresh> <target> <pid>`
 ///
-/// Laeuft mit Administrator-Rechten: tauscht die Datei, startet den Dienst neu
-/// und holt das Fenster als normaler Nutzer zurueck (ueber den Explorer, damit
-/// die App nicht dauerhaft erhoehte Rechte behaelt).
+/// Runs with administrator rights: swaps the file, restarts the service
+/// and brings the window back as a normal user (via Explorer, so that
+/// the app does not permanently keep elevated rights).
 pub fn apply_update(fresh: &Path, target: &Path, pid: u32) -> Result<()> {
-    // dem Aufrufer einen Moment geben, sich zu beenden
+    // give the caller a moment to exit
     std::thread::sleep(Duration::from_millis(600));
     let _ = pid;
     let mut last: Option<anyhow::Error> = None;
@@ -468,19 +468,19 @@ fn busy(shared: &Arc<Shared>) -> bool {
         || shared.connecting.load(Ordering::Relaxed)
 }
 
-/// Hintergrund-Faden: sucht jetzt und alle paar Stunden nach einem neuen Stand.
+/// Background thread: checks now and every few hours for a new version.
 ///
-/// `darf_einspielen` = false heisst: nur nachsehen und Bescheid sagen. Das ist
-/// der Normalfall, sobald der Dienst installiert ist - der laeuft als SYSTEM,
-/// darf nach "Programme" schreiben und braucht dafuer KEINE Nachfrage. Frueher
-/// versuchten Oberflaeche UND Agent den Tausch selbst; beide landeten bei
-/// "Zugriff verweigert", riefen die Administrator-Abfrage auf und probierten
-/// es jede Minute erneut - daher die vielen Nachfragen.
+/// `darf_einspielen` = false means: only look and report. That is
+/// the normal case once the service is installed - it runs as SYSTEM,
+/// may write to "Program Files" and needs NO prompt for it. Previously
+/// the UI AND the agent both tried the swap themselves; both ended up at
+/// "access denied", raised the administrator prompt and tried
+/// again every minute - hence the many prompts.
 pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
     cleanup();
     std::thread::spawn(move || loop {
-        // Nach einem gescheiterten Versuch (z. B. Nachfrage abgelehnt) wird in
-        // dieser Runde nicht noch einmal angesetzt.
+        // After a failed attempt (e.g. prompt declined) it is not
+        // tried again in this round.
         let mut gescheitert = false;
         match check() {
             Ok(rel) => {
@@ -514,9 +514,9 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
             }
             Err(e) => shared.set_update_status(format!("Update-Pruefung: {}", e)),
         }
-        // Spaeter neu nachsehen. Wartet ein Update darauf, dass eine Sitzung
-        // endet, wird minuetlich geprueft - aber nur, wenn dieser Prozess
-        // ueberhaupt einspielen darf und es nicht gerade gescheitert ist.
+        // Check again later. If an update is waiting for a session
+        // to end, it is checked every minute - but only if this process
+        // is allowed to apply it at all and it has not just failed.
         for _ in 0..(EVERY.as_secs() / 60) {
             std::thread::sleep(Duration::from_secs(60));
             if !darf_einspielen || gescheitert {
@@ -536,33 +536,33 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
     });
 }
 
-/// Datei, mit der die Oberflaeche den Dienst bittet, sofort zu aktualisieren
-/// (Knopfdruck statt Warten auf die halbe Stunde).
+/// File with which the UI asks the service to update immediately
+/// (button press instead of waiting for the half hour).
 #[cfg(windows)]
 fn trigger_pfad() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("update-now.flag"))
 }
 
-/// Solange diese Datei steht, laeuft gerade ein Update - die Oberflaeche
-/// zeigt dann das Lade-Fenster.
+/// As long as this file exists, an update is running - the UI
+/// then shows the loading window.
 #[cfg(windows)]
 pub fn updating_flag() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("updating.flag"))
 }
 
-/// Marke, mit der eine SICHTBARE Oberflaeche sagt: "ich laufe gerade".
+/// Marker with which a VISIBLE UI says: "I am running".
 ///
-/// Der Dienst sitzt in Sitzung 0 und kann die Fenster des Benutzers nicht
-/// sehen; die vorhandene Mutex-Pruefung ist auf "Local\\" begrenzt und damit
-/// pro Sitzung. Eine Datei mit Zeitstempel ist der einzige Weg, der ueber
-/// Sitzungsgrenzen funktioniert.
+/// The service sits in session 0 and cannot see the user's windows;
+/// the existing mutex check is limited to "Local\\" and thus
+/// per session. A file with a timestamp is the only way that works
+/// across session boundaries.
 #[cfg(windows)]
 pub fn gui_marke() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("gui-laeuft.flag"))
 }
 
-/// Nach dem Update: diese Marke bittet den Agenten, die Oberflaeche wieder
-/// zu oeffnen.
+/// After the update: this marker asks the agent to open the UI
+/// again.
 #[cfg(windows)]
 pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("gui-neustart.flag"))
@@ -577,7 +577,7 @@ pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Laeuft in der sichtbaren Oberflaeche: haelt die Marke frisch.
+/// Runs in the visible UI: keeps the marker fresh.
 pub fn gui_marke_pflegen() {
     #[cfg(windows)]
     std::thread::spawn(|| loop {
@@ -595,7 +595,7 @@ fn now_text() -> String {
         .unwrap_or_default()
 }
 
-/// War in den letzten 90 Sekunden eine sichtbare Oberflaeche offen?
+/// Was a visible UI open in the last 90 seconds?
 pub fn gui_war_offen() -> bool {
     let Some(p) = gui_marke() else { return false };
     let Ok(text) = std::fs::read_to_string(&p) else {
@@ -611,13 +611,13 @@ pub fn gui_war_offen() -> bool {
     jetzt.saturating_sub(dann) <= 90
 }
 
-/// Laeuft im Agenten (Sitzung des Benutzers): stand vor dem Update ein
-/// Fenster offen, wird es jetzt wieder geoeffnet.
+/// Runs in the agent (the user's session): if a window was open
+/// before the update, it is opened again now.
 ///
-/// WARUM hier und nicht im Dienst: der Dienst laeuft als SYSTEM in Sitzung 0.
-/// Ein von dort gestarteter Prozess landet auf einem Desktop, den niemand
-/// sieht. Der Agent sitzt schon im Benutzer-Desktop - er braucht dafuer nur
-/// ein normales `spawn`.
+/// WHY here and not in the service: the service runs as SYSTEM in session 0.
+/// A process started from there ends up on a desktop nobody
+/// sees. The agent already sits on the user desktop - it only needs
+/// a normal `spawn` for this.
 pub fn gui_wieder_oeffnen() {
     #[cfg(windows)]
     {
@@ -629,14 +629,14 @@ pub fn gui_wieder_oeffnen() {
         let Ok(exe) = std::env::current_exe() else {
             return;
         };
-        // Ohne Argumente = ganz normales Fenster, wie ein Doppelklick.
+        // Without arguments = completely normal window, like a double click.
         let _ = std::process::Command::new(exe).spawn();
         crate::service::log("Oberflaeche nach dem Update wieder geoeffnet");
     }
 }
 
-/// Knopf "Update installieren" bei installiertem Dienst: nur die Bitte
-/// hinterlegen, der Dienst macht den Rest (als SYSTEM, ohne Nachfrage).
+/// "Install update" button with an installed service: only leave the request,
+/// the service does the rest (as SYSTEM, without prompt).
 #[cfg(windows)]
 pub fn bitte_dienst() {
     if let Some(p) = trigger_pfad() {
@@ -652,10 +652,10 @@ pub fn updating_flag() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Der Updater des Dienstes. Laeuft als SYSTEM, darf also direkt nach
-/// "Programme" schreiben - ohne jede Administrator-Nachfrage. Nach dem Tausch
-/// werden ALLE FreeViewer-Prozesse beendet und der Dienst startet neu; der
-/// Agent im Benutzer-Desktop kommt mit dem frischen Stand wieder.
+/// The updater of the service. Runs as SYSTEM, so it may write directly to
+/// "Program Files" - without any administrator prompt. After the swap
+/// ALL FreeViewer processes are ended and the service restarts; the
+/// agent on the user desktop comes back with the fresh version.
 #[cfg(windows)]
 pub fn service_watcher() {
     cleanup();
@@ -665,7 +665,7 @@ pub fn service_watcher() {
     std::thread::spawn(move || {
         let mut naechste_runde = std::time::Instant::now();
         loop {
-            // Schneller Wunsch von der Oberflaeche ("Update installieren")?
+            // Quick request from the UI ("Install update")?
             let mut sofort = false;
             if let Some(p) = trigger_pfad() {
                 if p.exists() {
@@ -679,8 +679,8 @@ pub fn service_watcher() {
             }
             naechste_runde = std::time::Instant::now() + EVERY;
             let einspielen = |rel: &Release| -> bool {
-                // Der Knopf zaehlt als ausdruecklicher Wunsch - auch wenn die
-                // Automatik aus ist.
+                // The button counts as an explicit request - even if
+                // automatic mode is off.
                 sofort || crate::ident::auto_update_enabled()
             };
             if let Ok(rel) = check() {
@@ -696,21 +696,21 @@ pub fn service_watcher() {
                     match ergebnis {
                         Ok(()) => {
                             crate::service::log("Update eingespielt - alle Teile starten neu");
-                            // Stand ein Fenster offen? Dann soll es nach dem
-                            // Neustart wiederkommen. Ohne diese Marke war der
-                            // Bildschirm nach jedem Update einfach leer - der
-                            // Dienst kam zurueck, das FENSTER nicht.
+                            // Was a window open? Then it should come back after the
+                            // restart. Without this marker the screen was
+                            // simply empty after every update - the service
+                            // came back, the WINDOW did not.
                             if gui_war_offen() {
                                 if let Some(p) = gui_neustart_marke() {
                                     let _ = std::fs::write(&p, b"1");
                                 }
                                 crate::service::log("Oberflaeche war offen - wird neu geoeffnet");
                             }
-                            // Neustart-Kette anwerfen. Dreimal versuchen: der
-                            // Dienst braucht einen Moment, bis Windows ihn als
-                            // GESTOPPT fuehrt; ein zu frueher Start scheitert
-                            // mit "wird gerade beendet". Ein spaeterer Versuch
-                            // auf einen schon laufenden Dienst schadet nicht.
+                            // Start the restart chain. Try three times: the
+                            // service needs a moment until Windows lists it as
+                            // STOPPED; a start that is too early fails
+                            // with "is being stopped". A later attempt
+                            // on an already running service does no harm.
                             let name = crate::service::SERVICE_NAME;
                             let _ = std::process::Command::new("cmd")
                                 .args([
@@ -721,10 +721,10 @@ pub fn service_watcher() {
                                     ),
                                 ])
                                 .spawn();
-                            // Oberflaeche und Agent beenden - aber NICHT uns
-                            // selbst. Der Dienst geht gleich darunter geordnet
-                            // zu Ende; ein Selbstabschuss zaehlt bei Windows
-                            // als Absturz und verbraucht das Sicherheitsnetz.
+                            // End UI and agent - but NOT ourselves.
+                            // The service ends in an orderly way right below;
+                            // a self-kill counts as a crash on Windows
+                            // and uses up the safety net.
                             let eigen = std::process::id();
                             let _ = std::process::Command::new("taskkill")
                                 .args([
@@ -735,8 +735,8 @@ pub fn service_watcher() {
                                     &format!("PID ne {}", eigen),
                                 ])
                                 .output();
-                            // Jetzt sauber aussteigen: supervise() kehrt
-                            // zurueck, der Dienst meldet ordentlich GESTOPPT.
+                            // Now exit cleanly: supervise() returns,
+                            // the service reports STOPPED properly.
                             crate::service::stop_anfordern();
                             return;
                         }

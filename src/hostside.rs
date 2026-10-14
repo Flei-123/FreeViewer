@@ -25,12 +25,12 @@ use crate::shared::Shared;
 #[derive(Clone, Copy, Debug)]
 pub struct Profile {
     pub max_w: u32,
-    /// Obergrenze, wenn das Bild als H.264 geht.
+    /// Upper limit when the image goes out as H.264.
     ///
-    /// WARUM eine zweite Zahl: die 1920 stammen aus der JPEG-Zeit, wo jedes
-    /// Bild 46 KB kostete. H.264 braucht fuer dasselbe Bild 5 KB - da ist
-    /// Herunterskalieren nur noch Schaerfeverlust ohne Gegenwert. Genau das
-    /// ist der Unterschied, den man zu mstsc sieht.
+    /// WHY a second number: the 1920 comes from the JPEG era, when every
+    /// image cost 46 KB. H.264 needs 5 KB for the same image - there,
+    /// downscaling is only a loss of sharpness with no return. That is exactly
+    /// the difference you see compared to mstsc.
     pub max_w_video: u32,
     pub full_q: u8,
     pub tile_q: u8,
@@ -43,20 +43,20 @@ pub struct Profile {
 
 pub const ADMIN: Profile = Profile {
     max_w: 1920,
-    // Bis 2560 wird nichts verkleinert - ein 2496er Bildschirm geht in
-    // seiner echten Aufloesung ueber die Leitung.
+    // Up to 2560 nothing is shrunk - a 2496 screen goes over the wire
+    // in its real resolution.
     max_w_video: 2560,
     full_q: 68,
     tile_q: 78,
-    // Der Hardware-Encoder braucht etwa eine Millisekunde pro Bild - die
-    // alte 30er-Bremse war verschenkte Fluessigkeit.
+    // The hardware encoder needs about a millisecond per image - the
+    // old 30 fps brake was wasted smoothness.
     fps: 60,
     bitrate: 12_000_000,
 };
 
 pub const GAME: Profile = Profile {
     max_w: 1280,
-    // Im Spielmodus zaehlt die Bildrate mehr als die Schaerfe.
+    // In game mode the frame rate counts more than sharpness.
     max_w_video: 1920,
     full_q: 48,
     tile_q: 55,
@@ -72,11 +72,11 @@ pub fn profile(mode: u8) -> Profile {
     }
 }
 
-/// Steht ueberhaupt eine Leitung nach draussen? Ein kurzer TCP-Versuch auf
-/// zwei bekannte Adressen - reicht, um "kein Internet" von "Relay antwortet
-/// nicht" zu unterscheiden. Ohne diese Unterscheidung raet die Meldung nur.
-/// Sekunden aus einer Umgebungsvariable, sonst der Standardwert. Nur damit
-/// sich die Zeiten im Test (und beim Suchen eines Fehlers) verkuerzen lassen.
+/// Is there a line to the outside at all? A short TCP attempt to
+/// two known addresses - enough to tell "no internet" from "relay does not
+/// answer". Without this distinction the message only guesses.
+/// Seconds from an environment variable, otherwise the default. Only so that
+/// the times can be shortened in tests (and when hunting a bug).
 fn sekunden(name: &str, standard: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -111,9 +111,9 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
                 if replaced {
                     shared.set_host_status(format!("Relay-Fehler: {}", e));
                 } else if internet_da().await {
-                    // Netz ist da, der Relay nicht erreichbar - das ist eine
-                    // andere Baustelle als ein totes WLAN, also auch eine
-                    // andere Meldung.
+                    // Network is there, relay not reachable - that is a
+                    // different problem than a dead WLAN, so also a
+                    // different message.
                     shared.set_host_status(crate::i18n::t("net.no_relay"));
                 } else {
                     shared.set_host_status(crate::i18n::t("net.no_internet"));
@@ -124,11 +124,11 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
         *shared.my_id.lock().unwrap() = String::new();
         *shared.host_peer.lock().unwrap() = "Keine aktive Sitzung".to_string();
         if replaced && !agent {
-            // Ein anderer Prozess (meist der Dienst) hat diese ID am Relay
-            // uebernommen. Sofort zurueckschlagen wuerde ein endloses
-            // Hin-und-Her-Kicken ausloesen (alle 3 s offline/online). Also
-            // lange warten - und wenn inzwischen der Dienst den Host
-            // betreibt, hoert diese Oberflaeche ganz auf zu registrieren.
+            // Another process (usually the service) took over this ID at the relay.
+            // Striking back immediately would trigger an endless
+            // kick back and forth (offline/online every 3 s). So
+            // wait long - and if the service now runs the host
+            // in the meantime, this UI stops registering altogether.
             let mut dienst = false;
             for _ in 0..12 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -165,11 +165,11 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
 
     let mut sess: Option<Session> = None;
 
-    // Herzschlag: Ohne ihn merkt niemand, wenn die Leitung stirbt. Ein
-    // gekapptes WLAN schickt kein "Auf Wiedersehen" - der Stream schweigt
-    // nur, und TCP braucht Minuten, bis es das zugibt. Deshalb: alle 15 s
-    // ein Ping, und wenn 40 s lang NICHTS kam (auch kein Pong), gilt die
-    // Verbindung als tot und wird neu aufgebaut.
+    // Heartbeat: without it nobody notices when the line dies. A
+    // cut WLAN sends no "goodbye" - the stream just goes silent,
+    // and TCP takes minutes to admit it. Therefore: a ping every 15 s,
+    // and if NOTHING came for 40 s (not even a pong), the
+    // connection counts as dead and is rebuilt.
     let mut letzter_kontakt = Instant::now();
     let mut letzter_ping = Instant::now();
     let ping_alle = Duration::from_secs(sekunden("FV_PING_SEK", 15));
@@ -1056,9 +1056,9 @@ pub fn video_selftest(rounds: u32) -> String {
         delta.set_quality(prof.full_q, prof.tile_q);
 
         let mut nv12 = Vec::new();
-        // Dritter Weg: das Bild bleibt auf der Grafikkarte und geht als
-        // Textur in den Encoder. Wird erst beim ersten Bild gebaut, weil
-        // dafuer das Geraet der Aufnahme gebraucht wird.
+        // Third way: the image stays on the graphics card and goes as a
+        // texture into the encoder. Only built at the first image, because
+        // it needs the capture device.
         #[cfg(windows)]
         let mut direkt: Option<crate::h264::Encoder> = None;
         #[cfg(windows)]
@@ -1230,18 +1230,18 @@ pub fn video_selftest(rounds: u32) -> String {
     out
 }
 
-/// Zaehler fuer die Statistik des Direktpfads (Bilder, Bytes, Fensterbeginn).
+/// Counters for the statistics of the direct path (images, bytes, window start).
 struct DirektZahlen {
     frames: u32,
     bytes: usize,
     fenster: Instant,
 }
 
-/// Ein Bild komplett auf der Grafikkarte encodieren und wegschicken.
+/// Encode an image completely on the graphics card and send it off.
 ///
-/// Rueckgabe true = erledigt, der alte Weg ueber den Hauptspeicher wird
-/// uebersprungen. Bei jedem Fehler schaltet sich der Direktpfad dauerhaft ab
-/// (`aus`) und die Sitzung laeuft ohne Bruch auf dem alten Weg weiter.
+/// Return true = done, the old way via main memory is
+/// skipped. On any error the direct path switches itself off permanently
+/// (`aus`) and the session continues without a break on the old way.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn direkt_senden(
@@ -1260,8 +1260,8 @@ fn direkt_senden(
         return false;
     }
     let Some((dev, tex)) = cap.nv12_gpu(dw, dh) else {
-        // Kein GPU-Weg (Screenshot-Backend, fremder Adapter, gesperrter
-        // Bildschirm) - das ist kein Fehler, nur der andere Weg.
+        // No GPU path (screenshot backend, foreign adapter, locked
+        // screen) - that is not an error, just the other way.
         return false;
     };
     let passt = enc.as_ref().map(|e| e.size() == (dw, dh)).unwrap_or(false);
@@ -1416,9 +1416,9 @@ fn capture_loop(
 
         let mut last_cursor = (i32::MIN, i32::MIN, false);
         let mut fails = 0u32;
-        // Der Encoder des Direktpfads lebt hier, im Aufnahmefaden: eine
-        // D3D11-Textur darf den Faden nicht wechseln, und 3 ms Arbeit
-        // bremsen die Aufnahme nicht.
+        // The encoder of the direct path lives here, in the capture thread: a
+        // D3D11 texture must not change threads, and 3 ms of work
+        // do not slow down the capture.
         #[cfg(windows)]
         let mut direkt_enc: Option<crate::h264::Encoder> = None;
         #[cfg(windows)]
@@ -1508,7 +1508,7 @@ fn capture_loop(
                         prof.max_w
                     };
                     let (dw, dh) = target_size(cw, ch, grenze);
-                    // Erster Versuch: alles bleibt auf der Grafikkarte.
+                    // First attempt: everything stays on the graphics card.
                     let mut erledigt = false;
                     #[cfg(windows)]
                     if will_video {
@@ -1528,8 +1528,8 @@ fn capture_loop(
                         if erledigt {
                             pushed += 1;
                         } else if key {
-                            // nicht geschafft - der Wunsch nach einem
-                            // Vollbild darf nicht verlorengehen
+                            // not managed - the request for a
+                            // full frame must not get lost
                             key_grab.store(true, Ordering::Relaxed);
                         }
                     }
@@ -1623,27 +1623,27 @@ fn capture_loop(
                     }
                 }
                 Next::Lost => {
-                    // WARUM hier NICHT mehr abgebrochen wird: frueher stieg
-                    // dieser Faden nach 20 Fehlversuchen (rund 5 Sekunden)
-                    // endgueltig aus - und danach kam fuer den REST der
-                    // Sitzung kein Bild mehr, auch wenn der Bildschirm laengst
-                    // wieder da war. Genau das ist Justin passiert: nach einer
-                    // Aufloesungsumstellung meldete die Duplication
-                    // "AcquireNextFrame ... 0x887A0001", der Faden gab auf,
-                    // Maus und Tastatur liefen weiter, aber das Bild blieb weg.
-                    // Ein Aussetzer der Bildschirmaufnahme ist normal
-                    // (Aufloesungswechsel, Benutzerkonten-Abfrage,
-                    // Sperrbildschirm, Grafiktreiber-Neustart) - er darf die
-                    // Sitzung nicht dauerhaft blind machen.
+                    // WHY we NO LONGER give up here: previously
+                    // this thread quit for good after 20 failed attempts (about 5 seconds)
+                    // - and afterwards no image came for the REST of the
+                    // session, even when the screen had long been
+                    // back. That is exactly what happened to Justin: after a
+                    // resolution change the duplication reported
+                    // "AcquireNextFrame ... 0x887A0001", the thread gave up,
+                    // mouse and keyboard kept working, but the image stayed gone.
+                    // A capture dropout is normal
+                    // (resolution change, user account prompt,
+                    // lock screen, graphics driver restart) - it must not
+                    // make the session permanently blind.
                     fails += 1;
                     if fails == 5 {
                         shared_grab.set_host_status("Bildschirmaufnahme schlaegt fehl");
                     }
                     std::thread::sleep(Duration::from_millis(250));
-                    // Alle 2 Sekunden die Aufnahme KOMPLETT neu aufbauen -
-                    // beim ersten Mal schnell (gleiches Verfahren), danach
-                    // abwechselnd auch der langsamere Screenshot-Weg, der
-                    // sogar auf dem Sperrbildschirm noch etwas liefert.
+                    // Every 2 seconds rebuild the capture COMPLETELY -
+                    // the first time fast (same method), afterwards
+                    // alternating with the slower screenshot way, which
+                    // still delivers something even on the lock screen.
                     if fails % 8 == 0 {
                         let schnell = (fails / 8) % 2 == 1;
                         capture::log_line(&format!(
@@ -1716,8 +1716,8 @@ fn capture_loop(
 
         // (re)build the video encoder when the viewer, the resolution or the
         // profile changed; any failure silently falls back to JPEG tiles
-        // Der zweite Weg (ueber den Hauptspeicher) muss dieselbe Grenze
-        // benutzen, sonst baut er den Encoder bei jedem Bild neu.
+        // The second way (via main memory) must use the same limit,
+        // otherwise it rebuilds the encoder on every image.
         let fits = match &codec {
             Codec::H264 { enc, mode: m, .. } => enc.size() == (dw, dh) && *m == cur_mode,
             Codec::Jpeg(_) => false,
@@ -1926,9 +1926,9 @@ mod verbindungstests {
     use super::*;
     use std::sync::atomic::Ordering;
 
-    /// Ein Relay, der sich einmal meldet und danach schweigt - genau das,
-    /// was ein weggebrochenes WLAN aus Sicht des Programms ist: die
-    /// Leitung steht noch offen, es kommt nur nie wieder etwas.
+    /// A relay that reports once and then stays silent - exactly
+    /// what a dropped WLAN looks like from the program's view: the
+    /// line is still open, but nothing ever comes again.
     async fn stummer_relay() -> (String, tokio::task::JoinHandle<()>) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -1941,7 +1941,7 @@ mod verbindungstests {
                             "{\"t\":\"registered\",\"id\":\"123456789\"}",
                         ))
                         .await;
-                    // Ab jetzt nichts mehr - auch keine Antwort auf Pings.
+                    // From now on nothing - not even an answer to pings.
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             }
@@ -1949,14 +1949,14 @@ mod verbindungstests {
         (format!("ws://{}", addr), h)
     }
 
-    /// Frueher blieb "Bereit" stehen, bis TCP nach Minuten aufgab. Jetzt
-    /// muss der Zustand nach der Stille-Frist auf "offline" kippen.
+    /// Previously "Ready" stayed shown until TCP gave up after minutes. Now
+    /// the state must flip to "offline" after the silence period.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stille_leitung_wird_als_offline_erkannt() {
-        // Seit dem Sicherheits-Commit 1ccde14 wird ws:// abgelehnt. Der
-        // Testrelay laeuft auf 127.0.0.1 und ist damit gemeint, wenn die
-        // Ausnahme ueberhaupt einen Zweck hat - ohne diese Zeile scheitert
-        // der Test an der Verbindung, nicht an der Sache, um die es geht.
+        // Since security commit 1ccde14 ws:// is rejected. The
+        // test relay runs on 127.0.0.1 and is what the exception means, if the
+        // exception has any purpose at all - without this line the
+        // test fails on the connection, not on the thing it is about.
         std::env::set_var("FV_ALLOW_INSECURE_RELAY", "1");
         std::env::set_var("FV_PING_SEK", "1");
         std::env::set_var("FV_STILL_SEK", "2");
@@ -1966,7 +1966,7 @@ mod verbindungstests {
         let s2 = shared.clone();
         let host = tokio::spawn(async move { run_host(s2, "geheim".to_string(), true).await });
 
-        // 1) es muss ueberhaupt erst "bereit" werden
+        // 1) it must first become "ready" at all
         let mut war_bereit = false;
         for _ in 0..40 {
             if shared.net_state() == 1 && !shared.my_id.lock().unwrap().is_empty() {
@@ -1977,7 +1977,7 @@ mod verbindungstests {
         }
         assert!(war_bereit, "Registrierung wurde nie als 'bereit' gemeldet");
 
-        // 2) und danach, ohne ein einziges Lebenszeichen, auf offline kippen
+        // 2) and afterwards, without a single sign of life, flip to offline
         let mut wurde_offline = false;
         for _ in 0..60 {
             if shared.net_state() == 2 {
@@ -2001,7 +2001,7 @@ mod verbindungstests {
             "Statuszeile sagt nicht offline, sondern: {}",
             text
         );
-        // Der Ordnung halber: der Zaehler fuer laufende Sitzungen bleibt aus.
+        // For order's sake: the counter for running sessions stays off.
         assert!(!shared.connected.load(Ordering::Relaxed));
     }
 
