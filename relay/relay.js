@@ -199,26 +199,26 @@ function unpair(ws, reason) {
 // ==========================================================================
 // Freunde - Freundschaftsanfragen, Freundesliste, Blockliste
 //
-// Eine Freundschaft entsteht NUR, wenn beide Seiten zugestimmt haben: einer
-// fragt (/fv/freunde/anfragen), der andere nimmt an (/fv/freunde/annehmen).
-// Vorher gibt es nur eine offene Anfrage, keine Verbindung.
+// A friendship exists ONLY when both sides agreed: one asks
+// (/fv/freunde/anfragen), the other accepts (/fv/freunde/annehmen).
+// Before that there is only an open request, no connection.
 //
-// Wer jemand ist, weist der Anrufer genauso nach wie beim WebSocket
-// (host_register): mit dem Geheimnis seiner Installation. Das Relay kennt nur
-// dessen SHA-256 (hosts.json) und findet darueber die FreeViewer-ID. Das
-// Geheimnis steht IMMER im Rumpf der Anfrage, nie in der Adresse - es soll
-// nicht in Zugriffsprotokollen landen. Neue IDs werden hier NICHT vergeben;
+// The caller proves who they are the same way as with the WebSocket
+// (host_register): with the secret of their installation. The relay only knows
+// its SHA-256 (hosts.json) and uses it to find the FreeViewer ID. The
+// secret is ALWAYS in the request body, never in the URL - it should
+// not end up in access logs. New IDs are NOT issued here;
 // wer noch nie verbunden war, bekommt 401.
 //
-// OHNE KONTO haengt die Freundesliste an der FreeViewer-ID. MIT KONTO wird
-// zusaetzlich der Kontoname (ueber JARVIS, wie in account.js) an der eigenen
-// Seite vermerkt - damit sieht dasselbe Konto seine Freunde auf jedem Geraet.
+// WITHOUT AN ACCOUNT the friend list hangs on the FreeViewer ID. WITH AN ACCOUNT
+// the account name (via JARVIS, as in account.js) is additionally noted on the
+// own side - so the same account sees its friends on every device.
 //
-// Das Relay gibt NIEMALS die Liste eines anderen heraus: jede Antwort wird
-// aus der Sicht des Anrufers gebaut, es gibt keinen Parameter "Liste von X".
+// The relay NEVER hands out someone else's list: every answer is built
+// from the caller's point of view, there is no parameter "list of X".
 //
-// Geloescht wird nichts hart - Freundschaften bekommen einen Grabstein
-// (entfernt = true), damit der Abgleich auf allen Geraeten aufraeumt.
+// Nothing is deleted hard - friendships get a tombstone
+// (entfernt = true), so the sync cleans up on all devices.
 // ==========================================================================
 
 const FREUNDE = process.env.FV_FREUNDE || path.join(path.dirname(DATA), 'freunde.json');
@@ -261,8 +261,8 @@ function frLaden() {
   return fr;
 }
 
-/** Atomar: erst daneben schreiben, dann umbenennen - eine halbe Datei kann
- *  es damit nie geben, auch nicht bei Stromausfall mitten im Schreiben. */
+/** Atomic: write next to it first, then rename - a half file can
+  *  never exist this way, not even on power loss in the middle of writing. */
 function frSichern() {
   if (!fr) return;
   try {
@@ -274,7 +274,7 @@ function frSichern() {
   } catch (e) { frLog('speichern fehlgeschlagen: ' + e.message); }
 }
 
-/** Abgelaufene Anfragen, alte Grabsteine und alte Zaehler wegraeumen. */
+/** Remove expired requests, old tombstones and old counters. */
 function frAufraeumen(db) {
   const jetzt = Date.now();
   const vorher = db.anfragen.length + db.freundschaften.length + db.einladungen.length;
@@ -306,15 +306,15 @@ function frWer(b, cb) {
   const token = String((b && b.token) || '');
   if (!token || !account) return cb(null, { fvid, konto: '' });
   account.whoIs(token, (err, user) => {
-    // Konto nicht erreichbar oder Zeichen abgelaufen: es geht ohne Konto
-    // weiter, die ID allein reicht. Der Anrufer sieht am Feld "konto", ob
+        // Account unreachable or token expired: it continues without an
+        // account, the ID alone is enough. The caller sees in the field "konto" whether
     // seine Anmeldung erkannt wurde.
     if (err) return cb(null, { fvid, konto: '' });
     cb(null, { fvid, konto: user ? String(user).toLowerCase() : '' });
   });
 }
 
-/** Welches Konto gehoert zu dieser ID? (gelernt, wenn sie angemeldet anfragt) */
+/** Which account belongs to this ID? (learned when it asks while logged in) */
 function frKontoVon(db, fvid) {
   const e = db.konten[fvid];
   return (e && e.konto) || '';
@@ -328,7 +328,7 @@ function frKontoMerken(db, ich) {
   return true;
 }
 
-/** Alle IDs, die zu mir gehoeren (eigene + alle Geraete meines Kontos). */
+/** All IDs that belong to me (own + all devices of my account). */
 function frMeineIds(db, ich) {
   const s = new Set([ich.fvid]);
   if (ich.konto) {
@@ -339,7 +339,7 @@ function frMeineIds(db, ich) {
   return [...s];
 }
 
-/** Ist diese Seite einer Freundschaft meine? */
+/** Is this side of a friendship mine? */
 function frMeins(seite, ich) {
   if (!seite) return false;
   if (seite.fvid && seite.fvid === ich.fvid) return true;
@@ -360,13 +360,13 @@ function frFreundeVon(db, ich) {
   return db.freundschaften.filter((f) => !f.entfernt && (frMeins(f.a, ich) || frMeins(f.b, ich)));
 }
 
-/** Die (lebende) Freundschaft zwischen mir und dieser ID, falls es sie gibt. */
+/** The (living) friendship between me and this ID, if there is one. */
 function frFreundschaft(db, ich, anderer) {
   return db.freundschaften.find((f) => !f.entfernt
     && ((frMeins(f.a, ich) && f.b.fvid === anderer) || (frMeins(f.b, ich) && f.a.fvid === anderer)));
 }
 
-/** Hat irgendeine ID von A irgendeine ID von B blockiert? */
+/** Has any ID of A blocked any ID of B? */
 function frBlockiert(db, a, b) {
   const va = frMeineIds(db, a);
   const vb = frMeineIds(db, b);
@@ -432,7 +432,7 @@ function frAus(res, code, obj) {
   res.end(s);
 }
 
-/** Antworten und dabei speichern, falls sich etwas geaendert hat. */
+/** Answer and save while doing so, if something changed. */
 function frAntwort(res, code, obj) {
   if (frGeaendert) { frGeaendert = false; frSichern(); }
   frAus(res, code, obj);
@@ -482,8 +482,8 @@ function frAnfragen(res, db, ich, b) {
     return frAntwort(res, 409, { error: 'Ihr seid schon befreundet' });
 
   const ziel = { fvid: an, konto: frKontoVon(db, an) };
-  // Wer blockiert wurde, erfaehrt das nicht - sonst wird die Blockliste zum
-  // Melder. Nach aussen sieht es aus, als waere die Anfrage nicht moeglich.
+    // Whoever was blocked does not find out - otherwise the block list becomes a
+    // reporter. From the outside it looks as if the request were not possible.
   if (frBlockiert(db, ziel, ich))
     return frAntwort(res, 403, { error: 'Anfrage nicht moeglich' });
   if (frBlockiert(db, ich, ziel))
@@ -494,7 +494,7 @@ function frAnfragen(res, db, ich, b) {
   if (schon)
     return frAntwort(res, 409, { error: 'Anfrage laeuft schon', anfrage: frAnfrageAus(schon, ich) });
 
-  // Der andere hat MICH schon gefragt: dann sind sich beide einig.
+    // The other one has already asked ME: then both agree.
   const gegen = db.anfragen.find((x) => x.von_fvid === an && frAnMich(x, ich));
   if (gegen) {
     const f = frSchliessen(db, gegen, ich, meinName);
@@ -546,7 +546,7 @@ function frAnnehmen(res, db, ich, b) {
   if (!von) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
   const a = db.anfragen.find((x) => x.von_fvid === von && frAnMich(x, ich));
   if (!a) {
-    // Schon befreundet? Dann war es ein zweiter Klick, kein Fehler.
+        // Already friends? Then it was a second click, not an error.
     const da = frFreundschaft(db, ich, von);
     if (da) return frAntwort(res, 200, { ok: true, konto: ich.konto, freund: frFreundAus(db, da, ich) });
     return frAntwort(res, 404, { error: 'Keine offene Anfrage von dieser ID' });
@@ -555,7 +555,7 @@ function frAnnehmen(res, db, ich, b) {
   frAntwort(res, 200, { ok: true, konto: ich.konto, freund: frFreundAus(db, f, ich) });
 }
 
-/** Ablehnen (eingehend) bzw. die eigene Anfrage zurueckziehen (ausgehend). */
+/** Decline (incoming) or withdraw the own request (outgoing). */
 function frAblehnen(res, db, ich, b) {
   const wen = String(b.von || b.fvid || b.an || '').replace(/\D/g, '');
   if (!wen) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
@@ -600,7 +600,7 @@ function frBlockieren(res, db, ich, b) {
   frAntwort(res, 200, { ok: true, konto: ich.konto, blockiert: an });
 }
 
-/** Alles in einem Zug - das holt sich der Client beim Abgleich. */
+/** Everything in one go - the client fetches this during sync. */
 function frStand(res, db, ich) {
   frAntwort(res, 200, frStandDaten(db, ich));
 }
@@ -621,8 +621,8 @@ function frStandDaten(db, ich) {
 }
 
 /**
- * Konto an der eigenen Seite nachtragen. Wer sich erst nach der Freundschaft
- * anmeldet, sieht sie danach auch auf seinen anderen Geraeten.
+  * Add the account to the own side. Whoever logs in only after the friendship
+  * also sees it on their other devices afterwards.
  */
 function frNachziehen(db, ich) {
   if (!ich.konto) return;
@@ -759,7 +759,7 @@ function frEinladungWeg(res, db, ich, b) {
 
 // ------------------------------------------------------------------ Routen
 
-/** Gibt true zurueck, wenn die Anfrage hier beantwortet wurde. */
+/** Returns true if the request was answered here. */
 function freundeHandle(req, res) {
   const p = new URL(req.url, 'http://x').pathname;
   if (!p.startsWith('/fv/freunde')) return false;
@@ -804,7 +804,7 @@ function freundeHandle(req, res) {
   return true;
 }
 
-/** Der alte Weg: freunde.json (Geraete ohne Konto, IDs ohne Konto). */
+/** The old way: freunde.json (devices without account, IDs without account). */
 function frWeiter(p, res, db, ich, b) {
   try {
     switch (p) {
@@ -863,8 +863,8 @@ const server = http.createServer((req, res) => {
       return res.end('Link unbekannt oder schon aufgebraucht');
     }
     const name = (u.searchParams.get('name') || '').replace(/[\x00-\x1f"\\]/g, '').slice(0, 40);
-    // Marke des Codes (beim Erzeugen gespeichert) - sonst bekaeme ein
-    // Xoffi-Geraet die FreeViewer-Datei. ?brand= bleibt als Uebersteuerung.
+        // Brand of the code (stored at creation) - otherwise a
+        // Xoffi device would get the FreeViewer file. ?brand= stays as an override.
     const MARKEN = { freeviewer: 'freeviewer.exe', xoffi: 'x-remote.exe' };
     // r30: the download carries the product name of ITS brand (was always FreeViewer-...)
     const DL_NAMEN = { freeviewer: 'FreeViewer-Einrichtung.exe', xoffi: 'X-Remote-Einrichtung.exe' };
@@ -903,10 +903,10 @@ const server = http.createServer((req, res) => {
   }
   // ---- what is the newest build? ----
   if (req.method === 'GET' && req.url === '/fv/version') {
-    // JEDE MARKE IHREN EIGENEN FEED. Frueher stand hier hart 'version.json':
-    // damit bekam auch ein X-Remote-Client die FreeViewer-Datei angeboten und
-    // haette sich beim naechsten Update in eine andere Marke verwandelt.
-    // Entschieden wird nach der Adresse, ueber die gefragt wurde.
+        // EVERY BRAND ITS OWN FEED. Previously 'version.json' was hard-coded here:
+        // that way an X-Remote client was also offered the FreeViewer file and
+        // would have turned into another brand on the next update.
+        // Decided by the address that was asked for.
     const host = String(req.headers.host || '').toLowerCase();
     const feed = /(^|\.)remote\.fleitec\.com|xoffi/.test(host) ? 'version-xoffi.json' : 'version.json';
     let j = null;
@@ -991,7 +991,7 @@ const server = http.createServer((req, res) => {
         const meta = {
           version, sha256: sha, size, notes,
           file: name,
-          // Jede Marke zeigt auf ihre eigene Adresse.
+                    // Each brand points to its own address.
           url: (/^x-remote/i.test(name) ? 'https://remote.fleitec.com/fv/dist/'
                                         : 'https://freeviewer.fleitec.com/fv/dist/') + name,
           published: new Date().toISOString(),
@@ -1011,12 +1011,12 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ platform: 'mac', mac_version: version, mac_sha256: sha, mac_size: size, mac_url: meta.url, mac_sig: sigHex || undefined }));
         }
         if (sigHex) meta.sig = sigHex;
-        // noversion=1: nur die Datei ablegen (z. B. Mac-Zip aus der CI) -
+                // noversion=1: only put the file down (e.g. Mac zip from CI) -
         // version.json bleibt dem Haupt-Build vorbehalten.
         if (u.searchParams.get('noversion') !== '1') {
           // Feed je nach Datei: x-remote.* -> version-xoffi.json (mac_*-Felder erhalten)
           const feed = /^x-remote/i.test(name) ? 'version-xoffi.json' : 'version.json';
-          // Mac-Felder gehoeren dem Mac-Build: sie bleiben IMMER erhalten,
+                    // Mac fields belong to the Mac build: they ALWAYS stay
           // egal welche Marke gerade eine Windows-Exe veroeffentlicht.
           let outmeta = Object.assign({}, meta);
           try {
