@@ -51,6 +51,9 @@ use serde::{Deserialize, Serialize};
 /// Wie oft im Hintergrund abgeglichen wird, wenn nichts los ist.
 const ABGLEICH_SEKUNDEN: u64 = 20;
 
+/// Kennt der Relay keine Einladungen, wird so lange nicht danach gefragt.
+const EINLADUNG_PAUSE_SEKUNDEN: u64 = 600;
+
 /// Obergrenze, damit eine kaputte Antwort die Datei nicht sprengt.
 const MAX_FREUNDE: usize = 500;
 const MAX_ANFRAGEN: usize = 200;
@@ -286,6 +289,12 @@ pub enum Fehler {
     KontoNoetig,
     /// Der Relay hat abgelehnt oder war nicht erreichbar.
     Netz(String),
+    /// Der Relay kennt noch keine Meeting-Einladungen (aelterer Stand).
+    KeinKanal,
+    /// Der Freund hat (noch) keinen FreeViewer-PC, an den eine Einladung gehen koennte.
+    KeinGeraet,
+    /// Ein Link mit Ende-zu-Ende-Schluessel darf nie ueber den Relay.
+    LinkMitSchluessel,
 }
 
 impl std::fmt::Display for Fehler {
@@ -300,6 +309,11 @@ impl std::fmt::Display for Fehler {
             Fehler::UngueltigeId => "Das ist keine gueltige FreeViewer-ID oder kein @Name".to_string(),
             Fehler::KontoNoetig => "Fuer @Namen bitte zuerst mit dem Fleitec-Konto anmelden".to_string(),
             Fehler::Netz(m) => m.clone(),
+            Fehler::KeinKanal => "Der Relay kann noch keine Einladungen zustellen".to_string(),
+            Fehler::KeinGeraet => "Dieser Freund hat noch keinen FreeViewer-PC".to_string(),
+            Fehler::LinkMitSchluessel => {
+                "Ein Link mit Schluessel geht nicht ueber den Relay".to_string()
+            }
         };
         write!(f, "{}", s)
     }
@@ -319,6 +333,12 @@ pub enum Meldung {
     Angenommen(String),
     Abgelehnt(String),
     Entfernt(String),
+    /// Meeting-Einladung ist beim Relay (und damit beim Freund) angekommen.
+    EinladungGesendet(String),
+    /// Der Relay kann keine Einladungen zustellen: der Link muss von Hand zum Freund.
+    EinladungNurLink(String),
+    /// Ein Freund hat mich in ein Meeting eingeladen (Name, Titel).
+    EinladungErhalten(String, String),
     /// Der Relay hat abgelehnt (Text ist anzeigefertig).
     Fehlgeschlagen(String),
 }
@@ -795,7 +815,14 @@ pub fn url(relay_url: &str, was: &str) -> String {
 fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_json::Value, Fehler> {
     let ziel = url(relay_url, was);
     let body = rumpf.to_string();
-    let (status, text) = match ureq::post(&ziel)
+    // Auch bei 4xx/5xx den Rumpf lesen: nur so kommen die deutschen Saetze des
+    // Relays an (und ein alter Relay ohne /einladen ist als 404 "unbekannt" erkennbar).
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let (status, text) = match agent
+        .post(&ziel)
         .header("content-type", "application/json")
         .send(body.as_str())
     {
@@ -813,6 +840,11 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
     let wert: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
     if status == 200 {
         return Ok(wert);
+    }
+    // Ein Relay vor Patch 0005 kennt /einladen nicht und antwortet 404 "unbekannt"
+    // (ein bekannter Weg mit unbekannter ID sagt etwas anderes).
+    if status == 404 && wert.get("error").and_then(|e| e.as_str()) == Some("unbekannt") {
+        return Err(Fehler::KeinKanal);
     }
     let meldung = wert
         .get("error")
@@ -889,6 +921,141 @@ pub fn sende_blockieren(
     ruf(relay, "blockieren", v).map(|_| ())
 }
 
+// ============================================ Meeting-Einladung an Freunde (r32)
+//
+// Ablauf: Knopf "Meeting" -> Meeting anlegen -> Einladung (nur die https-Adresse)
+// geht ueber den Relay in das Postfach des Freundes (`/einladen`), der Freund
+// holt sie beim naechsten Abgleich (`/einladungen`) und raeumt sie mit
+// `/einladung-weg` wieder ab. Alles ist zusaetzlich: ein Relay ohne diese Wege
+// antwortet 404 "unbekannt" -> `Fehler::KeinKanal`, dann bleibt es beim alten
+// Weg (Link in der Zwischenablage). Der Ende-zu-Ende-Schluessel steht im
+// Fragment (#k=) und geht NIE ueber den Relay - solche Links werden hier schon
+// vor dem Senden abgewiesen (und vom Relay noch einmal).
+
+/// Eine Meeting-Einladung eines Freundes, die im Postfach liegt.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Einladung {
+    /// Eindeutige Nummer beim Relay (zum Abraeumen).
+    #[serde(default)]
+    pub id: String,
+    /// FreeViewer-ID des Absenders.
+    #[serde(default)]
+    pub fvid: String,
+    /// Name des Absenders (leer = ID anzeigen).
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub titel: String,
+    /// https-Adresse des Meetings.
+    #[serde(default)]
+    pub link: String,
+    /// Unix Sekunden.
+    #[serde(default)]
+    pub wann: u64,
+    #[serde(default)]
+    pub online: bool,
+}
+
+impl Einladung {
+    /// Wer eingeladen hat, als Text.
+    pub fn von(&self) -> String {
+        if self.name.trim().is_empty() {
+            crate::partners::pretty_id(&self.fvid)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct EinladungenAntwort {
+    #[serde(default)]
+    einladungen: Vec<Einladung>,
+}
+
+/// An welchen PC des Freundes die Einladung geht: ein erreichbarer zuerst,
+/// sonst der erste. Leer = der Freund hat keinen FreeViewer-PC.
+pub fn einladung_ziel(fr: &Freund) -> String {
+    let g = fr
+        .geraete
+        .iter()
+        .find(|g| g.online && ist_id(&g.fvid))
+        .or_else(|| fr.geraete.iter().find(|g| ist_id(&g.fvid)));
+    match g {
+        Some(g) => normalisieren(&g.fvid),
+        None if ist_id(&fr.fvid) => normalisieren(&fr.fvid),
+        None => String::new(),
+    }
+}
+
+/// Der Link, der zum Relay darf: nie mit Fragment (dort steht der Schluessel).
+pub fn link_fuer_relay(link: &str) -> Option<String> {
+    let l = link.trim();
+    if l.is_empty() || l.contains('#') {
+        return None;
+    }
+    Some(l.to_string())
+}
+
+/// Darf ein eingegangener Link geoeffnet werden? Nur die Meeting-Seite dieser
+/// Marke (`base`, z. B. https://meet.fleitec.com) - ein Freund (oder wer sich
+/// als einer ausgibt) soll keine beliebige Adresse im Browser aufmachen koennen.
+pub fn einladung_link_ok(link: &str, base: &str) -> bool {
+    let l = link.trim();
+    let b = base.trim().trim_end_matches('/');
+    if b.is_empty() || l.is_empty() || l.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    match l.strip_prefix(b) {
+        // "https://meet.fleitec.com.evil.de" und "...com@evil.de" fallen hier durch
+        Some(rest) => rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'),
+        None => false,
+    }
+}
+
+/// Postfach abholen. `Fehler::KeinKanal` = aelterer Relay.
+pub fn hole_einladungen(
+    relay: &str,
+    geheimnis: &str,
+    token: &str,
+    name: &str,
+) -> Result<Vec<Einladung>, Fehler> {
+    let v = ruf(relay, "einladungen", ausweis(geheimnis, token, name))?;
+    let a: EinladungenAntwort = serde_json::from_value(v)
+        .map_err(|e| Fehler::Netz(format!("Antwort unverstaendlich: {}", e)))?;
+    Ok(a.einladungen)
+}
+
+/// Einladung an einen PC des Freundes. `true` = zugestellt.
+pub fn sende_einladung(
+    relay: &str,
+    geheimnis: &str,
+    token: &str,
+    name: &str,
+    an: &str,
+    titel: &str,
+    link: &str,
+) -> Result<bool, Fehler> {
+    let mut v = mit(ausweis(geheimnis, token, name), "an", &normalisieren(an));
+    v["titel"] = serde_json::Value::String(titel.to_string());
+    v["link"] = serde_json::Value::String(link.to_string());
+    let a = ruf(relay, "einladen", v)?;
+    Ok(a.get("zugestellt").and_then(|x| x.as_bool()).unwrap_or(true))
+}
+
+/// Einladung(en) im Postfach abraeumen.
+pub fn sende_einladung_weg(
+    relay: &str,
+    geheimnis: &str,
+    token: &str,
+    name: &str,
+    ids: &[String],
+) -> Result<(), Fehler> {
+    let mut v = ausweis(geheimnis, token, name);
+    v["ids"] = serde_json::json!(ids);
+    ruf(relay, "einladung-weg", v).map(|_| ())
+}
+
 // ================================================================= Dienst
 
 /// Der Freunde-Dienst: haelt die Liste, gleicht im Hintergrund ab und laesst
@@ -920,6 +1087,12 @@ pub struct Dienst {
     letzter: AtomicU64,
     /// Letzter Abgleich hat geklappt?
     verbunden: AtomicBool,
+    /// Eingegangene Meeting-Einladungen (Zwischenspeicher, nicht auf der Platte).
+    einladungen: Mutex<Vec<Einladung>>,
+    /// Schon gemeldete Einladungs-IDs - jede wird nur EINMAL gemeldet.
+    einl_gemeldet: Mutex<std::collections::HashSet<String>>,
+    /// Bis wann (unix s) nicht nach Einladungen gefragt wird, weil der Relay sie nicht kennt.
+    einl_pause_bis: AtomicU64,
 }
 
 impl Dienst {
@@ -937,6 +1110,9 @@ impl Dienst {
             sofort: Arc::new(AtomicBool::new(false)),
             letzter: AtomicU64::new(0),
             verbunden: AtomicBool::new(false),
+            einladungen: Mutex::new(Vec::new()),
+            einl_gemeldet: Mutex::new(std::collections::HashSet::new()),
+            einl_pause_bis: AtomicU64::new(0),
         })
     }
 
@@ -1172,6 +1348,92 @@ impl Dienst {
         Ok(())
     }
 
+    // ------------------------------------------------- Meeting-Einladungen (r32)
+
+    /// Die Einladungen, die gerade im Postfach liegen (neueste zuerst).
+    pub fn einladungen(&self) -> Vec<Einladung> {
+        self.einladungen.lock().unwrap().clone()
+    }
+
+    /// Einem Freund ein angelegtes Meeting schicken. Der Link darf keinen
+    /// Schluessel tragen. Sofort zulaessig oder nicht; die Zustellung laeuft im
+    /// Hintergrund und meldet sich als `EinladungGesendet` bzw. `EinladungNurLink`
+    /// (Relay ohne Postfach: dann hilft nur die Zwischenablage).
+    pub fn meeting_einladen(&self, fr: &Freund, titel: &str, link: &str) -> Result<(), Fehler> {
+        let an = einladung_ziel(fr);
+        if an.is_empty() {
+            return Err(Fehler::KeinGeraet);
+        }
+        let link = link_fuer_relay(link).ok_or(Fehler::LinkMitSchluessel)?;
+        let titel = titel.trim().to_string();
+        let wer = fr.anzeige();
+        let (relay, geheimnis, token, name) = self.zugang();
+        let ich = self.klon_briefkasten();
+        std::thread::spawn(move || {
+            match sende_einladung(&relay, &geheimnis, &token, &name, &an, &titel, &link) {
+                Ok(_) => ich.melde(Meldung::EinladungGesendet(wer)),
+                Err(Fehler::KeinKanal) => ich.melde(Meldung::EinladungNurLink(wer)),
+                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+            }
+        });
+        Ok(())
+    }
+
+    /// Eine Einladung abhaken (angenommen oder verworfen): sie verschwindet
+    /// hier sofort, beim Relay im Hintergrund.
+    pub fn einladung_erledigt(&self, id: &str) {
+        self.einladungen.lock().unwrap().retain(|e| e.id != id);
+        let (relay, geheimnis, token, name) = self.zugang();
+        let ids = vec![id.to_string()];
+        std::thread::spawn(move || {
+            let _ = sende_einladung_weg(&relay, &geheimnis, &token, &name, &ids);
+        });
+    }
+
+    /// Neuen Postfach-Stand uebernehmen; meldet jede NEUE Einladung genau einmal.
+    /// Gibt zurueck, wie viele neu waren.
+    pub fn einladungen_uebernehmen(&self, mut liste: Vec<Einladung>) -> usize {
+        liste.retain(|e| !e.id.is_empty() && !e.link.is_empty());
+        if liste.len() > 50 {
+            liste.drain(50..);
+        }
+        let mut neu = Vec::new();
+        {
+            let mut gemeldet = self.einl_gemeldet.lock().unwrap();
+            for e in &liste {
+                if gemeldet.insert(e.id.clone()) {
+                    neu.push(e.clone());
+                }
+            }
+            if gemeldet.len() > 500 {
+                gemeldet.clear();
+                gemeldet.extend(liste.iter().map(|e| e.id.clone()));
+            }
+        }
+        *self.einladungen.lock().unwrap() = liste;
+        for e in &neu {
+            self.melde(Meldung::EinladungErhalten(e.von(), e.titel.clone()));
+        }
+        neu.len()
+    }
+
+    fn einladungen_holen(&self) {
+        if jetzt() < self.einl_pause_bis.load(Ordering::Relaxed) {
+            return;
+        }
+        let (relay, geheimnis, token, name) = self.zugang();
+        match hole_einladungen(&relay, &geheimnis, &token, &name) {
+            Ok(liste) => {
+                self.einladungen_uebernehmen(liste);
+            }
+            // Aelterer Relay: eine Weile nicht mehr fragen (er kann ja aktualisiert werden).
+            Err(Fehler::KeinKanal) => self
+                .einl_pause_bis
+                .store(jetzt() + EINLADUNG_PAUSE_SEKUNDEN, Ordering::Relaxed),
+            Err(_) => {}
+        }
+    }
+
     /// Sofortigen Abgleich anstossen (kehrt sofort zurueck).
     pub fn synchronisieren(&self) {
         self.sofort.store(true, Ordering::SeqCst);
@@ -1200,11 +1462,14 @@ impl Dienst {
         match ergebnis {
             Ok(_) => {
                 self.verbunden.store(true, Ordering::Relaxed);
-                let b = self.buch.lock().unwrap();
-                self.melde(Meldung::Abgeglichen {
-                    freunde: b.freunde.len(),
-                    offen: b.anfragen.len(),
-                });
+                {
+                    let b = self.buch.lock().unwrap();
+                    self.melde(Meldung::Abgeglichen {
+                        freunde: b.freunde.len(),
+                        offen: b.anfragen.len(),
+                    });
+                }
+                self.einladungen_holen();
             }
             Err(e) => {
                 self.verbunden.store(false, Ordering::Relaxed);
@@ -1748,5 +2013,251 @@ mod tests {
         assert!(b.ist_freund("222222222"));
         assert_eq!(b.freunde[0].schluessel(), "222222222");
         assert!(b.ist_blockiert("333333333"));
+    }
+
+    // ------------------------------------------------ r32: Meeting-Einladung
+
+    fn freund_mit(fvid: &str, geraete: &[(&str, bool)]) -> Freund {
+        Freund {
+            fvid: fvid.to_string(),
+            name: "Anna".to_string(),
+            geraete: geraete
+                .iter()
+                .map(|(id, on)| FreundGeraet {
+                    fvid: id.to_string(),
+                    label: String::new(),
+                    online: *on,
+                    gesehen: 0,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Ein Mini-Relay: nimmt EINE Verbindung an, merkt sich die Anfrage und
+    /// antwortet mit Status + Rumpf. Liefert (Port, Empfangenes).
+    fn mini_relay(status: u16, rumpf: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                // bis Kopf + Rumpf da sind
+                loop {
+                    let n = c.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(i) = text.find("\r\n\r\n") {
+                        let len = text
+                            .lines()
+                            .find_map(|z| {
+                                z.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= i + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+                let antwort = format!(
+                    "HTTP/1.1 {} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    status,
+                    rumpf.len(),
+                    rumpf
+                );
+                let _ = c.write_all(antwort.as_bytes());
+            }
+        });
+        (port, rx)
+    }
+
+    #[test]
+    fn die_einladung_geht_an_den_erreichbaren_pc() {
+        let f = freund_mit("111111111", &[("111111111", false), ("222222222", true)]);
+        assert_eq!(einladung_ziel(&f), "222222222");
+        let f = freund_mit("111111111", &[("111111111", false), ("222222222", false)]);
+        assert_eq!(einladung_ziel(&f), "111111111");
+    }
+
+    #[test]
+    fn ohne_pc_gibt_es_kein_ziel() {
+        let f = Freund {
+            person: "u_anna".into(),
+            ..Default::default()
+        };
+        assert_eq!(einladung_ziel(&f), "");
+        // nur die alte Liste: die ID selbst
+        let f = Freund {
+            fvid: "333 444 555".into(),
+            ..Default::default()
+        };
+        assert_eq!(einladung_ziel(&f), "333444555");
+    }
+
+    #[test]
+    fn ein_link_mit_schluessel_geht_nie_zum_relay() {
+        assert_eq!(
+            link_fuer_relay(" https://meet.fleitec.com/?room=1&pass=2 ").as_deref(),
+            Some("https://meet.fleitec.com/?room=1&pass=2")
+        );
+        assert!(link_fuer_relay("https://meet.fleitec.com/?room=1#k=abc").is_none());
+        assert!(link_fuer_relay("   ").is_none());
+    }
+
+    #[test]
+    fn nur_die_eigene_meeting_seite_wird_geoeffnet() {
+        let b = "https://meet.fleitec.com";
+        assert!(einladung_link_ok("https://meet.fleitec.com/?room=1-2-3&pass=x", b));
+        assert!(einladung_link_ok("https://meet.fleitec.com", b));
+        assert!(einladung_link_ok("https://meet.fleitec.com?room=1", b));
+        // Basis mit Schraegstrich am Ende ist dasselbe
+        assert!(einladung_link_ok("https://meet.fleitec.com/?room=1", "https://meet.fleitec.com/"));
+        assert!(!einladung_link_ok("https://meet.fleitec.com.evil.de/?room=1", b));
+        assert!(!einladung_link_ok("https://meet.fleitec.com@evil.de/", b));
+        assert!(!einladung_link_ok("http://meet.fleitec.com/?room=1", b));
+        assert!(!einladung_link_ok("file:///C:/Windows/System32/calc.exe", b));
+        assert!(!einladung_link_ok("https://meet.fleitec.com/?room=1 --x", b));
+        assert!(!einladung_link_ok("", b));
+        assert!(!einladung_link_ok("https://meet.fleitec.com/", ""));
+    }
+
+    #[test]
+    fn die_antwort_mit_einladungen_laesst_sich_lesen() {
+        let roh = r#"{"ok":true,"fvid":"1","konto":"","einladungen":[
+            {"id":"a1","fvid":"222222222","name":"Anna","titel":"Mit Justin","link":"https://meet.fleitec.com/?room=1&pass=2","wann":5,"online":true,"neues_feld":1}]}"#;
+        let a: EinladungenAntwort = serde_json::from_str(roh).unwrap();
+        assert_eq!(a.einladungen.len(), 1);
+        assert_eq!(a.einladungen[0].von(), "Anna");
+        assert_eq!(a.einladungen[0].titel, "Mit Justin");
+        // ohne Postfach-Feld (alter Relay mit 200?) bleibt es leer
+        let a: EinladungenAntwort = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(a.einladungen.is_empty());
+    }
+
+    #[test]
+    fn jede_neue_einladung_wird_nur_einmal_gemeldet() {
+        eigener_ordner("einl-melden");
+        let d = Dienst::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
+        let e = |id: &str| Einladung {
+            id: id.into(),
+            fvid: "222222222".into(),
+            name: "Anna".into(),
+            titel: "Mit Justin".into(),
+            link: "https://meet.fleitec.com/?room=1&pass=2".into(),
+            ..Default::default()
+        };
+        assert_eq!(d.einladungen_uebernehmen(vec![e("a"), e("b")]), 2);
+        assert_eq!(d.einladungen().len(), 2);
+        // gleicher Stand beim naechsten Abgleich: nichts Neues
+        assert_eq!(d.einladungen_uebernehmen(vec![e("a"), e("b")]), 0);
+        assert_eq!(d.einladungen_uebernehmen(vec![e("a"), e("b"), e("c")]), 1);
+        let mut erhalten = 0;
+        while let Some(m) = d.meldung() {
+            if let Meldung::EinladungErhalten(von, titel) = m {
+                assert_eq!(von, "Anna");
+                assert_eq!(titel, "Mit Justin");
+                erhalten += 1;
+            }
+        }
+        assert_eq!(erhalten, 3);
+        // Eintraege ohne ID oder Link sind Muell und werden ignoriert
+        assert_eq!(
+            d.einladungen_uebernehmen(vec![Einladung::default(), Einladung { id: "x".into(), ..Default::default() }]),
+            0
+        );
+        assert!(d.einladungen().is_empty());
+    }
+
+    #[test]
+    fn der_einladungslink_mit_schluessel_wird_schon_vor_dem_senden_abgewiesen() {
+        eigener_ordner("einl-schluessel");
+        let d = Dienst::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
+        let f = freund_mit("111111111", &[("111111111", true)]);
+        assert_eq!(
+            d.meeting_einladen(&f, "x", "https://meet.fleitec.com/?room=1#k=abc"),
+            Err(Fehler::LinkMitSchluessel)
+        );
+        let ohne_pc = Freund {
+            person: "u_anna".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            d.meeting_einladen(&ohne_pc, "x", "https://meet.fleitec.com/?room=1"),
+            Err(Fehler::KeinGeraet)
+        );
+    }
+
+    #[test]
+    fn ein_relay_ohne_postfach_ist_kein_kanal() {
+        // 404 {"error":"unbekannt"} = Relay vor Patch 0005
+        let (port, rx) = mini_relay(404, r#"{"error":"unbekannt"}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let r = sende_einladung(&relay, &"ab".repeat(16), "", "Test", "222222222", "T", "https://meet.fleitec.com/?room=1");
+        assert_eq!(r, Err(Fehler::KeinKanal));
+        let roh = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(roh.starts_with("POST /fv/freunde/einladen "), "{}", roh);
+
+        // eine unbekannte ID ist DAGEGEN ein normaler Fehler (der Weg existiert)
+        let (port, _rx) = mini_relay(404, r#"{"error":"Diese FreeViewer-ID gibt es nicht"}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let r = sende_einladung(&relay, &"ab".repeat(16), "", "Test", "222222222", "T", "https://meet.fleitec.com/?room=1");
+        assert_eq!(r, Err(Fehler::Netz("Diese FreeViewer-ID gibt es nicht".into())));
+    }
+
+    #[test]
+    fn die_einladung_traegt_ziel_titel_und_link_zum_relay() {
+        let (port, rx) = mini_relay(200, r#"{"ok":true,"zugestellt":true}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let r = sende_einladung(
+            &relay,
+            &"ab".repeat(16),
+            "tok",
+            "Mein PC",
+            "222 222 222",
+            "Mit Anna",
+            "https://meet.fleitec.com/?room=1&pass=2",
+        );
+        assert_eq!(r, Ok(true));
+        let roh = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let rumpf = roh.split("\r\n\r\n").nth(1).unwrap_or("");
+        let v: serde_json::Value = serde_json::from_str(rumpf).unwrap();
+        assert_eq!(v["an"], "222222222");
+        assert_eq!(v["titel"], "Mit Anna");
+        assert_eq!(v["link"], "https://meet.fleitec.com/?room=1&pass=2");
+        assert_eq!(v["secret"], "ab".repeat(16));
+        assert_eq!(v["token"], "tok");
+        assert!(!rumpf.contains("#k="));
+    }
+
+    #[test]
+    fn das_postfach_holen_und_abraeumen() {
+        let (port, rx) = mini_relay(
+            200,
+            r#"{"ok":true,"einladungen":[{"id":"e1","fvid":"222222222","name":"Anna","titel":"T","link":"https://meet.fleitec.com/?room=1&pass=2","wann":1}]}"#,
+        );
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let l = hole_einladungen(&relay, &"ab".repeat(16), "", "Test").unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].id, "e1");
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().starts_with("POST /fv/freunde/einladungen "));
+
+        let (port, rx) = mini_relay(200, r#"{"ok":true,"weg":1}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        assert_eq!(
+            sende_einladung_weg(&relay, &"ab".repeat(16), "", "Test", &["e1".to_string()]),
+            Ok(())
+        );
+        let roh = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(roh.starts_with("POST /fv/freunde/einladung-weg "));
+        assert!(roh.contains(r#""ids":["e1"]"#), "{}", roh);
     }
 }

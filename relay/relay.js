@@ -233,6 +233,13 @@ const FR_MAX_FREUNDE = 500;
 const FR_ANFRAGE_TTL = 30 * 24 * 3600 * 1000;  // unbeantwortete Anfragen
 const FR_GRAB_TTL = 90 * 24 * 3600 * 1000;     // Grabsteine geloeschter Freundschaften
 const FR_MAX_BODY = 64 * 1024;
+// r32: meeting invitations between friends (a small mailbox, 24 h)
+const FR_EINL_TTL = 24 * 3600 * 1000;          // an invitation that nobody picked up
+const FR_EINL_MAX_OFFEN = 20;                  // waiting invitations per recipient device
+const FR_EINL_KURZ_MS = 60 * 1000;             // burst limit per sender ...
+const FR_EINL_KURZ_MAX = 6;                    // ... this many per minute
+const FR_EINL_TAG_MAX = 100;                   // ... and per day
+const frEinlTakt = new Map();                  // sender fvid -> [timestamps] (memory only)
 
 let fr = null;
 let frGeaendert = false;
@@ -248,6 +255,7 @@ function frLaden() {
   if (!Array.isArray(fr.freundschaften)) fr.freundschaften = [];
   if (!Array.isArray(fr.anfragen)) fr.anfragen = [];
   if (!Array.isArray(fr.blocks)) fr.blocks = [];
+  if (!Array.isArray(fr.einladungen)) fr.einladungen = [];
   if (!fr.konten || typeof fr.konten !== 'object') fr.konten = {};
   if (!fr.takt || typeof fr.takt !== 'object') fr.takt = {};
   return fr;
@@ -269,7 +277,8 @@ function frSichern() {
 /** Abgelaufene Anfragen, alte Grabsteine und alte Zaehler wegraeumen. */
 function frAufraeumen(db) {
   const jetzt = Date.now();
-  const vorher = db.anfragen.length + db.freundschaften.length;
+  const vorher = db.anfragen.length + db.freundschaften.length + db.einladungen.length;
+  db.einladungen = db.einladungen.filter((e) => jetzt - (e.wann || 0) < FR_EINL_TTL);
   db.anfragen = db.anfragen.filter((a) => jetzt - (a.wann || 0) < FR_ANFRAGE_TTL);
   db.freundschaften = db.freundschaften.filter(
     (f) => !f.entfernt || jetzt - (f.entfernt_am || 0) < FR_GRAB_TTL);
@@ -277,7 +286,7 @@ function frAufraeumen(db) {
     const v = (db.takt[k] || []).filter((t) => jetzt - t < FR_TAG_MS);
     if (v.length) db.takt[k] = v; else delete db.takt[k];
   }
-  return vorher !== db.anfragen.length + db.freundschaften.length;
+  return vorher !== db.anfragen.length + db.freundschaften.length + db.einladungen.length;
 }
 
 // ------------------------------------------------------------- wer ruft an?
@@ -628,6 +637,126 @@ function frNachziehen(db, ich) {
   }
 }
 
+// ------------------------------------------------- r32: Meeting-Einladungen
+
+/**
+ * Is `an` (a FreeViewer id) one of my friends' devices? Old store first, then
+ * the address book: the book's own /stand answer is captured through the same
+ * `alt` hook buch.js uses (no change to buch.js needed).
+ * cb(true|false)
+ */
+function frIstFreundGeraet(db, ich, b, an, cb) {
+  if (frFreundschaft(db, ich, an)) return cb(true);
+  if (!(buch && b.token)) return cb(false);
+  let erledigt = false;
+  const fertig = (ok) => { if (!erledigt) { erledigt = true; cb(ok); } };
+  const alt = {
+    stand: () => frStandDaten(db, ich),
+    weiter: () => fertig(false),
+    antwort: (_res, code, obj) => {
+      if (code !== 200 || !obj) return fertig(false);
+      const hit = (obj.freunde || []).some((f) => f && (f.fvid === an
+        || (Array.isArray(f.geraete) && f.geraete.some((g) => g && g.fvid === an))));
+      fertig(hit);
+    },
+    zustand: (id) => {
+      const e = meta[id] || {};
+      return { online: hosts.has(id), gesehen: e.seen || 0, name: cleanName(e.name || '') };
+    },
+  };
+  buch.handle('/fv/freunde/stand', b, ich, null, alt).then((ok) => {
+    if (!ok) fertig(false);
+  }).catch(() => fertig(false));
+}
+
+/** Only a plain https link to a meeting - and NEVER an end-to-end key. */
+function frEinlLink(link) {
+  const l = String(link || '').trim();
+  if (l.length < 12 || l.length > 600) return '';
+  if (!/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[^\s\x00-\x1f"'<>\\]*)?$/.test(l)) return '';
+  if (l.includes('#')) return ''; // the key lives in the fragment and must never reach the relay
+  return l;
+}
+
+function frEinladen(res, db, ich, b) {
+  const an = String(b.an || b.fvid || '').replace(/\D/g, '');
+  const link = frEinlLink(b.link);
+  const titel = String(b.titel || '').replace(/[\x00-\x1f]/g, '').trim().slice(0, 80);
+  if (!an) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
+  if (!link) return frAntwort(res, 400, { error: 'Link ungueltig (nur https, ohne Schluessel)' });
+  if (an === ich.fvid || frMeineIds(db, ich).includes(an))
+    return frAntwort(res, 400, { error: 'Das ist ein eigenes Geraet' });
+  const jetzt = Date.now();
+  const takt = (frEinlTakt.get(ich.fvid) || []).filter((t) => jetzt - t < FR_TAG_MS);
+  if (takt.filter((t) => jetzt - t < FR_EINL_KURZ_MS).length >= FR_EINL_KURZ_MAX)
+    return frAntwort(res, 429, { error: 'Zu viele Einladungen - bitte kurz warten' });
+  if (takt.length >= FR_EINL_TAG_MAX)
+    return frAntwort(res, 429, { error: 'Zu viele Einladungen heute' });
+  frIstFreundGeraet(db, ich, b, an, (freund) => {
+    if (!freund) return frAntwort(res, 403, { error: 'Einladung nicht moeglich - kein Freund' });
+    const ziel = { fvid: an, konto: frKontoVon(db, an) };
+    // A recipient who blocked me must not learn about it: report success, deliver nothing.
+    if (frBlockiert(db, ziel, ich))
+      return frAntwort(res, 200, { ok: true, konto: ich.konto, zugestellt: false });
+    if (!usedIds().has(an)) return frAntwort(res, 404, { error: 'Diese FreeViewer-ID gibt es nicht' });
+    if (db.einladungen.filter((e) => e.an_fvid === an).length >= FR_EINL_MAX_OFFEN)
+      return frAntwort(res, 429, { error: 'Der Freund hat zu viele offene Einladungen' });
+    // the same link twice in a row to the same device = one entry (refresh)
+    const alt = db.einladungen.find((e) => e.an_fvid === an && e.von_fvid === ich.fvid && e.link === link);
+    if (alt) { alt.wann = jetzt; alt.titel = titel || alt.titel; }
+    else {
+      db.einladungen.push({
+        id: crypto.randomBytes(8).toString('hex'),
+        von_fvid: ich.fvid,
+        von_konto: ich.konto,
+        von_name: cleanName(b.name) || frName(ich.fvid, ''),
+        an_fvid: an,
+        an_konto: ziel.konto,
+        titel,
+        link,
+        wann: jetzt,
+      });
+    }
+    takt.push(jetzt);
+    frEinlTakt.set(ich.fvid, takt);
+    if (frEinlTakt.size > 5000) frEinlTakt.clear();
+    frMerk();
+    frLog('Einladung', ich.fvid, '->', an);
+    frAntwort(res, 200, { ok: true, konto: ich.konto, zugestellt: true });
+  });
+}
+
+function frEinladungAus(e) {
+  return {
+    id: e.id,
+    fvid: e.von_fvid,
+    name: frName(e.von_fvid, e.von_name),
+    titel: e.titel || '',
+    link: e.link,
+    wann: Math.floor((e.wann || 0) / 1000),
+    online: hosts.has(e.von_fvid),
+  };
+}
+
+/** The invitations waiting for me (any device of my account). */
+function frEinladungen(res, db, ich) {
+  const meine = frMeineIds(db, ich);
+  const liste = db.einladungen.filter((e) => meine.includes(e.an_fvid))
+    .sort((a, b) => (b.wann || 0) - (a.wann || 0)).map(frEinladungAus);
+  frAntwort(res, 200, { ok: true, fvid: ich.fvid, konto: ich.konto, einladungen: liste });
+}
+
+/** Mark invitations as seen/handled (remove them). b.id or b.ids[]. */
+function frEinladungWeg(res, db, ich, b) {
+  const ids = (Array.isArray(b.ids) ? b.ids : [b.id]).map((x) => String(x || '')).filter(Boolean).slice(0, 50);
+  const meine = frMeineIds(db, ich);
+  const vorher = db.einladungen.length;
+  db.einladungen = db.einladungen.filter((e) => !(ids.includes(e.id) && meine.includes(e.an_fvid)));
+  const weg = vorher - db.einladungen.length;
+  if (weg) frMerk();
+  frAntwort(res, 200, { ok: true, konto: ich.konto, weg });
+}
+
 // ------------------------------------------------------------------ Routen
 
 /** Gibt true zurueck, wenn die Anfrage hier beantwortet wurde. */
@@ -643,6 +772,14 @@ function freundeHandle(req, res) {
       const db = frLaden();
       if (frAufraeumen(db)) frMerk();
       if (frKontoMerken(db, ich)) frMerk();
+      // r32: invitations are relay-local (not part of the address book)
+      if (p === '/fv/freunde/einladen' || p === '/fv/freunde/einladungen' || p === '/fv/freunde/einladung-weg') {
+        try {
+          if (p === '/fv/freunde/einladen') return frEinladen(res, db, ich, b);
+          if (p === '/fv/freunde/einladungen') return frEinladungen(res, db, ich);
+          return frEinladungWeg(res, db, ich, b);
+        } catch (e4) { frLog('Fehler: ' + e4.message); return frAus(res, 500, { error: 'Fehler' }); }
+      }
       if (buch && b.token) {
         const alt = {
           stand: () => frStandDaten(db, ich),
@@ -729,6 +866,8 @@ const server = http.createServer((req, res) => {
     // Marke des Codes (beim Erzeugen gespeichert) - sonst bekaeme ein
     // Xoffi-Geraet die FreeViewer-Datei. ?brand= bleibt als Uebersteuerung.
     const MARKEN = { freeviewer: 'freeviewer.exe', xoffi: 'x-remote.exe' };
+    // r30: the download carries the product name of ITS brand (was always FreeViewer-...)
+    const DL_NAMEN = { freeviewer: 'FreeViewer-Einrichtung.exe', xoffi: 'X-Remote-Einrichtung.exe' };
     const marke = (u.searchParams.get('brand') || (setups ? setups.brand_of(code) : 'freeviewer')).toLowerCase();
     const file = path.join(DIST, MARKEN[marke] || 'freeviewer.exe');
     if (!fs.existsSync(file)) { res.writeHead(500); return res.end('build fehlt'); }
@@ -738,7 +877,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {
       'content-type': 'application/octet-stream',
       'content-length': out.length,
-      'content-disposition': 'attachment; filename="FreeViewer-Einrichtung.exe"',
+      'content-disposition': 'attachment; filename="' + (DL_NAMEN[marke] || DL_NAMEN.freeviewer) + '"',
     });
     return res.end(out);
   }

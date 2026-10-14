@@ -3270,7 +3270,7 @@ impl App {
             let offen = self
                 .freunde
                 .as_ref()
-                .map(|d| d.eingehende().len())
+                .map(|d| d.eingehende().len() + d.einladungen().len())
                 .unwrap_or(0);
             let freunde_text = if offen > 0 {
                 format!("Freunde ({})", offen)
@@ -3775,7 +3775,8 @@ impl App {
                     // Frueher startete er erst beim Oeffnen der Seite - eine
                     // Freundschaftsanfrage, die niemand sieht, weil das
                     // Programm gar nicht danach fragt, ist keine Anfrage.
-                    let offen = self.freunde_dienst().eingehende().len();
+                    let fd = self.freunde_dienst();
+                    let offen = fd.eingehende().len() + fd.einladungen().len();
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
@@ -5092,12 +5093,28 @@ if let Some(path) = self.shot.clone() {
                 freunde::Meldung::Angenommen(w) => format!("{} ist jetzt dein Freund.", w),
                 freunde::Meldung::Abgelehnt(w) => format!("Anfrage von {} abgelehnt.", w),
                 freunde::Meldung::Entfernt(w) => format!("{} entfernt.", w),
+                freunde::Meldung::EinladungGesendet(w) => {
+                    format!("Einladung ist bei {} angekommen (Link liegt zusätzlich in der Zwischenablage).", w)
+                }
+                freunde::Meldung::EinladungNurLink(w) => format!(
+                    "Der Relay kann noch keine Einladungen zustellen – der Link liegt in der Zwischenablage, schick ihn {} (z. B. per Chat).",
+                    w
+                ),
+                freunde::Meldung::EinladungErhalten(w, t) => {
+                    if t.trim().is_empty() {
+                        format!("{} lädt dich in ein Meeting ein.", w)
+                    } else {
+                        format!("{} lädt dich ein: {}", w, t)
+                    }
+                }
                 freunde::Meldung::Fehlgeschlagen(t) => t,
             };
         }
 
         let mut verbinden: Option<String> = None;
-        let mut meeting_mit: Option<(String, String)> = None;
+        let mut meeting_mit: Option<freunde::Freund> = None;
+        // Einladungen, die ein Freund geschickt hat: (Nummer, Adresse, true = beitreten)
+        let mut einladung_aktion: Option<(String, String, bool)> = None;
 
         ui.horizontal(|ui| {
             ui.label(
@@ -5126,6 +5143,41 @@ if let Some(path) = self.shot.clone() {
             .color(p.muted),
         );
         ui.add_space(10.0);
+
+        // ------------------------------------------------ Meeting-Einladungen
+        // Ein Freund hat per Knopf ein Meeting angelegt und uns eingeladen.
+        for e in d.einladungen() {
+            egui::Frame::NONE
+                .fill(p.card)
+                .stroke(egui::Stroke::new(1.0, p.accent))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} lädt dich in ein Meeting ein", e.von()))
+                                    .size(13.0)
+                                    .strong()
+                                    .color(p.text),
+                            );
+                            if !e.titel.trim().is_empty() {
+                                ui.label(egui::RichText::new(&e.titel).size(11.0).color(p.muted));
+                            }
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Verwerfen").clicked() {
+                                einladung_aktion = Some((e.id.clone(), e.link.clone(), false));
+                            }
+                            if ui.button("Beitreten").clicked() {
+                                einladung_aktion = Some((e.id.clone(), e.link.clone(), true));
+                            }
+                        });
+                    });
+                });
+            ui.add_space(5.0);
+        }
 
         // ------------------------------------------------ neue Anfrage
         egui::Frame::NONE
@@ -5342,10 +5394,10 @@ if let Some(path) = self.shot.clone() {
                                     });
                                     if ui
                                         .button("Meeting")
-                                        .on_hover_text("Meeting anlegen und den Link in die Zwischenablage legen")
+                                        .on_hover_text("Meeting anlegen, Einladung an den Freund schicken und den Link in die Zwischenablage legen")
                                         .clicked()
                                     {
-                                        meeting_mit = Some((fr.fvid.clone(), fr.anzeige()));
+                                        meeting_mit = Some(fr.clone());
                                     }
                                 },
                             );
@@ -5360,19 +5412,60 @@ if let Some(path) = self.shot.clone() {
             self.hint = i18n::tf("link.control", &partners::pretty_id(&id));
             self.connect_to(&id);
         }
-        if let Some((_id, wer)) = meeting_mit {
-            // Ehrlich: der Link geht NICHT von selbst zum Freund - dafuer
-            // gaebe es heute keinen Weg im Relay. Er landet in der
-            // Zwischenablage, und das steht auch so da.
+        if let Some((id, link, beitreten)) = einladung_aktion {
+            if beitreten {
+                // Nur die Meeting-Seite dieser Marke aufmachen - nie eine beliebige
+                // Adresse, die ein Freund (oder ein Fremder in seinem Namen) schickt.
+                if freunde::einladung_link_ok(&link, &meet::base()) {
+                    match meet::open_window(&link) {
+                        Ok(()) => {
+                            self.freunde_meldung = "Meeting wird geöffnet.".to_string();
+                            d.einladung_erledigt(&id);
+                        }
+                        Err(e) => self.freunde_meldung = format!("Meeting geht nicht: {}", e),
+                    }
+                } else {
+                    self.freunde_meldung =
+                        "Dieser Einladungslink zeigt nicht auf die Meeting-Seite - nicht geöffnet.".to_string();
+                    d.einladung_erledigt(&id);
+                }
+            } else {
+                d.einladung_erledigt(&id);
+            }
+        }
+        if let Some(fr) = meeting_mit {
+            let wer = fr.anzeige();
             match meet::create(&format!("Mit {}", wer), false) {
                 Ok(m) => {
+                    // Der Link liegt IMMER in der Zwischenablage: klappt die
+                    // Zustellung nicht (alter Relay, Freund ohne PC), bleibt dieser Weg.
                     let link = meet::invite(&m);
                     ui.ctx().copy_text(link);
                     meet::merken(&m);
-                    self.freunde_meldung = format!(
-                        "Meeting angelegt, Einladung kopiert - schick sie {} (z. B. per Chat).",
-                        wer
-                    );
+                    // Zum Relay geht nur die nackte Adresse - und nur ohne
+                    // Ende-zu-Ende-Schluessel (der darf den Relay nie sehen).
+                    let relay_link = if m.e2e.is_empty() {
+                        Some(meet::join_url(&m.id, &m.passwort))
+                    } else {
+                        None
+                    };
+                    self.freunde_meldung = match relay_link
+                        .as_deref()
+                        .map(|l| d.meeting_einladen(&fr, &format!("Mit {}", wer), l))
+                    {
+                        Some(Ok(())) => format!(
+                            "Meeting angelegt - Einladung geht an {} (Link zusätzlich kopiert).",
+                            wer
+                        ),
+                        Some(Err(e)) => format!(
+                            "Meeting angelegt, Einladung kopiert - schick sie {} (z. B. per Chat). ({})",
+                            wer, e
+                        ),
+                        None => format!(
+                            "Meeting angelegt, Einladung kopiert - schick sie {} (z. B. per Chat).",
+                            wer
+                        ),
+                    };
                     self.meet_win.meeting = Some(m);
                     self.view = View::Meet;
                 }

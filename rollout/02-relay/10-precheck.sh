@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Block 2 / step 10 - READ-ONLY precheck for the relay patch (r2).
-#  * the new relay.js in the repo = live snapshot + patches 0001 + 0002 (real client IP) + 0003 (Mac publish) + 0004 (r6/r7) and nothing else;
+#  * the new relay.js in the repo = live snapshot + patches 0001 + 0002 (real client IP) + 0003 (Mac publish) + 0004 (r6/r7) + 0005 (r32/r30) and nothing else;
 #    relay/clientip.js = what patch 0002 creates, relay/reqauth.js = what patch 0004 creates; their tests pass
 #  * live relay.js on CT110 is byte-identical to the snapshot (else STOP: drift)
 #  * relay healthy, nobody connected, node syntax of the new file ok
@@ -39,7 +39,12 @@ if git -C "$REPO_ROOT" cat-file -e "$RELAY_BASE_COMMIT:relay/relay.js" 2>/dev/nu
   else
     bad "missing $RELAY_PATCH4 (r6/r7 not on this branch)"
   fi
-  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003+0004 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
+  if [ -f "$RELAY_PATCH5" ]; then
+    (cd "$tmp" && patch -s -p1 <"$RELAY_PATCH5") && ok "patch 0005 (r32 friend meeting invites + r30 setup file name) applies on top" || bad "patch 0005 does not apply"
+  else
+    bad "missing $RELAY_PATCH5 (r32/r30 not on this branch)"
+  fi
+  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003+0004+0005 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
   if [ -f "$tmp/relay/reqauth.js" ] && [ -f "$RELAY_LOCAL_REQAUTH" ]; then
     [ "$(sha_of "$tmp/relay/reqauth.js")" = "$(sha_of "$RELAY_LOCAL_REQAUTH")" ] && ok "repo reqauth.js == what patch 0004 creates" || bad "repo reqauth.js differs from patch 0004"
   else
@@ -61,6 +66,9 @@ if [ -f "$REPO_ROOT/relay/test_reqauth.js" ]; then
 fi
 if [ -f "$REPO_ROOT/relay/test_clientip.js" ]; then
   (cd "$REPO_ROOT/relay" && node test_clientip.js >/dev/null 2>&1) && ok "node relay/test_clientip.js passes" || bad "relay/test_clientip.js FAILED"
+fi
+if [ -f "$REPO_ROOT/relay/test_einladung.js" ]; then
+  (cd "$REPO_ROOT/relay" && node test_einladung.js >/dev/null 2>&1) && ok "node relay/test_einladung.js passes (r32 + r30)" || bad "relay/test_einladung.js FAILED"
 fi
 pub=$(update_pubkey)
 [[ "$pub" =~ ^[0-9a-f]{64}$ ]] && ok "update public key readable: ${pub:0:16}..." || bad "no update public key in src/update.rs"

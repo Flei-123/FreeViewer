@@ -6,6 +6,9 @@
 > Tests: `npm install && node test_relay.js && node test_publish.js && node test_clientip.js && node test_reqauth.js`.
 > Login token: `Authorization: Bearer` (`?token=` deprecated, `FV_ACCOUNT_QUERY_TOKEN=0` refuses it); `/fv/online`: rate limit `FV_ONLINE_RATE`,
 > name/last-seen only for the signed-in owner (`FV_ONLINE_PUBLIC_DETAILS=1` = old behaviour) - see `reqauth.js`, patch `0004`.
+> Friends -> meeting (r32, patch `0005`): `POST /fv/freunde/einladen` (friend only; https link WITHOUT `#` key fragment; 6/min, 100/day per sender),
+> `/einladungen` (my mailbox, 24 h), `/einladung-weg`. An old relay answers 404 "unbekannt" -> the client falls back to clipboard.
+> Setup download (r30): `Content-Disposition` carries the brand's name (`FreeViewer-Einrichtung.exe` / `X-Remote-Einrichtung.exe`). Tests: `node test_einladung.js`.
 
 A small Node.js service. Its core does two things:
 
