@@ -1,0 +1,20 @@
+Betreff: FreeMeet Wartung am [DATUM], [UHRZEIT] - kurz offline
+
+Hallo,
+
+FreeMeet bekommt am [DATUM] um [UHRZEIT] ein wichtiges Sicherheits-Update fuer die
+Ende-zu-Ende-Verschluesselung (Schloss-Raeume).
+
+Was das fuer dich heisst:
+- FreeMeet ist ca. 5 Minuten nicht erreichbar. Laufende Meetings werden beendet.
+  Bitte vorher fertig werden, danach einfach wieder beitreten.
+- Nach der Wartung: Seite EINMAL neu laden (Strg+F5, am Handy nach unten ziehen).
+- Wenn du die FreeViewer-App auf Windows oder Mac nutzt: bitte VOR dem [DATUM] auf die
+  neueste Version aktualisieren (App neu starten, Update annehmen). Eine alte App-Version
+  kann danach in Schloss-Raeumen nicht mehr mit anderen sprechen und zeigt den Hinweis
+  "veraltetes Verschluesselungsformat".
+- Normale Raeume (ohne Schloss) sind nicht betroffen.
+- Deine Links bleiben gueltig. Wichtige Schloss-Raeume bitte trotzdem mit einem neuen
+  Link neu anlegen.
+
+Danke!

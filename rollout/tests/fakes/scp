@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake ssh: logs the call, answers a few read-only questions with plausible values.
+cmd="${*: -1}"
+printf '%s\n' "$cmd" >>"$FV_FAKE_LOG"
+case "$cmd" in
+  *FVMUT*) echo "fake-mutation-ok" ;;
+  *sha256sum*relay.js*) echo "7c348523f7e23f2d0775f6f7ce2059a9017b061d8f21c753ab70ef0c4f43b5e1" ;;
+  *sha256sum*e2e.js*) echo "17a4227f10ed0b9c07cea7190ef63d1c066b94b15d03383af60f3fd542fb9b49" ;;
+  *"cat "*version*) echo '{"version":"0.29.4","mac_sha256":""}' ;;
+  *json.load*version*) echo 0.29.4 ;;
+  *"fv/health"*) echo '{"ok":true,"hosts_online":0,"sessions_active":0}' ;;
+  *is-active*) echo active ;;
+  *listsnapshot*) echo '`-> current  You are here!' ;;
+  *"cluster/backup"*) echo '[{"id":"g1","all":1,"storage":"wd-backup","schedule":"02:30"}]' ;;
+  *"ss -Htn"*) echo 0 ;;
+  *) echo "" ;;
+esac
+exit 0

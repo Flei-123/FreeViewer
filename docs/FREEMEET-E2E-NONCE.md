@@ -107,3 +107,10 @@ room (camera + screen share): picture and sound arrive, tag says "E2E: an".
 
 Native: normal release build/sign/publish of the commit that contains this
 file; no config change.
+
+## Correction (14.10.2026, found while preparing the rollout)
+
+The "Deploy" section above is WRONG about the browser file: on CT111 `signal.rs` serves `e2e.js` via
+`include_str!("../../web/e2e.js")`, i.e. it is compiled into the SFU binary. Copying the file changes nothing;
+the SFU must be rebuilt (`cargo build --release`) and restarted (this ends running meetings).
+The tested, scripted procedure is in `rollout/03-freemeet-nonce/` (see `rollout/README.md`).
