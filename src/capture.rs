@@ -48,14 +48,14 @@ pub trait Backend {
     fn scaled(&mut self, dw: u32, dh: u32, nv12: bool) -> Option<&[u8]> {
         self.scaled_teil(dw, dh, nv12, (0.0, 0.0, 1.0, 1.0))
     }
-    /// Wie `scaled`, aber nur ein AUSSCHNITT des Bildschirms (Anteile 0..1).
+    /// Like `scaled`, but only a SECTION of the screen (fractions 0..1).
     ///
-    /// WARUM auf der Grafikkarte statt im Hauptspeicher: sobald der
-    /// GPU-Skalierer laeuft, wird das Vollbild NICHT mehr ins RAM
-    /// zurueckgelesen (das spart PCIe-Bandbreite). Wer dann `frame()`
-    /// benutzt, bekommt einen alten oder leeren Puffer - genau daran lag es,
-    /// dass der scharfe Zoom ab einer gewissen Stufe schwarz wurde. Der
-    /// Videoprozessor kann den Ausschnitt selbst, das kostet nichts extra.
+    /// WHY on the graphics card instead of in main memory: as soon as the
+    /// GPU scaler runs, the full image is NO LONGER read back into RAM
+    /// (this saves PCIe bandwidth). Whoever then uses `frame()`
+    /// gets an old or empty buffer - that is exactly why the sharp zoom
+    /// turned black from a certain level. The
+    /// video processor can do the section itself, at no extra cost.
     fn scaled_teil(
         &mut self,
         _dw: u32,
@@ -70,14 +70,14 @@ pub trait Backend {
         false
     }
 
-    /// Das fertige NV12-Bild BLEIBT auf der Grafikkarte.
+    /// The finished NV12 image STAYS on the graphics card.
     ///
-    /// WARUM: der bisherige Weg zieht jedes Bild einmal komplett ueber den
-    /// PCIe-Bus zurueck in den Hauptspeicher (Staging + Map + Kopie), nur
-    /// damit der Encoder es gleich wieder hinaufschiebt. Bei 2496x1664 sind
-    /// das 6 MB pro Bild - gemessen rund 8 ms, also mehr als der Encoder
-    /// selbst braucht. Wer die Textur direkt weiterreicht, spart den ganzen
-    /// Umweg; genau daran haengt, ob native Aufloesung fluessig bleibt.
+    /// WHY: the previous way pulls every image completely back over the
+    /// PCIe bus into main memory (staging + map + copy), only
+    /// for the encoder to push it up again right away. At 2496x1664 that
+    /// is 6 MB per image - measured around 8 ms, so more than the encoder
+    /// itself needs. Passing the texture on directly saves the whole
+    /// detour; whether native resolution stays smooth depends on exactly this.
     #[cfg(windows)]
     fn nv12_gpu(
         &mut self,
@@ -564,10 +564,10 @@ mod dxgi {
         }
     }
 
-    /// Media Foundation ruft den Grafiktreiber aus seinem eigenen Faden.
-    /// Ohne diesen Schutz greifen Aufnahme und Encoder gleichzeitig auf
-    /// denselben Kontext zu - das endet in Bildsalat oder einem Absturz im
-    /// Treiber.
+    /// Media Foundation calls the graphics driver from its own thread.
+    /// Without this protection capture and encoder access
+    /// the same context at the same time - that ends in image garbage or a crash in the
+    /// driver.
     fn mehrfaedig_schuetzen(ctx: &ID3D11DeviceContext) {
         if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
             unsafe {
@@ -785,9 +785,9 @@ mod dxgi {
         /// true: the video processor writes NV12 (colour conversion included)
         pub nv12: bool,
         buf: Vec<u8>,
-        /// Fertige NV12-Bilder fuer den Encoder. Reihum, weil ein
-        /// Hardware-Encoder asynchron arbeitet und das zuletzt gelieferte
-        /// Bild noch liest, waehrend die Aufnahme schon das naechste malt.
+        /// Finished NV12 images for the encoder. Round robin, because a
+        /// hardware encoder works asynchronously and is still reading the most recently delivered
+        /// image while the capture already paints the next one.
         ring: Vec<ID3D11Texture2D>,
         ring_i: usize,
     }
@@ -947,13 +947,13 @@ mod dxgi {
             self.scale_teil(ctx, frame, (0.0, 0.0, 1.0, 1.0))
         }
 
-        /// Wie `scale`, aber nur ein Ausschnitt der Quelle (Anteile 0..1).
+        /// Like `scale`, but only a section of the source (fractions 0..1).
         ///
-        /// Der Videoprozessor kann das von Haus aus: `SetStreamSourceRect`
-        /// sagt ihm, welches Rechteck er auf die Ausgabegroesse ziehen soll.
-        /// Damit bleibt beim Hineinzoomen alles auf der Grafikkarte - kein
-        /// Vollbild ueber PCIe, keine Rechenzeit im Hauptprozessor, und die
-        /// Bildpunkte sind ECHT statt hochgerechnet.
+        /// The video processor can do this natively: `SetStreamSourceRect`
+        /// tells it which rectangle to stretch to the output size.
+        /// This way everything stays on the graphics card when zooming in - no
+        /// full image over PCIe, no compute time on the main CPU, and the
+        /// pixels are REAL instead of extrapolated.
         pub fn scale_teil(
             &mut self,
             ctx: &ID3D11DeviceContext,
@@ -964,8 +964,8 @@ mod dxgi {
             self.rueck_ins_ram(ctx)
         }
 
-        /// Nur die Arbeit auf der Grafikkarte: skalieren und (bei NV12) die
-        /// Farbwandlung. Das Ergebnis bleibt in der Ausgabetextur.
+        /// Only the work on the graphics card: scaling and (for NV12) the
+        /// colour conversion. The result stays in the output texture.
         pub fn blt_teil(
             &mut self,
             ctx: &ID3D11DeviceContext,
@@ -977,12 +977,12 @@ mod dxgi {
                 let (iw, ih) = self.in_size;
                 let (tx, ty, tw, th) = teil;
                 let ganz = tw >= 0.999 && th >= 0.999 && tx <= 0.001 && ty <= 0.001;
-                // Das Ziel IMMER ausdruecklich auf die volle Ausgabe setzen.
+                // ALWAYS set the destination explicitly to the full output.
                 //
-                // Ohne diese Zeile fuellt der Videoprozessor bei gesetztem
-                // Quell-Rechteck je nach Treiber gar nichts oder nur eine Ecke
-                // - gemessen auf der Intel-Karte im Surface: das Bild kam als
-                // einfarbige Flaeche heraus, ganz ohne Fehlermeldung.
+                // Without this line, with a source rectangle set the video processor fills
+                // nothing or only a corner depending on the driver
+                // - measured on the Intel card in the Surface: the image came out as a
+                // flat colour, without any error message.
                 let (ow, oh) = self.out_size;
                 let ziel = RECT { left: 0, top: 0, right: ow as i32, bottom: oh as i32 };
                 self.vctx
@@ -990,13 +990,13 @@ mod dxgi {
                 self.vctx
                     .VideoProcessorSetOutputTargetRect(&self.proc, true, Some(&ziel));
                 if ganz {
-                    // Kein Ausschnitt: die Einstellung wieder abschalten,
-                    // sonst bliebe der letzte Zuschnitt fuer immer stehen.
+                    // No section: switch the setting off again,
+                    // otherwise the last crop would stay set forever.
                     self.vctx
                         .VideoProcessorSetStreamSourceRect(&self.proc, 0, false, None);
                 } else {
-                    // In Bildpunkte umrechnen und im Bild halten - ein
-                    // Rechteck ausserhalb liefert ein schwarzes Bild.
+                    // Convert to pixels and keep within the image - a
+                    // rectangle outside yields a black image.
                     let l = ((tx.clamp(0.0, 1.0) * iw as f32) as i32).clamp(0, iw as i32 - 2);
                     let t = ((ty.clamp(0.0, 1.0) * ih as f32) as i32).clamp(0, ih as i32 - 2);
                     let r = (l + (tw.clamp(0.0, 1.0) * iw as f32) as i32).clamp(l + 2, iw as i32);
@@ -1027,9 +1027,9 @@ mod dxgi {
             }
         }
 
-        /// Ein frisches NV12-Bild als Textur - fuer den Encoder, der es
-        /// direkt von der Grafikkarte nimmt. Kopiert in den Ring, damit die
-        /// naechste Aufnahme das laufende Bild nicht ueberschreibt.
+        /// A fresh NV12 image as a texture - for the encoder, which takes it
+        /// directly from the graphics card. Copies into the ring so that the
+        /// next capture does not overwrite the running image.
         pub fn gpu_frame(
             &mut self,
             ctx: &ID3D11DeviceContext,
@@ -1062,7 +1062,7 @@ mod dxgi {
             Ok(self.ring[i].clone())
         }
 
-        /// Der klassische Weg: Ausgabetextur -> Staging -> Hauptspeicher.
+        /// The classic way: output texture -> staging -> main memory.
         fn rueck_ins_ram(&mut self, ctx: &ID3D11DeviceContext) -> Result<()> {
             unsafe {
                 let dst_tex: ID3D11Resource = self.out_view.GetResource()?;

@@ -1,39 +1,39 @@
-//! Ein EINZELNES Programmfenster teilen - und rot umranden, was geteilt wird.
+//! Share a SINGLE program window - and outline in red what is shared.
 //!
-//! Zwei Dinge, die zusammengehoeren:
+//! Two things that belong together:
 //!
-//! 1. **Fensteraufnahme.** Bisher ging immer der ganze Bildschirm raus. Wer
-//!    nur eine Tabelle zeigen wollte, zeigte auch seine Mails. Hier kommt
-//!    das Bild deshalb aus `PrintWindow` mit `PW_RENDERFULLCONTENT` - das
-//!    zeichnet auch Fenster richtig, die ihren Inhalt auf der Grafikkarte
-//!    zusammensetzen (Chrome, Electron, moderne Oberflaechen). Die Groesse
-//!    wird bei JEDEM Bild neu erfragt: so wandert die Aufnahme mit, wenn das
-//!    Fenster verschoben oder in der Groesse veraendert wird.
+//! 1. **Window capture.** Until now the whole screen always went out. Whoever
+//!    only wanted to show a table also showed their mails. So here
+//!    the image comes from `PrintWindow` with `PW_RENDERFULLCONTENT` - this
+//!    also draws windows correctly that compose their content on the
+//!    graphics card (Chrome, Electron, modern UIs). The size
+//!    is queried anew for EVERY image: so the capture follows when the
+//!    window is moved or resized.
 //!
-//! 2. **Roter Rahmen.** Ein duenner, klickdurchlaessiger Rahmen um das, was
-//!    gerade rausgeht. Er liegt immer oben, nimmt keine Klicks an
-//!    (`WS_EX_TRANSPARENT`) und - das ist der Punkt - er wird per
-//!    `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` aus der eigenen
-//!    Aufnahme ausgeschlossen. Ohne das saehe der Zuschauer einen zweiten
-//!    Rahmen im Bild, und beim Bildschirmteilen waere er sogar doppelt.
+//! 2. **Red frame.** A thin, click-through frame around whatever is
+//!    currently going out. It is always on top, accepts no clicks
+//!    (`WS_EX_TRANSPARENT`) and - this is the point - it is excluded from the own
+//!    capture via `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`.
+//!    Without that the viewer would see a second frame in the image, and
+//!    with screen sharing it would even be doubled.
 //!
-//! Beides ist reine Windows-Sache; auf anderen Systemen bleiben die
-//! Funktionen leere Huellen, damit der Rest des Programms sich nicht mit
-//! `cfg` herumschlagen muss.
+//! Both are purely a Windows matter; on other systems the
+//! functions stay empty shells, so the rest of the program does not have to fight with
+//! `cfg`.
 
 /// Ein teilbares Programmfenster.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fenster {
-    /// Fensterkennung (HWND als Zahl - so bleibt der Typ plattformfrei).
+    /// Window identifier (HWND as a number - this keeps the type platform-free).
     pub kennung: isize,
     pub titel: String,
-    /// Name des Programms ohne Pfad und Endung ("firefox", "excel").
+    /// Name of the program without path and extension ("firefox", "excel").
     pub programm: String,
     pub breite: u32,
     pub hoehe: u32,
 }
 
-/// Alle sinnvoll teilbaren Fenster, das oberste zuerst.
+/// All sensibly shareable windows, topmost first.
 pub fn liste() -> Vec<Fenster> {
     #[cfg(windows)]
     {
@@ -59,7 +59,7 @@ pub fn aufnahme(_kennung: isize) -> Option<Box<dyn crate::capture::Backend>> {
     None
 }
 
-/// Ein roter Rahmen um einen Bildschirmbereich. Beim Fallenlassen weg.
+/// A red frame around a screen area. Gone when dropped.
 pub struct Rahmen {
     #[cfg(windows)]
     ziel: std::sync::Arc<std::sync::Mutex<Option<(i32, i32, i32, i32)>>>,
@@ -79,7 +79,7 @@ impl Rahmen {
         }
     }
 
-    /// Den Rahmen auf einen neuen Bereich setzen (Fenster verschoben).
+    /// Move the frame to a new area (window moved).
     pub fn setzen(&self, x: i32, y: i32, b: i32, h: i32) {
         #[cfg(windows)]
         if let Ok(mut z) = self.ziel.lock() {
@@ -94,7 +94,7 @@ impl Drop for Rahmen {
     fn drop(&mut self) {
         #[cfg(windows)]
         if let Ok(mut z) = self.ziel.lock() {
-            // None heisst dem Faden: aufhoeren und Fenster zerstoeren.
+            // None tells the thread: stop and destroy the window.
             *z = None;
         }
     }
@@ -151,10 +151,10 @@ mod win {
         true.into()
     }
 
-    /// Taugt dieses Fenster zum Teilen? Alles andere waere Rauschen in der
-    /// Liste: unsichtbare Hilfsfenster, minimierte Programme, die leeren
-    /// Huellen der UWP-Anwendungen und - wichtig - unser EIGENES Fenster
-    /// (das zu teilen ergaebe einen Spiegelkabinett-Effekt).
+    /// Is this window fit for sharing? Everything else would be noise in the
+    /// list: invisible helper windows, minimised programs, the empty
+    /// shells of UWP applications and - important - our OWN window
+    /// (sharing that would create a hall-of-mirrors effect).
     unsafe fn pruefen(hwnd: HWND, eigen: u32) -> Option<Fenster> {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return None;
@@ -166,7 +166,7 @@ mod win {
         if ex & WS_EX_TOOLWINDOW.0 != 0 {
             return None;
         }
-        // Von der Fensterverwaltung versteckt (UWP haelt Karteileichen vor).
+        // Hidden by the window manager (UWP keeps zombie entries around).
         let mut versteckt = 0u32;
         if DwmGetWindowAttribute(
             hwnd,
@@ -191,7 +191,7 @@ mod win {
         }
         let titel = String::from_utf16_lossy(&puffer[..n as usize]);
         let (_, _, b, h) = rahmen_rect(hwnd)?;
-        // Winzige Fenster sind fast immer Hilfskonstruktionen.
+        // Tiny windows are almost always helper constructs.
         if b < 120 || h < 80 {
             return None;
         }
@@ -232,12 +232,12 @@ mod win {
         }
     }
 
-    /// Die SICHTBAREN Grenzen eines Fensters.
+    /// The VISIBLE bounds of a window.
     ///
-    /// `GetWindowRect` liefert seit Windows Vista zu viel: der unsichtbare
-    /// Schattenrand zaehlt mit. Wer danach aufnimmt, teilt an drei Seiten
-    /// einen schwarzen Streifen mit. `DWMWA_EXTENDED_FRAME_BOUNDS` gibt die
-    /// Kanten, die man wirklich sieht.
+    /// Since Windows Vista `GetWindowRect` returns too much: the invisible
+    /// shadow border counts. Whoever captures by it shares a black strip
+    /// on three sides. `DWMWA_EXTENDED_FRAME_BOUNDS` gives the
+    /// edges you really see.
     unsafe fn rahmen_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         let mut r = RECT::default();
         let dwm = DwmGetWindowAttribute(
@@ -291,9 +291,9 @@ mod win {
         h: u32,
         x: i32,
         y: i32,
-        /// Innerhalb des Fensterrahmens beginnt das Bild an dieser Stelle -
-        /// PrintWindow zeichnet ab GetWindowRect, die sichtbaren Grenzen
-        /// liegen aber weiter innen.
+        /// Inside the window frame the image starts at this position -
+        /// PrintWindow draws from GetWindowRect, but the visible bounds
+        /// lie further inside.
         rand_x: i32,
         rand_y: i32,
     }
@@ -324,9 +324,9 @@ mod win {
             }
         }
 
-        /// Speicherbild in der neuen Groesse anlegen. Wird bei jeder
-        /// Groessenaenderung des Fensters neu gerufen - sonst waere das Bild
-        /// nach dem ersten Ziehen an der Ecke abgeschnitten.
+        /// Create a memory bitmap in the new size. Called anew on every
+        /// size change of the window - otherwise the image would be cut off
+        /// after the first drag at the corner.
         unsafe fn flaeche_bauen(&mut self, b: u32, h: u32) -> Result<()> {
             let b = b.max(2);
             let h = h.max(2);
@@ -341,7 +341,7 @@ mod win {
             info.bmiHeader = BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: b as i32,
-                // negativ = von oben nach unten, wie ueberall sonst hier
+                // negative = top to bottom, like everywhere else here
                 biHeight: -(h as i32),
                 biPlanes: 1,
                 biBitCount: 32,
@@ -387,8 +387,8 @@ mod win {
                 if !IsWindow(self.hwnd).as_bool() {
                     return crate::capture::Next::Lost;
                 }
-                // Minimiert liefert PrintWindow nur Schwarz. Lieber das
-                // letzte gute Bild stehen lassen als schwarz senden.
+                // When minimised PrintWindow only returns black. Better keep the
+                // last good image than send black.
                 if IsIconic(self.hwnd).as_bool() {
                     return crate::capture::Next::Unchanged;
                 }
@@ -397,8 +397,8 @@ mod win {
                 };
                 self.x = x;
                 self.y = y;
-                // PrintWindow zeichnet ab der AEUSSEREN Fensterkante. Der
-                // Versatz dazwischen ist der unsichtbare Schattenrand.
+                // PrintWindow draws from the OUTER window edge. The
+                // offset in between is the invisible shadow border.
                 let mut aussen = RECT::default();
                 if GetWindowRect(self.hwnd, &mut aussen).is_ok() {
                     self.rand_x = x - aussen.left;
@@ -412,14 +412,14 @@ mod win {
                         return crate::capture::Next::Lost;
                     }
                 }
-                // Der Versatz kommt ueber die Ursprungsverschiebung des DC
-                // hinein: so landet die sichtbare Ecke wirklich bei (0,0).
+                // The offset comes in via the origin shift of the DC:
+                // this way the visible corner really lands at (0,0).
                 SetWindowOrgEx(self.mem, self.rand_x, self.rand_y, None);
                 let ok = PrintWindow(self.hwnd, self.mem, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT))
                     .as_bool();
                 if !ok {
-                    // Manche Fenster (Spiele im Vollbild) verweigern das.
-                    // Ein zweiter Anlauf ohne die Zusatzfahne hilft oft.
+                    // Some windows (full-screen games) refuse this.
+                    // A second attempt without the extra flag often helps.
                     if !PrintWindow(self.hwnd, self.mem, PRINT_WINDOW_FLAGS(0)).as_bool() {
                         return crate::capture::Next::Unchanged;
                     }
@@ -500,8 +500,8 @@ mod win {
             hbrBackground: rot,
             ..Default::default()
         };
-        // Doppelte Anmeldung ist unschaedlich (liefert 0) - der Rahmen kann
-        // im Laufe einer Sitzung mehrfach auf- und zugehen.
+        // Registering twice is harmless (returns 0) - the frame can
+        // open and close several times during a session.
         RegisterClassW(&wc);
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -519,22 +519,22 @@ mod win {
         ) else {
             return;
         };
-        // Halbdurchsichtig: der Rahmen soll auffallen, aber nicht blenden.
+        // Semi-transparent: the frame should stand out, but not dazzle.
         let _ = SetLayeredWindowAttributes(
             hwnd,
             windows::Win32::Foundation::COLORREF(0),
             210,
             LWA_ALPHA,
         );
-        // DER entscheidende Handgriff: aus der eigenen Aufnahme heraus.
-        // Ohne ihn saehe der Zuschauer den Rahmen doppelt - einmal echt und
-        // einmal mitaufgenommen.
+        // THE decisive trick: out of the own capture.
+        // Without it the viewer would see the frame twice - once real and
+        // once captured along.
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         let mut letzte: Option<(i32, i32, i32, i32)> = None;
         loop {
-            // Nachrichten abarbeiten, sonst gilt das Fenster als haengend.
+            // Process messages, otherwise the window counts as hung.
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -561,14 +561,14 @@ mod win {
                     h + 2 * d,
                     SWP_NOACTIVATE,
                 );
-                // Windows uebernimmt die Region - nicht selbst freigeben.
+                // Windows takes over the region - do not free it ourselves.
                 SetWindowRgn(hwnd, aussen, true);
             }
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
     }
 
-    // Unbenutzt, aber die Warnung waere laestig.
+    // Unused, but the warning would be annoying.
     #[allow(dead_code)]
     fn ungenutzt(_: POINT, _: &AtomicBool, _: Ordering) {}
 }
@@ -579,9 +579,9 @@ mod tests {
 
     #[test]
     fn ohne_fenster_bleibt_die_liste_leer_statt_zu_luegen() {
-        // Auf dem Bauserver (Linux, kein Bildschirm) darf hier nichts
-        // Erfundenes stehen - eine erfundene Fensterliste waere schlimmer
-        // als eine leere.
+        // On the build server (Linux, no screen) nothing made-up
+        // may stand here - a made-up window list would be worse
+        // than an empty one.
         #[cfg(not(windows))]
         assert!(liste().is_empty());
         #[cfg(windows)]

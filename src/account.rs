@@ -1,18 +1,18 @@
-//! Das FleiTec-Konto - freiwillig.
+//! The FleiTec account - optional.
 //!
-//! FreeViewer laeuft ohne Anmeldung vollstaendig: ID, Passwort, Adressbuch,
-//! alles liegt auf dem Rechner. Wer sich anmeldet, bekommt genau eine Sache
-//! dazu - seine Geraeteliste liegt danach auch beim Konto und ist auf jedem
-//! Rechner dieselbe.
+//! FreeViewer runs completely without login: ID, password, address book,
+//! everything lives on the machine. Whoever logs in gets exactly one thing
+//! extra - their device list then also lives with the account and is the same on every
+//! machine.
 //!
-//! Was NICHT hochgeht: gespeicherte Passwoerter. Die sind mit der Kennung
-//! dieses Rechners verschluesselt (siehe partners.rs) und waeren woanders
-//! nicht zu gebrauchen; ausserdem soll der Server so wenig wie moeglich
+//! What does NOT go up: saved passwords. They are encrypted with the identifier
+//! of this machine (see partners.rs) and would be of no use
+//! elsewhere; besides, the server should know as little as possible.
 //! wissen.
 //!
-//! Angemeldet wird nicht bei uns, sondern beim JARVIS-Konto - derselbe Name,
-//! dasselbe Passwort wie auf der Webseite. Der Relay reicht die Anmeldung nur
-//! durch und fragt spaeter nach, zu wem ein Zeichen (Token) gehoert.
+//! Login does not happen with us but with the JARVIS account - same name,
+//! same password as on the website. The relay only passes the login
+//! through and later asks to whom a token belongs.
 
 use std::path::PathBuf;
 
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::partners::SyncDevice;
 
-/// Was auf der Platte liegt, wenn jemand angemeldet ist.
+/// What is on disk when someone is logged in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Session {
     pub user: String,
@@ -31,10 +31,10 @@ pub struct Session {
     pub synced: u64,
 }
 
-/// Bewusst NICHT im gemeinsamen Ordner (ProgramData): dort duerfen alle
-/// Windows-Konten dieses Rechners hinein, und das Zeichen (Token) gilt fuer
-/// das ganze FleiTec-Konto. Die Anmeldung gehoert deshalb ins Profil des
-/// Menschen, der sich angemeldet hat.
+/// Deliberately NOT in the shared folder (ProgramData): all
+/// Windows accounts of this machine may write there, and the token is valid for
+/// the whole FleiTec account. The login therefore belongs in the profile of the
+/// person who logged in.
 pub fn file() -> PathBuf {
     crate::ident::user_config_dir().join("account.json")
 }
@@ -55,7 +55,7 @@ pub fn save(s: &Session) -> std::io::Result<()> {
     std::fs::write(file(), json)
 }
 
-/// Abmelden - der Zettel wird weggeworfen, das Adressbuch bleibt liegen.
+/// Log out - the slip is thrown away, the address book stays.
 pub fn forget() {
     let _ = std::fs::remove_file(file());
 }
@@ -65,8 +65,8 @@ pub fn url(relay_url: &str, what: &str) -> String {
     format!("{}/account/{}", base_url(relay_url), what)
 }
 
-/// `wss://host/fv/ws` -> `https://host/fv/<was>` - OHNE /account/ dazwischen.
-/// Die Einrichtungs-Endpunkte (/fv/setup/*) haengen direkt an der Basis.
+/// `wss://host/fv/ws` -> `https://host/fv/<what>` - WITHOUT /account/ in between.
+/// The setup endpoints (/fv/setup/*) hang directly on the base.
 pub fn plain_url(relay_url: &str, what: &str) -> String {
     format!("{}/{}", base_url(relay_url), what)
 }
@@ -118,9 +118,9 @@ pub struct SyncReply {
     pub error: String,
 }
 
-/// Ein POST mit JSON. ureq meldet 4xx/5xx als Fehler - hier wird daraus
-/// wieder ein Zahlenwert, damit "falsches Passwort" anders klingen kann als
-/// "Server nicht erreichbar".
+/// A POST with JSON. ureq reports 4xx/5xx as an error - here it becomes
+/// a number again, so that "wrong password" can sound different from
+/// "server not reachable".
 fn post_json(target: &str, body: &str) -> Result<(u16, String)> {
     match ureq::post(target)
         .header("content-type", "application/json")
@@ -213,7 +213,7 @@ fn authed_call(verb: Verb, plain: &str, token: &str, body: &str) -> Result<(u16,
     authed_call_with(&LEGACY_QUERY_TOKEN, verb, plain, token, body)
 }
 
-/// Anmelden. Gibt die Sitzung zurueck, die dann gespeichert werden kann.
+/// Log in. Returns the session, which can then be stored.
 pub fn login(relay_url: &str, user: &str, pass: &str) -> Result<Session> {
     let body = serde_json::to_string(&LoginReq {
         username: user.trim(),
@@ -267,8 +267,8 @@ pub fn sync(relay_url: &str, token: &str, devices: Vec<SyncDevice>) -> Result<Sy
     Ok(reply)
 }
 
-/// Nur das Noetigste - Zeichen (Token) bestehen aus URL-sicheren Zeichen,
-/// aber sicher ist sicher.
+/// Only the bare minimum - tokens consist of URL-safe characters,
+/// but better safe than sorry.
 fn urlenc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -289,20 +289,20 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Was ein Abgleich im Hintergrund zurueckmeldet.
+/// What a background sync reports back.
 #[derive(Debug, Clone)]
 pub enum SyncOut {
-    /// Fertig: so viele Geraete kamen zurueck, so viele sind es jetzt.
+    /// Done: this many devices came back, this many exist now.
     Ok { devices: Vec<SyncDevice>, at: u64 },
     /// Anmeldung hat geklappt (Name des Kontos).
     LoggedIn(String),
-    /// Zeichen abgelaufen - der Nutzer muss sich neu anmelden.
+    /// Token expired - the user has to log in again.
     LoggedOut,
     Failed(String),
 }
 
-/// Abgleich im Hintergrund. Der Aufrufer bekommt das Ergebnis ueber den
-/// Briefkasten (Mutex), damit die Oberflaeche nie wartet.
+/// Sync in the background. The caller gets the result via the
+/// mailbox (mutex), so that the UI never waits.
 pub fn sync_async(
     relay_url: String,
     token: String,
@@ -335,12 +335,12 @@ pub fn sync_async(
 }
 
 
-// --------------------------------------------------------- Einrichtungs-Links
+// --------------------------------------------------------- setup links
 //
-// Der Installation-Tab erzeugt am Relay einen Einmal-Code; ein frisches
-// Geraet loest ihn genau einmal ein und bekommt das gewaehlte Passwort.
-// Danach liegt das Geraet (ohne Passwort) im Konto-Adressbuch, das Passwort
-// holt sich der Besitzer einmalig ueber die Inbox.
+// The Installation tab creates a one-time code at the relay; a fresh
+// device redeems it exactly once and gets the chosen password.
+// After that the device (without password) lives in the account address book, the password
+// is fetched once by the owner via the inbox.
 
 #[derive(Serialize)]
 struct SetupCreateReq<'a> {
@@ -362,7 +362,7 @@ struct SetupCreateReply {
     error: String,
 }
 
-/// Ein noch nicht eingeloester Code (Anzeige im Tab).
+/// A code not yet redeemed (shown in the tab).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SetupPending {
     #[serde(default)]
@@ -371,10 +371,10 @@ pub struct SetupPending {
     pub name_hint: String,
     #[serde(default)]
     pub at: u64,
-    /// Wie viele Geraete der Link insgesamt einrichten darf.
+    /// How many devices the link may set up in total.
     #[serde(default = "one")]
     pub max_uses: u32,
-    /// Wie viele schon eingerichtet sind.
+    /// How many are already set up.
     #[serde(default)]
     pub uses: u32,
 }
@@ -383,17 +383,17 @@ fn one() -> u32 {
     1
 }
 
-/// Die Web-Adresse eines Einrichtungs-Codes - dieselbe, die das Relay beim
-/// Erzeugen zurueckgibt. Damit steht der Link auch bei jedem wartenden
-/// Eintrag in der Liste, nicht nur direkt nach dem Erzeugen.
+/// The web address of a setup code - the same one the relay returns when
+/// creating it. This way the link is also available for every waiting
+/// entry in the list, not only right after creation.
 pub fn setup_web_link(code: &str) -> String {
-    // Die Einrichtungs-Seite der eigenen Marke (FreeViewer -> freeviewer.
-    // fleitec.com, X-Remote -> remote.fleitec.com). Die Seite fragt die
-    // Marke des Codes beim Relay ab und laedt automatisch die richtige Datei.
+    // The setup page of the own brand (FreeViewer -> freeviewer.
+    // fleitec.com, X-Remote -> remote.fleitec.com). The page asks the relay for the
+    // brand of the code and automatically loads the right file.
     format!("{}/setup/{}", crate::brand::WEB, code)
 }
 
-/// Ein frisch eingerichtetes Geraet - inklusive Passwort (nur einmal sichtbar).
+/// A freshly set-up device - including password (visible only once).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SetupClaimed {
     #[serde(default)]
@@ -423,7 +423,7 @@ struct SetupClaimReq<'a> {
     name: &'a str,
 }
 
-/// Was das frische Geraet beim Einloesen des Codes zurueckbekommt.
+/// What the fresh device gets back when redeeming the code.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SetupClaimReply {
     #[serde(default)]
@@ -436,7 +436,7 @@ pub struct SetupClaimReply {
     pub error: String,
 }
 
-/// Einmal-Code erzeugen (braucht die Konto-Anmeldung).
+/// Create a one-time code (needs the account login).
 pub fn setup_create(
     relay_url: &str,
     token: &str,
@@ -484,7 +484,7 @@ pub fn setup_inbox(relay_url: &str, token: &str) -> Result<(Vec<SetupPending>, V
     Ok((r.pending, r.claimed))
 }
 
-/// Die andere Seite: das frische Geraet loest den Code ein (ohne Anmeldung).
+/// The other side: the fresh device redeems the code (without login).
 pub fn setup_claim(relay_url: &str, code: &str, id: &str, name: &str) -> Result<SetupClaimReply> {
     let body = serde_json::to_string(&SetupClaimReq { code, id, name })
         .map_err(|e| anyhow!("{}", e))?;
@@ -510,8 +510,8 @@ struct SetupRevokeReq<'a> {
     code: &'a str,
 }
 
-/// Einen wartenden Link widerrufen - schon eingerichtete Geraete behalten
-/// ihre Einrichtung, der Rest des Links wird sofort unbrauchbar.
+/// Revoke a waiting link - devices already set up keep
+/// their setup, the rest of the link becomes unusable immediately.
 pub fn setup_revoke(relay_url: &str, token: &str, code: &str) -> Result<()> {
     let body = serde_json::to_string(&SetupRevokeReq { code }).map_err(|e| anyhow!("{}", e))?;
     let (status, _text) = authed_call(Verb::Post, &plain_url(relay_url, "setup/revoke"), token, &body)?;
@@ -523,14 +523,14 @@ pub fn setup_revoke(relay_url: &str, token: &str, code: &str) -> Result<()> {
     }
 }
 
-/// Widerrufen im Hintergrund (das Ergebnis holt die naechste Inbox-Runde).
+/// Revoke in the background (the next inbox round fetches the result).
 pub fn setup_revoke_async(relay_url: String, token: String, code: String) {
     std::thread::spawn(move || {
         let _ = setup_revoke(&relay_url, &token, &code);
     });
 }
 
-/// Was ein Einrichtungslauf im Hintergrund zurueckmeldet.
+/// What a setup run reports back in the background.
 #[derive(Debug, Clone)]
 pub enum SetupOut {
     /// Code erzeugt: (code, freeviewer://-Link, Web-Link).
@@ -585,7 +585,7 @@ pub fn setup_inbox_async(
     });
 }
 
-/// URLs: Konto-Endpunkte unter /account/, Einrichtung direkt an der Basis.
+/// URLs: account endpoints under /account/, setup directly on the base.
 #[cfg(test)]
 mod url_tests {
     #[test]

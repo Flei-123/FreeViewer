@@ -1,41 +1,41 @@
-//! `freeviewer://` - der Weg vom Browser zurueck in den Client.
+//! `freeviewer://` - the way from the browser back into the client.
 //!
-//! Im Meeting kann jemand die Fernsteuerung freigeben. Die anderen sehen dann
-//! einen Knopf "Steuern"; der oeffnet
+//! In a meeting someone can release remote control. The others then see
+//! a "Control" button; it opens
 //!
 //!     freeviewer://control/497628420
 //!
-//! Windows startet daraufhin FreeViewer mit dieser Adresse als Argument.
-//! Laeuft das Programm schon (Regel: nur ein Fenster pro Nutzer), legt der
-//! zweite Start die Adresse nur in einen Briefkasten und beendet sich - die
-//! laufende Fassung holt sie sich von dort ab.
+//! Windows then starts FreeViewer with this address as an argument.
+//! If the program already runs (rule: only one window per user), the
+//! second start only puts the address into a mailbox and exits - the
+//! running instance picks it up from there.
 //!
-//! Bewusst OHNE Passwort in der Adresse: die Verbindung geht den Anfrage-Weg,
-//! der Besitzer muss am anderen Ende zulassen. Ein Link, der irgendwo im Chat
-//! steht, darf keinen fremden Rechner aufsperren.
+//! Deliberately WITHOUT a password in the address: the connection takes the request path,
+//! the owner has to allow it at the other end. A link that sits somewhere in a chat
+//! must not unlock a foreign machine.
 
 use std::path::PathBuf;
 
-/// Eigenes Schema pro Marke. Zwei Marken auf EINEM Rechner duerfen sich
-/// nicht gegenseitig die Links wegnehmen: bis v0.26.1 hiess das Schema bei
-/// jedem Build "freeviewer", also hat der zuletzt installierte Build alle
-/// Links an sich gerissen (X-Remote oeffnete FreeViewer-Meetings).
-/// Standard bleibt "freeviewer", X-Remote baut mit FV_BRAND_SCHEME=xremote.
+/// Own scheme per brand. Two brands on ONE machine must not
+/// take the links away from each other: up to v0.26.1 the scheme was called
+/// "freeviewer" in every build, so the most recently installed build grabbed all
+/// links (X-Remote opened FreeViewer meetings).
+/// The default stays "freeviewer", X-Remote builds with FV_BRAND_SCHEME=xremote.
 pub const SCHEME: &str = match option_env!("FV_BRAND_SCHEME") {
     Some(s) => s,
     None => "freeviewer",
 };
 
-/// Das alte, gemeinsame Schema. Links, die schon im Umlauf sind, sollen
-/// weiter funktionieren - deshalb wird es beim Zerlegen IMMER mitgelesen.
+/// The old, shared scheme. Links already in circulation should
+/// keep working - therefore it is ALWAYS read along when parsing.
 pub const SCHEME_ALT: &str = "freeviewer";
 
-/// Alle Schemata, die dieser Build versteht.
+/// All schemes this build understands.
 pub fn schemes() -> Vec<&'static str> {
     if SCHEME == SCHEME_ALT { vec![SCHEME] } else { vec![SCHEME, SCHEME_ALT] }
 }
 
-/// Traegt eine Adresse eines unserer Schemata? (Fuer die Kommandozeile.)
+/// Does an address carry one of our schemes? (For the command line.)
 pub fn is_ours(arg: &str) -> bool {
     let a = arg.trim().to_ascii_lowercase();
     schemes().iter().any(|s| a.starts_with(&format!("{}:", s)))
@@ -47,7 +47,7 @@ pub enum Action {
     Control(String),
     /// Einem Meeting beitreten.
     Meet { room: String, pass: String },
-    /// Ein neues Geraet einrichten (Einmal-Code aus dem Installation-Tab).
+    /// Set up a new device (one-time code from the Installation tab).
     Setup(String),
 }
 
@@ -55,8 +55,8 @@ pub enum Action {
 /// `freeviewer://meet/482-913-770?pass=abc`.
 pub fn parse(url: &str) -> Option<Action> {
     let u = url.trim().trim_end_matches('/');
-    // Beide Schemata annehmen - das eigene der Marke und das alte
-    // gemeinsame "freeviewer://" (Links, die schon verschickt wurden).
+    // Accept both schemes - the brand's own and the old
+    // shared "freeviewer://" (links that were already sent).
     let mut rest_opt: Option<&str> = None;
     for sch in schemes() {
         let lang = format!("{}://", sch);
@@ -129,17 +129,17 @@ fn urldec(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Merkmal am Ende einer heruntergeladenen Exe: die Einrichtungs-Seite haengt
-/// Code und Wunschname an das Programm, damit ein frisches Geraet sich beim
-/// ersten Start von selbst einrichtet - ohne dass jemand etwas abtippen muss.
+/// Marker at the end of a downloaded exe: the setup page appends
+/// code and desired name to the program, so that a fresh device sets itself up on
+/// first start - without anyone having to type anything.
 const EMBED_MARK: &str = "FVSETUP1:";
 
-/// Liest das angehaengte Einrichtungs-Paket aus der eigenen Datei (falls da).
-/// Rueckgabe: (Code, Wunschname).
+/// Reads the appended setup package from the own file (if present).
+/// Returns: (code, desired name).
 pub fn embedded_setup() -> Option<(String, String)> {
     let exe = std::env::current_exe().ok()?;
     let bytes = std::fs::read(exe).ok()?;
-    // das Paket ist klein und steht ganz hinten
+    // the package is small and sits at the very end
     let start = bytes.len().saturating_sub(4096);
     let tail = String::from_utf8_lossy(&bytes[start..]);
     let pos = tail.rfind(EMBED_MARK)?;
@@ -157,7 +157,7 @@ pub fn embedded_setup() -> Option<(String, String)> {
     Some((code, name))
 }
 
-/// Briefkasten fuer eine bereits laufende Fassung.
+/// Mailbox for an already running instance.
 pub fn inbox() -> PathBuf {
     crate::ident::config_dir().join("inbox.txt")
 }
@@ -167,7 +167,7 @@ pub fn drop_in(url: &str) {
     let _ = std::fs::write(inbox(), url.trim());
 }
 
-/// Holt eine wartende Adresse ab (und raeumt den Briefkasten).
+/// Picks up a waiting address (and cleans up the mailbox).
 pub fn take() -> Option<Action> {
     let p = inbox();
     let raw = std::fs::read_to_string(&p).ok()?;
@@ -177,15 +177,15 @@ pub fn take() -> Option<Action> {
 
 // ------------------------------------------------------------- Registrierung
 
-/// Traegt das Schema ein. `machine_wide` = HKLM (Installation, alle Nutzer),
-/// sonst HKCU - das geht auch portabel und ohne Administrator.
+/// Registers the scheme. `machine_wide` = HKLM (installation, all users),
+/// otherwise HKCU - that also works portably and without administrator.
 #[cfg(windows)]
 pub fn register(machine_wide: bool) -> std::io::Result<()> {
     register_for(&std::env::current_exe()?, machine_wide)
 }
 
-/// Wie register, aber fuer eine bestimmte Datei - beim Installieren zeigt
-/// der Eintrag sonst auf die Quelle statt auf das Programm in "Programme".
+/// Like register, but for a specific file - when installing, the
+/// entry would otherwise point to the source instead of the program in "Program Files".
 #[cfg(windows)]
 pub fn register_for(exe: &std::path::Path, machine_wide: bool) -> std::io::Result<()> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -198,10 +198,10 @@ pub fn register_for(exe: &std::path::Path, machine_wide: bool) -> std::io::Resul
     };
     schreibe_schema(&root, SCHEME, exe)?;
 
-    // Das alte gemeinsame Schema NUR uebernehmen, wenn es noch frei ist.
-    // Eine zweite Marke darf einer bereits installierten NIEMALS die Links
-    // wegnehmen - genau daran lag es, dass X-Remote FreeViewer-Meetings
-    // geoeffnet hat.
+    // Only take over the old shared scheme if it is still free.
+    // A second brand must NEVER take the links away from one already
+    // installed - that is exactly why X-Remote opened
+    // FreeViewer meetings.
     if SCHEME != SCHEME_ALT && !schema_belegt(SCHEME_ALT) {
         let _ = schreibe_schema(&root, SCHEME_ALT, exe);
     }
@@ -225,7 +225,7 @@ fn schreibe_schema(
     Ok(())
 }
 
-/// Haengt an diesem Schema schon ein Programm? (Egal ob HKLM oder HKCU.)
+/// Is a program already attached to this scheme? (No matter whether HKLM or HKCU.)
 #[cfg(windows)]
 pub fn schema_belegt(schema: &str) -> bool {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -256,7 +256,7 @@ pub fn register_for(_exe: &std::path::Path, _machine_wide: bool) -> std::io::Res
     Ok(())
 }
 
-/// Zeigt der Eintrag auf diese Datei? (Nach einem Umzug stimmt er nicht mehr.)
+/// Does the entry point to this file? (After a move it no longer matches.)
 #[cfg(windows)]
 pub fn points_here() -> bool {
     use winreg::enums::HKEY_CURRENT_USER;
@@ -287,7 +287,7 @@ mod tests {
             parse("freeviewer://control/497628420"),
             Some(Action::Control("497628420".into()))
         );
-        // Schreibweise mit Leerzeichen oder Schraegstrich am Ende
+        // spelling with a space or slash at the end
         assert_eq!(
             parse("freeviewer://control/497 628 420/"),
             Some(Action::Control("497628420".into()))
