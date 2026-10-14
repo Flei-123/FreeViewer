@@ -49,6 +49,7 @@ mod res;
 mod partners;
 mod presence;
 mod pwlist;
+mod secstore;
 mod proto;
 mod selftest;
 mod service;
@@ -2560,6 +2561,13 @@ struct App {
     pw_show: Option<usize>,
     /// Session password on the start page: shown in clear text?
     pw_visible: bool,
+    /// when the start page password was revealed (auto-hides)
+    pw_visible_at: Option<std::time::Instant>,
+    /// text typed into the "current password" field of the replace dialog
+    pw_old_input: String,
+    pw_old_wrong: bool,
+    /// trash button armed for this list row (second click deletes)
+    pw_del_arm: Option<usize>,
     /// The last viewer try knocked ("ask") instead of using a password.
     last_ask: bool,
     /// A change that would replace the permanent password waits for a yes.
@@ -2729,6 +2737,10 @@ impl App {
             pw_new: String::new(),
             pw_new_label: String::new(),
             pw_visible: false,
+            pw_visible_at: None,
+            pw_old_input: String::new(),
+            pw_old_wrong: false,
+            pw_del_arm: None,
             last_ask: false,
             pw_overwrite: None,
             pw_show: None,
@@ -3354,6 +3366,17 @@ impl App {
                 // Das Sitzungspasswort wird gewuerfelt, nicht getippt. Feste
                 // Passwoerter stehen in den Einstellungen unter "Zugriff".
                 let pw_now = self.shared.password.lock().unwrap().clone();
+                if self.pw_visible {
+                    match self.pw_visible_at {
+                        Some(t) if t.elapsed() < PW_REVEAL_SECS => {
+                            ui.ctx().request_repaint_after(Duration::from_millis(500));
+                        }
+                        _ => {
+                            self.pw_visible = false;
+                            self.pw_visible_at = None;
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     // hidden by default: a screen share or screenshot must not
                     // leak the password
@@ -3392,6 +3415,7 @@ impl App {
                         .clicked()
                         {
                             self.pw_visible = !self.pw_visible;
+                            self.pw_visible_at = self.pw_visible.then(std::time::Instant::now);
                         }
                         if icon_ghost(ui, "copy", i18n::t("start.copy")).clicked() {
                             ui.ctx().copy_text(pw_now.clone());
@@ -6265,6 +6289,7 @@ if let Some(path) = self.shot.clone() {
             );
             ui.add_space(8.0);
             let mut remove: Option<usize> = None;
+            let arm_before = self.pw_del_arm;
             let mut dirty = false;
             for i in 0..self.pw_list.len() {
                 let shown = self.pw_show == Some(i);
@@ -6284,19 +6309,17 @@ if let Some(path) = self.shot.clone() {
                     }
                     ui.add_space(8.0);
                     if shown {
-                        let mut pw = self.pw_list[i].pw.clone();
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut pw)
-                                    .font(egui::FontId::new(14.0, egui::FontFamily::Monospace))
-                                    .desired_width(160.0)
-                                    .margin(egui::Margin::symmetric(7, 4)),
+                        // read-only: a stored password is never edited in
+                        // place, a change = delete + add (r10)
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(self.pw_list[i].pw.clone())
+                                    .size(14.0)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(p.text),
                             )
-                            .changed()
-                        {
-                            self.pw_list[i].pw = pw;
-                            dirty = true;
-                        }
+                            .selectable(true),
+                        );
                     } else {
                         ui.add(egui::Label::new(
                             egui::RichText::new(pwlist::masked(&self.pw_list[i].pw))
@@ -6306,8 +6329,18 @@ if let Some(path) = self.shot.clone() {
                         ));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_ghost(ui, "trash", i18n::t("set.pw_del")).clicked() {
-                            remove = Some(i);
+                        let armed = self.pw_del_arm == Some(i);
+                        let tip = if armed {
+                            i18n::t("set.pw_del_sure")
+                        } else {
+                            i18n::t("set.pw_del")
+                        };
+                        if icon_ghost(ui, if armed { "check" } else { "trash" }, tip).clicked() {
+                            if armed {
+                                remove = Some(i);
+                            } else {
+                                self.pw_del_arm = Some(i);
+                            }
                         }
                         if icon_ghost(
                             ui,
@@ -6337,9 +6370,16 @@ if let Some(path) = self.shot.clone() {
                         .color(p.muted),
                 );
             }
+            if remove.is_none() && arm_before.is_some() && self.pw_del_arm == arm_before
+                && ui.input(|i| i.pointer.any_click())
+            {
+                // clicked somewhere else: disarm the delete button
+                self.pw_del_arm = None;
+            }
             if let Some(i) = remove {
                 self.pw_list.remove(i);
                 self.pw_show = None;
+                self.pw_del_arm = None;
                 dirty = true;
             }
             ui.add_space(8.0);
@@ -7577,6 +7617,8 @@ if let Some(path) = self.shot.clone() {
         };
         let mut yes = false;
         let mut no = false;
+        let mut old_input = std::mem::take(&mut self.pw_old_input);
+        let wrong = self.pw_old_wrong;
         egui::Window::new(i18n::t("pw.overwrite_title"))
             .collapsible(false)
             .resizable(false)
@@ -7584,6 +7626,26 @@ if let Some(path) = self.shot.clone() {
             .show(ctx, |ui| {
                 ui.set_min_width(340.0);
                 ui.label(i18n::t("pw.overwrite_text"));
+                ui.add_space(8.0);
+                // the current password must be typed: a stray click (or
+                // somebody walking past the screen) cannot replace it (r10)
+                label_small(ui, i18n::t("pw.overwrite_old"));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut old_input)
+                        .password(true)
+                        .desired_width(240.0)
+                        .margin(egui::Margin::symmetric(7, 4)),
+                );
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    yes = true;
+                }
+                if wrong {
+                    ui.label(
+                        egui::RichText::new(i18n::t("pw.overwrite_wrong"))
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(230, 110, 90)),
+                    );
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if accent_button(ui, i18n::t("pw.overwrite_yes"), true).clicked() {
@@ -7594,7 +7656,14 @@ if let Some(path) = self.shot.clone() {
                     }
                 });
             });
+        self.pw_old_input = old_input;
         if yes {
+            let current = ident::fixed_password()
+                .unwrap_or_else(|| self.shared.password.lock().unwrap().clone());
+            if !secstore::same_secret(self.pw_old_input.trim(), &current) {
+                self.pw_old_wrong = true;
+                return;
+            }
             let fresh = match what {
                 PwOverwrite::Regenerate => ident::random_password(),
                 PwOverwrite::Setup(pw) => pw,
@@ -7603,8 +7672,12 @@ if let Some(path) = self.shot.clone() {
             let _ = ident::set_fixed_password(Some(fresh.as_str()));
             self.pw_fixed = true;
             self.pw_overwrite = None;
+            self.pw_old_input.clear();
+            self.pw_old_wrong = false;
         } else if no {
             self.pw_overwrite = None;
+            self.pw_old_input.clear();
+            self.pw_old_wrong = false;
         }
     }
 
@@ -8723,6 +8796,8 @@ enum SettingsTab {
 
 /// Breite, ab der der Inhalt nicht weiter auseinandergezogen wird.
 const CONTENT_MAX: f32 = 1180.0;
+/// How long the start page password stays readable after clicking the eye.
+const PW_REVEAL_SECS: Duration = Duration::from_secs(10);
 
 /// Schriften. Auf Windows sieht die mitgelieferte Segoe UI richtig aus, auf
 /// dem Mac die System-Schrift, unter Linux DejaVu/Noto. Findet sich nichts,

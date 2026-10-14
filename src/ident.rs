@@ -210,17 +210,26 @@ fn password_file() -> PathBuf {
     config_dir().join("password.txt")
 }
 
-/// Optional fixed password for unattended access:
-/// put it into <config dir>/password.txt (one line). If the file is missing a
-/// fresh random session password is generated on every start.
+/// Optional fixed password for unattended access, stored sealed
+/// (`secstore`: DPAPI on Windows, AES-GCM elsewhere) in
+/// <config dir>/password.txt. A legacy plain text file is still read and
+/// rewritten sealed on first use (r10). If the file is missing a fresh random
+/// session password is generated on every start.
 pub fn fixed_password() -> Option<String> {
-    let s = fs::read_to_string(password_file()).ok()?;
-    let s = s.trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
+    let raw = fs::read_to_string(password_file()).ok()?;
+    let raw = raw.trim().trim_start_matches('\u{feff}').to_string();
+    if raw.is_empty() {
+        return None;
     }
+    let plain = crate::secstore::open(&raw)?;
+    if plain.is_empty() {
+        return None;
+    }
+    if !crate::secstore::is_sealed(&raw) {
+        // migrate the old plain text file; failing to do so changes nothing
+        let _ = crate::secstore::write_sealed_file(&password_file(), &plain);
+    }
+    Some(plain)
 }
 
 /// Is a permanent password configured on THIS machine? Every installation
@@ -229,16 +238,13 @@ pub fn has_fixed_password() -> bool {
     fixed_password().is_some()
 }
 
-/// Stores (or removes) the permanent password of this machine.
+/// Stores (or removes) the permanent password of this machine, sealed.
 /// `None` or an empty string switches back to "new random password on every
 /// start", which is the TeamViewer-like default.
 pub fn set_fixed_password(pw: Option<&str>) -> std::io::Result<()> {
     let file = password_file();
     match pw.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(s) => {
-            let _ = fs::create_dir_all(config_dir());
-            fs::write(&file, s)
-        }
+        Some(s) => crate::secstore::write_sealed_file(&file, s),
         None => match fs::remove_file(&file) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -259,6 +265,37 @@ mod tests {
         assert!(!p.contains('0') && !p.contains('1') && !p.contains('l') && !p.contains('o'));
         // two draws in a row must not be identical
         assert_ne!(p, random_password());
+    }
+
+    fn own_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fv-ident-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&d);
+        set_test_config_dir(d.clone());
+        d
+    }
+
+    #[test]
+    fn fixed_password_is_not_stored_in_plain_text() {
+        let d = own_dir("sealed");
+        set_fixed_password(Some("my-secret-pw-42")).unwrap();
+        let raw = fs::read_to_string(d.join("password.txt")).unwrap();
+        assert!(!raw.contains("my-secret-pw-42"), "plain text on disk: {raw}");
+        assert!(crate::secstore::is_sealed(&raw));
+        assert_eq!(fixed_password().as_deref(), Some("my-secret-pw-42"));
+        assert!(has_fixed_password());
+        set_fixed_password(None).unwrap();
+        assert!(!has_fixed_password());
+    }
+
+    #[test]
+    fn legacy_plain_password_file_is_migrated() {
+        let d = own_dir("migrate");
+        fs::write(d.join("password.txt"), "legacy-plain-pw\n").unwrap();
+        assert_eq!(fixed_password().as_deref(), Some("legacy-plain-pw"));
+        let raw = fs::read_to_string(d.join("password.txt")).unwrap();
+        assert!(!raw.contains("legacy-plain-pw"), "not migrated: {raw}");
+        // still the same password after the migration
+        assert_eq!(fixed_password().as_deref(), Some("legacy-plain-pw"));
     }
 }
 
