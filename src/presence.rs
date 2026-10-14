@@ -165,15 +165,22 @@ pub fn online_url(relay_url: &str) -> String {
 }
 
 /// Asks the relay about a bunch of IDs at once.
-pub fn query(relay_url: &str, ids: &[String]) -> Result<HashMap<String, Presence>> {
+///
+/// Without `token` the relay only says online/offline. When a FleiTec account
+/// is signed in, the token (in the `Authorization` header, never in the URL)
+/// additionally unlocks name and last-seen time - for the IDs in that
+/// account's own address book (r6). Older relays ignore the header.
+pub fn query(relay_url: &str, ids: &[String], token: &str) -> Result<HashMap<String, Presence>> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
     let list: Vec<&str> = ids.iter().map(|s| s.as_str()).take(200).collect();
     let url = format!("{}?ids={}", online_url(relay_url), list.join(","));
-    let mut resp = ureq::get(&url)
-        .call()
-        .map_err(|e| anyhow!("{}: {}", url, e))?;
+    let mut rq = ureq::get(&url);
+    if !token.is_empty() {
+        rq = rq.header("authorization", format!("Bearer {}", token).as_str());
+    }
+    let mut resp = rq.call().map_err(|e| anyhow!("{}: {}", url, e))?;
     let body = resp
         .body_mut()
         .read_to_string()
@@ -222,7 +229,8 @@ impl Watch {
         std::thread::spawn(move || loop {
             let ids = me.wanted.lock().unwrap().clone();
             if !ids.is_empty() {
-                if let Ok(map) = query(&me.relay, &ids) {
+                let token = crate::account::load().map(|a| a.token).unwrap_or_default();
+                if let Ok(map) = query(&me.relay, &ids, &token) {
                     let mut st = me.state.lock().unwrap();
                     for (k, v) in map {
                         st.insert(k, v);
@@ -268,6 +276,59 @@ mod tests {
             online_url("ws://192.168.1.60:7180/fv/ws"),
             "http://192.168.1.60:7180/fv/online"
         );
+    }
+
+    /// One-shot HTTP server: answers with `body`, returns the request head it got.
+    fn serve_online(body: &'static str) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 2048];
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = c.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            c.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&got).to_string()
+        });
+        (port, h)
+    }
+
+    #[test]
+    fn query_without_account_sends_no_token_and_reads_a_minimal_reply() {
+        // new relay, anonymous: only {online}; name/seen default to empty
+        let (port, h) = serve_online(r#"{"ids":{"123456789":{"online":true}}}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let m = query(&relay, &["123456789".to_string()], "").unwrap();
+        let req = h.join().unwrap().to_lowercase();
+        assert!(req.starts_with("get /fv/online?ids=123456789 http/1.1"), "{}", req);
+        assert!(!req.contains("authorization"), "{}", req);
+        assert!(!req.contains("token"), "{}", req);
+        let p = &m["123456789"];
+        assert!(p.online && p.name.is_empty() && p.seen == 0);
+    }
+
+    #[test]
+    fn query_with_account_puts_the_token_in_the_header_only() {
+        let (port, h) = serve_online(r#"{"ids":{"1":{"online":false,"name":"Flei-ONE","seen":5}}}"#);
+        let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
+        let m = query(&relay, &["1".to_string()], "tok-0123456789").unwrap();
+        let req = h.join().unwrap().to_lowercase();
+        assert!(req.starts_with("get /fv/online?ids=1 http/1.1"), "token must not be in the address: {}", req);
+        assert!(req.contains("authorization: bearer tok-0123456789\r\n"), "{}", req);
+        assert_eq!(m["1"].name, "Flei-ONE");
+        assert_eq!(m["1"].seen, 5);
     }
 
     #[test]

@@ -1,0 +1,437 @@
+diff --git a/relay/relay.js b/relay/relay.js
+index e6dec6d..73c4393 100644
+--- a/relay/relay.js
++++ b/relay/relay.js
+@@ -9,6 +9,7 @@ const fs = require('fs');
+ const path = require('path');
+ const crypto = require('crypto');
+ const { clientIp } = require('./clientip');
++const reqauth = require('./reqauth');
+ let account = null;
+ let setups = null;
+ try { account = require(path.join(__dirname, 'account.js')); } catch (e) { console.log('account module missing:', e.message); }
+@@ -687,6 +688,10 @@ function frWeiter(p, res, db, ich, b) {
+ }
+ 
+ const server = http.createServer((req, res) => {
++  // r7: login token via Authorization header; ?token= only as a deprecated fallback (reqauth.js)
++  if (req.url.startsWith('/fv/account') || req.url.startsWith('/fv/setup')) {
++    if (reqauth.prepare(req, res, clientIp(req), log)) return;
++  }
+   // optionales Konto (Adressbuch-Abgleich) - siehe account.js
+   if (account && req.url.startsWith('/fv/account')) {
+     try { if (account.handle(req, res)) return; }
+@@ -752,6 +757,8 @@ const server = http.createServer((req, res) => {
+       ids_known: Object.keys(dir).length,
+       uptime_s: Math.round((Date.now() - stats.started) / 1000),
+       relayed_mb: +(stats.bytes / 1048576).toFixed(1),
++      account_query_token_hits: reqauth.stats.queryTokenHits,
++      online_rate_limited: reqauth.stats.onlineRateLimited,
+     }));
+     return;
+   }
+@@ -889,17 +896,13 @@ const server = http.createServer((req, res) => {
+   }
+ 
+   // ---- who is online:  GET /fv/online?ids=1,2,3 ----
+-  if (req.method === 'GET' && req.url.startsWith('/fv/online')) {
+-    const q = new URL(req.url, 'http://x').searchParams.get('ids') || '';
+-    const out = {};
+-    for (const raw of q.split(',').slice(0, 200)) {
+-      const id = raw.replace(/\D/g, '');
+-      if (!id) continue;
+-      const e = meta[id] || {};
+-      out[id] = { online: hosts.has(id), name: e.name || '', seen: e.seen || 0 };
+-    }
+-    res.writeHead(200, { 'content-type': 'application/json' });
+-    res.end(JSON.stringify({ ids: out }));
++  // r6: rate limited; name/seen only for a signed-in caller and only for IDs in that
++  // caller's own address book, everybody else gets just {online} (see reqauth.js).
++  if (req.method === 'GET' && (req.url === '/fv/online' || req.url.startsWith('/fv/online?'))) {
++    reqauth.onlineReply(req, clientIp(req), hosts, meta, account ? account.whoIs : null, (code, body, headers) => {
++      res.writeHead(code, Object.assign({ 'content-type': 'application/json', 'cache-control': 'no-store' }, headers));
++      res.end(JSON.stringify(body));
++    });
+     return;
+   }
+   res.writeHead(404); res.end('freeviewer-relay');
+diff --git a/relay/reqauth.js b/relay/reqauth.js
+new file mode 100644
+index 0000000..c51e324
+--- /dev/null
++++ b/relay/reqauth.js
+@@ -0,0 +1,166 @@
++'use strict';
++// Request authentication helpers (roadmap r6 + r7, relay patch 0004).
++//
++// r7  The JARVIS login token must not travel in the URL (proxy/access logs, browser
++//     history, Referer). Clients now send it as `Authorization: Bearer <token>`
++//     (or `X-Fv-Token`). The old `?token=` form still works as a deprecated
++//     fallback so already-installed clients keep syncing:
++//       - the response carries `Deprecation: true` + a `Warning` header,
++//       - a hit is counted (health) and logged once per client IP and 10 minutes,
++//         WITHOUT the token and without the query string,
++//       - FV_ACCOUNT_QUERY_TOKEN=0 refuses the fallback once old clients are gone.
++//     account.js / setups.js are not touched: `prepare()` moves a header token into
++//     the in-memory `req.url` they already read (never written to any log).
++// r6  GET /fv/online used to tell anybody the device name and last-online time of
++//     any ID. Now: per-IP rate limit, and `name`/`seen` only for a signed-in caller
++//     and only for IDs in that caller's own address book. Everybody else gets
++//     `{online: bool}` and nothing else.
++//       FV_ONLINE_RATE=<n>            requests per minute and client IP (default 120)
++//       FV_ONLINE_PUBLIC_DETAILS=1    old behaviour (name/seen for everybody)
++
++const fs = require('fs');
++const path = require('path');
++const crypto = require('crypto');
++
++const TOKEN_RE = /^[\w.\-]{10,4096}$/;
++const ACCOUNT_QUERY_TOKEN = process.env.FV_ACCOUNT_QUERY_TOKEN !== '0';
++const ONLINE_RATE = Math.max(1, parseInt(process.env.FV_ONLINE_RATE || '120', 10) || 120);
++const ONLINE_PUBLIC_DETAILS = process.env.FV_ONLINE_PUBLIC_DETAILS === '1';
++const ACC_DIR = process.env.FV_ACC || '/root/fvrelay/accounts';
++const MAX_IDS = 200;
++
++const stats = { queryTokenHits: 0, onlineRateLimited: 0 };
++
++// ---------------------------------------------------------------- r7
++
++/** Token from the request headers, '' when none/invalid. Never looks at the URL. */
++function headerToken(req) {
++  const auth = String(req.headers['authorization'] || '');
++  let t = '';
++  if (/^bearer /i.test(auth)) t = auth.slice(7).trim();
++  else if (req.headers['x-fv-token']) t = String(req.headers['x-fv-token']).trim();
++  return TOKEN_RE.test(t) ? t : '';
++}
++
++const warned = new Map(); // ip -> last log time (ms)
++function warnOnce(ip, pathname, log) {
++  const now = Date.now();
++  const last = warned.get(ip) || 0;
++  if (now - last < 10 * 60 * 1000) return;
++  if (warned.size > 2000) warned.clear();
++  warned.set(ip, now);
++  log('DEPRECATED: login token in the URL on ' + pathname + ' from ' + ip + ' - client must send Authorization: Bearer');
++}
++
++/**
++ * Call before account.js / setups.js. Returns true when the request was answered here.
++ * A header token wins over a query token and is handed on through req.url, so the
++ * existing handlers keep working unchanged.
++ */
++function prepare(req, res, ip, log) {
++  let u;
++  try { u = new URL(req.url, 'http://x'); } catch (_) { return false; }
++  const viaHeader = headerToken(req);
++  if (viaHeader) {
++    u.searchParams.set('token', viaHeader);
++    req.url = u.pathname + u.search;
++    return false;
++  }
++  if (!u.searchParams.has('token')) return false;
++  // legacy: token in the URL
++  stats.queryTokenHits++;
++  if (!ACCOUNT_QUERY_TOKEN) {
++    res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
++    res.end(JSON.stringify({ error: 'nicht angemeldet', hint: 'send the token as Authorization: Bearer' }));
++    return true;
++  }
++  res.setHeader('Deprecation', 'true');
++  res.setHeader('Warning', '299 - "login token in the URL is deprecated, use Authorization: Bearer"');
++  warnOnce(ip, u.pathname, log);
++  return false;
++}
++
++// ---------------------------------------------------------------- r6
++
++const hits = new Map(); // ip -> { start, count }
++/** Fixed one-minute window per client IP. */
++function rateLimit(ip, now) {
++  now = now || Date.now();
++  if (hits.size > 5000) {
++    for (const [k, v] of hits) if (now - v.start >= 60000) hits.delete(k);
++    if (hits.size > 5000) hits.clear();
++  }
++  let h = hits.get(ip);
++  if (!h || now - h.start >= 60000) { h = { start: now, count: 0 }; hits.set(ip, h); }
++  h.count++;
++  if (h.count > ONLINE_RATE) {
++    stats.onlineRateLimited++;
++    return { ok: false, retryAfter: Math.max(1, Math.ceil((h.start + 60000 - now) / 1000)) };
++  }
++  return { ok: true, retryAfter: 0 };
++}
++
++// Same file name as account.js `fileFor` (test_reqauth.js guards drift).
++function accountFile(user) {
++  const safe = crypto.createHash('sha256').update(String(user).toLowerCase()).digest('hex').slice(0, 32);
++  return path.join(process.env.FV_ACC || ACC_DIR, safe + '.json');
++}
++const ownedCache = new Map(); // user -> { at, ids:Set }
++/** IDs in the signed-in user's own address book (tombstones excluded). */
++function ownedIds(user, now) {
++  now = now || Date.now();
++  const hit = ownedCache.get(user);
++  if (hit && now - hit.at < 15000) return hit.ids;
++  let ids = new Set();
++  try {
++    const rec = JSON.parse(fs.readFileSync(accountFile(user), 'utf8'));
++    for (const d of rec.devices || []) if (d && !d.deleted && d.id) ids.add(String(d.id).replace(/\D/g, ''));
++  } catch (_) { ids = new Set(); }
++  if (ownedCache.size > 1000) ownedCache.clear();
++  ownedCache.set(user, { at: now, ids });
++  return ids;
++}
++
++function parseIds(raw) {
++  const out = [];
++  const seen = new Set();
++  for (const part of String(raw || '').split(',').slice(0, MAX_IDS)) {
++    const id = part.replace(/\D/g, '');
++    if (!id || seen.has(id)) continue;
++    seen.add(id);
++    out.push(id);
++  }
++  return out;
++}
++
++/**
++ * Answer for GET /fv/online. `hosts` = Map of connected hosts, `meta` = id -> {name, seen},
++ * `whoIs(token, cb)` from account.js (or null). `cb(code, body, headers)`.
++ */
++function onlineReply(req, ip, hosts, meta, whoIs, cb) {
++  const rl = rateLimit(ip);
++  if (!rl.ok) return cb(429, { error: 'zu viele Anfragen' }, { 'retry-after': String(rl.retryAfter) });
++  const ids = parseIds(new URL(req.url, 'http://x').searchParams.get('ids'));
++  const build = (owned) => {
++    const out = {};
++    for (const id of ids) {
++      const e = { online: hosts.has(id) };
++      if (ONLINE_PUBLIC_DETAILS || (owned && owned.has(id))) {
++        const m = meta[id] || {};
++        e.name = m.name || '';
++        e.seen = m.seen || 0;
++      }
++      out[id] = e;
++    }
++    return { ids: out };
++  };
++  const token = headerToken(req);
++  if (!token || !whoIs) return cb(200, build(null), {});
++  whoIs(token, (err, user) => {
++    // JARVIS down or token unknown: still answer, just without the details
++    if (err || !user) return cb(200, build(null), {});
++    cb(200, build(ownedIds(user)), {});
++  });
++}
++
++module.exports = { headerToken, prepare, rateLimit, ownedIds, accountFile, parseIds, onlineReply, stats, _hits: hits };
+diff --git a/relay/test_reqauth.js b/relay/test_reqauth.js
+new file mode 100644
+index 0000000..6d9cc8b
+--- /dev/null
++++ b/relay/test_reqauth.js
+@@ -0,0 +1,202 @@
++#!/usr/bin/env node
++// Tests for relay patch 0004 (r6 + r7): login token in a header instead of the URL,
++// and /fv/online without leaking names/last-seen. Starts real relay processes with a
++// fake JARVIS in front of them.   node test_reqauth.js   (needs `ws` like relay.js)
++'use strict';
++const http = require('http');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { spawn } = require('child_process');
++let WebSocket;
++try { WebSocket = require('ws'); } catch (e) { WebSocket = require('/root/jarvis/node_modules/ws'); }
++
++let failed = 0;
++function check(name, ok) { console.log((ok ? 'ok   ' : 'FAIL ') + name); if (!ok) failed++; }
++
++const TOK = 'tok-justin-0123456789';
++const TOK_OTHER = 'tok-other-0123456789x';
++const SECRET = 'c'.repeat(64);
++const SECRET2 = 'd'.repeat(64);
++
++function request(port, opts, body) {
++  return new Promise((resolve, reject) => {
++    const r = http.request({ host: '127.0.0.1', port, ...opts }, (res) => {
++      const chunks = [];
++      res.on('data', (c) => chunks.push(c));
++      res.on('end', () => {
++        const text = Buffer.concat(chunks).toString();
++        let json = null; try { json = JSON.parse(text); } catch (_) {}
++        resolve({ status: res.statusCode, headers: res.headers, text, json });
++      });
++    });
++    r.on('error', reject);
++    if (body) r.write(body);
++    r.end();
++  });
++}
++
++// fake JARVIS: GET /api/me with cookie fleitec_session=<token>
++function startJarvis() {
++  return new Promise((resolve) => {
++    const srv = http.createServer((req, res) => {
++      const m = /fleitec_session=([^;]+)/.exec(req.headers.cookie || '');
++      const t = m && m[1];
++      const user = t === TOK ? 'Justin' : t === TOK_OTHER ? 'Other' : null;
++      if (req.url === '/api/me' && user) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ username: user })); }
++      res.writeHead(401); res.end('{}');
++    });
++    srv.listen(0, '127.0.0.1', () => resolve(srv));
++  });
++}
++
++async function startRelay(port, jarvisPort, extraEnv) {
++  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fvauth-'));
++  const env = {
++    ...process.env,
++    FV_PORT: String(port),
++    FV_DATA: path.join(dir, 'hosts.json'),
++    FV_DIST: path.join(dir, 'dist'),
++    FV_UPLOAD_TOKEN_FILE: path.join(dir, 'tok'),
++    FV_ACC: path.join(dir, 'acc'),
++    FV_JARVIS: 'http://127.0.0.1:' + jarvisPort,
++    FV_BUCH: '0',
++    ...extraEnv,
++  };
++  const child = spawn(process.execPath, [path.join(__dirname, 'relay.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
++  let log = '';
++  child.stdout.on('data', (d) => { log += d; });
++  child.stderr.on('data', (d) => { log += d; });
++  for (let i = 0; i < 50; i++) {
++    try { const r = await request(port, { path: '/fv/health' }); if (r.status === 200) return { child, dir, getLog: () => log }; } catch (_) {}
++    await new Promise((r) => setTimeout(r, 100));
++  }
++  child.kill();
++  throw new Error('relay did not start');
++}
++function stop(h) { h.child.kill(); fs.rmSync(h.dir, { recursive: true, force: true }); }
++
++async function registerHost(port, secret, name) {
++  const ws = new WebSocket(`ws://127.0.0.1:${port}/fv/ws`);
++  await new Promise((r) => ws.on('open', r));
++  const reg = new Promise((r) => ws.once('message', (d) => r(JSON.parse(d.toString()))));
++  ws.send(JSON.stringify({ t: 'host_register', secret, name }));
++  const m = await reg;
++  return { ws, id: m.id };
++}
++
++const bearer = (t) => ({ authorization: 'Bearer ' + t });
++const online = (port, ids, headers) => request(port, { path: '/fv/online?ids=' + ids.join(','), headers: headers || {} });
++
++(async () => {
++  const jarvis = await startJarvis();
++  const jp = jarvis.address().port;
++
++  // ======== default config ========
++  let h = await startRelay(17281, jp, { FV_ONLINE_RATE: '1000' });
++  try {
++    const P = 17281;
++    // ---- r7: token in header ----
++    let r = await request(P, { path: '/fv/account/me', headers: bearer(TOK) });
++    check('r7: Authorization Bearer works', r.status === 200 && r.json.username === 'Justin');
++    check('r7: header token -> no Deprecation header', !r.headers['deprecation']);
++    r = await request(P, { path: '/fv/account/me', headers: { 'x-fv-token': TOK } });
++    check('r7: X-Fv-Token works', r.status === 200 && r.json.username === 'Justin');
++    r = await request(P, { path: '/fv/account/me', headers: bearer('tok-bad-0123456789') });
++    check('r7: unknown header token -> 401', r.status === 401);
++    r = await request(P, { path: '/fv/account/me' });
++    check('r7: no token -> 401', r.status === 401);
++    r = await request(P, { path: '/fv/account/me?token=' + TOK_OTHER, headers: bearer(TOK) });
++    check('r7: header wins over a query token', r.status === 200 && r.json.username === 'Justin');
++    r = await request(P, { path: '/fv/account/me', headers: { authorization: 'Bearer x y' } });
++    check('r7: malformed header token -> 401', r.status === 401);
++
++    // ---- r7: deprecated query fallback ----
++    r = await request(P, { path: '/fv/account/me?token=' + TOK });
++    check('r7: ?token= still works (old clients)', r.status === 200 && r.json.username === 'Justin');
++    check('r7: ?token= answer carries Deprecation: true', r.headers['deprecation'] === 'true');
++    check('r7: ?token= answer carries a Warning header', /deprecated/.test(String(r.headers['warning'] || '')));
++    await request(P, { path: '/fv/account/me?token=' + TOK });
++    const health = (await request(P, { path: '/fv/health' })).json;
++    check('r7: health counts query-token hits', health.account_query_token_hits === 2);
++    await new Promise((x) => setTimeout(x, 150));
++    const lg = h.getLog();
++    check('r7: deprecation logged', /DEPRECATED: login token in the URL on \/fv\/account\/me/.test(lg));
++    check('r7: deprecation logged once per IP, not per request', (lg.match(/DEPRECATED/g) || []).length === 1);
++
++    // ---- r7: sync + setups with header ----
++    r = await request(P, { path: '/fv/account/data', method: 'POST', headers: { ...bearer(TOK), 'content-type': 'application/json' } },
++      JSON.stringify({ devices: [{ id: '123456789', name: 'laptop' }] }));
++    check('r7: POST /fv/account/data with header', r.status === 200 && r.json.devices.length === 1);
++    r = await request(P, { path: '/fv/setup/inbox', headers: bearer(TOK) });
++    check('r7: /fv/setup/inbox with header', r.status === 200);
++    r = await request(P, { path: '/fv/setup/inbox' });
++    check('r7: /fv/setup/inbox without token -> 401', r.status === 401);
++
++    // ---- r6: /fv/online ----
++    const host = await registerHost(P, SECRET, 'Flei-ONE');
++    const host2 = await registerHost(P, SECRET2, 'Secret-PC');
++    await request(P, { path: '/fv/account/data', method: 'POST', headers: { ...bearer(TOK), 'content-type': 'application/json' } },
++      JSON.stringify({ devices: [{ id: host.id, name: 'mine' }] }));
++    const ids = [host.id, host2.id, '999999999'];
++
++    r = await online(P, ids);
++    check('r6: anonymous gets online flags', r.status === 200 && r.json.ids[host.id].online === true && r.json.ids['999999999'].online === false);
++    check('r6: anonymous gets NO name / seen', !('name' in r.json.ids[host.id]) && !('seen' in r.json.ids[host.id]) && !/Flei-ONE/.test(r.text));
++    r = await online(P, ids, bearer(TOK));
++    check('r6: signed in: name + seen for an ID in the own address book', r.json.ids[host.id].name === 'Flei-ONE' && r.json.ids[host.id].seen > 0);
++    check('r6: signed in: still nothing for IDs not in the own book', !('name' in r.json.ids[host2.id]) && !/Secret-PC/.test(r.text));
++    r = await online(P, ids, bearer(TOK_OTHER));
++    check('r6: another account does not see the first account\'s devices', !('name' in r.json.ids[host.id]));
++    r = await online(P, ids, bearer('tok-bad-0123456789'));
++    check('r6: invalid token -> minimal answer (no error)', r.status === 200 && !('name' in r.json.ids[host.id]) && r.json.ids[host.id].online === true);
++    r = await request(P, { path: '/fv/online?ids=' + host.id + '&token=' + TOK });
++    check('r6: token in the URL is NOT accepted for details', !('name' in r.json.ids[host.id]));
++    r = await online(P, ['abc', '', host.id, host.id]);
++    check('r6: junk ids ignored, duplicates folded', Object.keys(r.json.ids).length === 1);
++    r = await request(P, { path: '/fv/online' });
++    check('r6: no ids -> empty map', r.status === 200 && Object.keys(r.json.ids).length === 0);
++    check('r6: answer is not cacheable', /no-store/.test(r.headers['cache-control'] || ''));
++
++    // file name derivation equals account.js (guards drift of reqauth.accountFile)
++    const ra = require('./reqauth');
++    process.env.FV_ACC = path.join(h.dir, 'acc');
++    check('reqauth.accountFile points at the file account.js wrote', fs.existsSync(ra.accountFile('Justin')));
++    host.ws.close(); host2.ws.close();
++  } finally { stop(h); }
++
++  // ======== escape hatches ========
++  h = await startRelay(17282, jp, { FV_ONLINE_PUBLIC_DETAILS: '1', FV_ACCOUNT_QUERY_TOKEN: '0', FV_ONLINE_RATE: '1000' });
++  try {
++    const P = 17282;
++    const host = await registerHost(P, SECRET, 'Flei-ONE');
++    let r = await online(P, [host.id]);
++    check('FV_ONLINE_PUBLIC_DETAILS=1: old behaviour (names for everybody)', r.json.ids[host.id].name === 'Flei-ONE');
++    r = await request(P, { path: '/fv/account/me?token=' + TOK });
++    check('FV_ACCOUNT_QUERY_TOKEN=0: ?token= refused', r.status === 401 && /Authorization/.test(r.text));
++    r = await request(P, { path: '/fv/account/me', headers: bearer(TOK) });
++    check('FV_ACCOUNT_QUERY_TOKEN=0: header still works', r.status === 200);
++    host.ws.close();
++  } finally { stop(h); }
++
++  // ======== rate limit ========
++  h = await startRelay(17283, jp, { FV_ONLINE_RATE: '5' });
++  try {
++    const P = 17283;
++    const codes = [];
++    let last = null;
++    for (let i = 0; i < 8; i++) { last = await online(P, ['111111111']); codes.push(last.status); }
++    check('r6: first 5 requests pass', codes.slice(0, 5).every((c) => c === 200));
++    check('r6: 6th request -> 429', codes[5] === 429 && codes[7] === 429);
++    check('r6: 429 carries Retry-After', Number(last.headers['retry-after']) >= 1);
++    const hh = (await request(P, { path: '/fv/health' })).json;
++    check('r6: health counts rate-limited requests', hh.online_rate_limited === 3);
++    // another client address (behind the proxy) has its own budget
++    let r = await request(P, { path: '/fv/online?ids=1', headers: { 'x-forwarded-for': '203.0.113.5' } });
++    check('r6: budget is per client IP (X-Forwarded-For from the proxy)', r.status === 200);
++  } finally { stop(h); }
++
++  jarvis.close();
++  console.log(failed ? `\n${failed} TEST(S) FAILED` : '\nALL TESTS PASSED');
++  process.exit(failed ? 1 : 0);
++})().catch((e) => { console.error('CRASH', e); process.exit(2); });

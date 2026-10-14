@@ -139,6 +139,80 @@ fn post_json(target: &str, body: &str) -> Result<(u16, String)> {
     }
 }
 
+/// Set once a relay refused the header form (401) but accepted the old
+/// `?token=` form: that relay predates relay patch 0004 and does not read
+/// `Authorization` yet. From then on this process goes straight to the old form.
+static LEGACY_QUERY_TOKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+enum Verb {
+    Get,
+    Post,
+}
+
+fn send_once(verb: Verb, target: &str, bearer: Option<&str>, body: &str) -> Result<(u16, String)> {
+    let auth = bearer.map(|t| format!("Bearer {}", t));
+    let res = match verb {
+        Verb::Get => {
+            let mut rq = ureq::get(target);
+            if let Some(a) = &auth {
+                rq = rq.header("authorization", a.as_str());
+            }
+            rq.call()
+        }
+        Verb::Post => {
+            let mut rq = ureq::post(target).header("content-type", "application/json");
+            if let Some(a) = &auth {
+                rq = rq.header("authorization", a.as_str());
+            }
+            rq.send(body)
+        }
+    };
+    match res {
+        Ok(mut r) => {
+            let code = r.status().as_u16();
+            let text = r
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| anyhow!("Antwort unlesbar: {}", e))?;
+            Ok((code, text))
+        }
+        Err(ureq::Error::StatusCode(code)) => Ok((code, String::new())),
+        Err(e) => Err(anyhow!("nicht erreichbar: {}", e)),
+    }
+}
+
+/// A call that needs the login token. The token goes into the `Authorization`
+/// header (r7: an address ends up in proxy logs). Only if the relay answers 401
+/// - an old relay that reads nothing but `?token=` - it is tried ONCE more the
+/// old way; a 401 means the relay did not accept the token anyway, so nothing
+/// valid ends up in an address. The result is remembered in `legacy`.
+fn authed_call_with(
+    legacy: &std::sync::atomic::AtomicBool,
+    verb: Verb,
+    plain: &str,
+    token: &str,
+    body: &str,
+) -> Result<(u16, String)> {
+    use std::sync::atomic::Ordering;
+    if !legacy.load(Ordering::Relaxed) {
+        let r = send_once(verb, plain, Some(token), body)?;
+        if r.0 != 401 {
+            return Ok(r);
+        }
+    }
+    let target = format!("{}?token={}", plain, urlenc(token));
+    let r = send_once(verb, &target, None, body)?;
+    if r.0 != 401 {
+        legacy.store(true, Ordering::Relaxed);
+    }
+    Ok(r)
+}
+
+fn authed_call(verb: Verb, plain: &str, token: &str, body: &str) -> Result<(u16, String)> {
+    authed_call_with(&LEGACY_QUERY_TOKEN, verb, plain, token, body)
+}
+
 /// Anmelden. Gibt die Sitzung zurueck, die dann gespeichert werden kann.
 pub fn login(relay_url: &str, user: &str, pass: &str) -> Result<Session> {
     let body = serde_json::to_string(&LoginReq {
@@ -177,9 +251,8 @@ pub fn login(relay_url: &str, user: &str, pass: &str) -> Result<Session> {
 
 /// Abgleich in einem Rutsch: eigene Liste hoch, zusammengefuehrte zurueck.
 pub fn sync(relay_url: &str, token: &str, devices: Vec<SyncDevice>) -> Result<SyncReply> {
-    let target = format!("{}?token={}", url(relay_url, "data"), urlenc(token));
     let body = serde_json::to_string(&SyncReq { devices }).map_err(|e| anyhow!("{}", e))?;
-    let (status, text) = post_json(&target, &body)?;
+    let (status, text) = authed_call(Verb::Post, &url(relay_url, "data"), token, &body)?;
     if status == 401 {
         return Err(anyhow!("nicht angemeldet"));
     }
@@ -363,22 +436,6 @@ pub struct SetupClaimReply {
     pub error: String,
 }
 
-/// Ein GET mit JSON-Antwort (die Inbox ist ein GET).
-fn get_json(target: &str) -> Result<(u16, String)> {
-    match ureq::get(target).call() {
-        Ok(mut r) => {
-            let code = r.status().as_u16();
-            let text = r
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| anyhow!("Antwort unlesbar: {}", e))?;
-            Ok((code, text))
-        }
-        Err(ureq::Error::StatusCode(code)) => Ok((code, String::new())),
-        Err(e) => Err(anyhow!("nicht erreichbar: {}", e)),
-    }
-}
-
 /// Einmal-Code erzeugen (braucht die Konto-Anmeldung).
 pub fn setup_create(
     relay_url: &str,
@@ -387,7 +444,6 @@ pub fn setup_create(
     name_hint: &str,
     max_uses: u32,
 ) -> Result<(String, String, String)> {
-    let target = format!("{}?token={}", plain_url(relay_url, "setup/create"), urlenc(token));
     let body = serde_json::to_string(&SetupCreateReq {
         password,
         name_hint,
@@ -395,7 +451,7 @@ pub fn setup_create(
         brand: crate::brand::SLUG,
     })
     .map_err(|e| anyhow!("{}", e))?;
-    let (status, text) = post_json(&target, &body)?;
+    let (status, text) = authed_call(Verb::Post, &plain_url(relay_url, "setup/create"), token, &body)?;
     let r: SetupCreateReply = serde_json::from_str(&text).unwrap_or_default();
     if status == 401 {
         return Err(anyhow!("nicht angemeldet"));
@@ -413,8 +469,7 @@ pub fn setup_create(
 
 /// Posteingang des Besitzers: wartende Codes + frisch eingerichtete Geraete.
 pub fn setup_inbox(relay_url: &str, token: &str) -> Result<(Vec<SetupPending>, Vec<SetupClaimed>)> {
-    let target = format!("{}?token={}", plain_url(relay_url, "setup/inbox"), urlenc(token));
-    let (status, text) = get_json(&target)?;
+    let (status, text) = authed_call(Verb::Get, &plain_url(relay_url, "setup/inbox"), token, "")?;
     if status == 401 {
         return Err(anyhow!("nicht angemeldet"));
     }
@@ -458,9 +513,8 @@ struct SetupRevokeReq<'a> {
 /// Einen wartenden Link widerrufen - schon eingerichtete Geraete behalten
 /// ihre Einrichtung, der Rest des Links wird sofort unbrauchbar.
 pub fn setup_revoke(relay_url: &str, token: &str, code: &str) -> Result<()> {
-    let target = format!("{}?token={}", plain_url(relay_url, "setup/revoke"), urlenc(token));
     let body = serde_json::to_string(&SetupRevokeReq { code }).map_err(|e| anyhow!("{}", e))?;
-    let (status, _text) = post_json(&target, &body)?;
+    let (status, _text) = authed_call(Verb::Post, &plain_url(relay_url, "setup/revoke"), token, &body)?;
     match status {
         200 => Ok(()),
         401 => Err(anyhow!("nicht angemeldet")),
@@ -597,6 +651,41 @@ mod fleitec_id_vectors {
         serde_json::from_str(include_str!("../tests/fleitec-id-vectors.json")).unwrap()
     }
 
+    /// Reads one HTTP request (head + body) from a connection.
+    fn read_request(c: &mut std::net::TcpStream) -> String {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = c.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+            if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&got[..i]).to_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if got.len() >= i + 4 + want {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&got).to_string()
+    }
+
+    fn reply_text(status: u16, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {} X\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status,
+            headers,
+            body.len(),
+            body
+        )
+    }
+
     /// Answers ONE request and hands back what the client sent (head + body).
     fn serve_once(
         status: u16,
@@ -605,37 +694,29 @@ mod fleitec_id_vectors {
     ) -> (u16, std::thread::JoinHandle<String>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let reply = format!(
-            "HTTP/1.1 {} X\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            status,
-            headers,
-            body.len(),
-            body
-        );
+        let reply = reply_text(status, headers, body);
         let h = std::thread::spawn(move || {
             let (mut c, _) = l.accept().unwrap();
-            let mut got = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = c.read(&mut buf).unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                got.extend_from_slice(&buf[..n]);
-                if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&got[..i]).to_lowercase();
-                    let want = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if got.len() >= i + 4 + want {
-                        break;
-                    }
-                }
-            }
+            let got = read_request(&mut c);
             c.write_all(reply.as_bytes()).unwrap();
-            String::from_utf8_lossy(&got).to_string()
+            got
+        });
+        (port, h)
+    }
+
+    /// Answers one request per entry (status, body) in order; hands back all requests.
+    fn serve_seq(answers: Vec<(u16, &str)>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let replies: Vec<String> = answers.iter().map(|(st, b)| reply_text(*st, "", b)).collect();
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for r in replies {
+                let (mut c, _) = l.accept().unwrap();
+                seen.push(read_request(&mut c));
+                c.write_all(r.as_bytes()).unwrap();
+            }
+            seen
         });
         (port, h)
     }
@@ -726,7 +807,7 @@ mod fleitec_id_vectors {
     }
 
     #[test]
-    fn sync_sends_the_token_in_the_query_and_reads_the_reply() {
+    fn sync_sends_the_token_in_the_header_and_reads_the_reply() {
         let (port, h) = serve_once(
             200,
             "",
@@ -734,9 +815,11 @@ mod fleitec_id_vectors {
         );
         let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
         let dev = crate::partners::SyncDevice { id: "111".into(), name: "a".into(), ..Default::default() };
-        let r = sync(&relay, "a b/c", vec![dev]).unwrap();
+        let r = sync(&relay, "tok-0123456789", vec![dev]).unwrap();
         let req = h.join().unwrap();
-        assert!(req.starts_with("POST /fv/account/data?token=a%20b%2Fc HTTP/1.1"), "{}", req);
+        assert!(req.starts_with("POST /fv/account/data HTTP/1.1"), "token must not be in the address: {}", req);
+        assert!(!req.contains("token="), "{}", req);
+        assert!(req.to_lowercase().contains("authorization: bearer tok-0123456789\r\n"), "{}", req);
         let body: serde_json::Value = serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["devices"][0]["id"], "111");
         assert_eq!(r.username, "Justin");
@@ -746,8 +829,56 @@ mod fleitec_id_vectors {
     }
 
     #[test]
+    fn old_relay_401_falls_back_to_the_query_once_and_remembers_it() {
+        let legacy = std::sync::atomic::AtomicBool::new(false);
+        // old relay: header ignored -> 401, query accepted
+        let (port, h) = serve_seq(vec![(401, "{}"), (200, r#"{"ok":true}"#), (200, r#"{"ok":true}"#)]);
+        let plain = format!("http://127.0.0.1:{}/fv/account/data", port);
+        let r = authed_call_with(&legacy, Verb::Post, &plain, "tok-a/b-0123456789", "{}").unwrap();
+        assert_eq!(r.0, 200);
+        assert!(legacy.load(std::sync::atomic::Ordering::Relaxed), "legacy relay is remembered");
+        let r2 = authed_call_with(&legacy, Verb::Post, &plain, "tok-a/b-0123456789", "{}").unwrap();
+        assert_eq!(r2.0, 200);
+        let seen = h.join().unwrap();
+        assert!(seen[0].starts_with("POST /fv/account/data HTTP/1.1"), "{}", seen[0]);
+        assert!(seen[0].to_lowercase().contains("authorization: bearer tok-a/b-0123456789"), "{}", seen[0]);
+        assert!(seen[1].starts_with("POST /fv/account/data?token=tok-a%2Fb-0123456789 HTTP/1.1"), "{}", seen[1]);
+        assert!(!seen[1].to_lowercase().contains("authorization:"), "{}", seen[1]);
+        assert!(seen[2].starts_with("POST /fv/account/data?token="), "second call goes straight to the old form: {}", seen[2]);
+    }
+
+    #[test]
+    fn real_401_stays_401_and_does_not_flip_to_legacy() {
+        let legacy = std::sync::atomic::AtomicBool::new(false);
+        let (port, h) = serve_seq(vec![(401, "{}"), (401, "{}")]);
+        let plain = format!("http://127.0.0.1:{}/fv/setup/inbox", port);
+        let r = authed_call_with(&legacy, Verb::Get, &plain, "tok-0123456789", "").unwrap();
+        assert_eq!(r.0, 401);
+        assert!(!legacy.load(std::sync::atomic::Ordering::Relaxed));
+        let seen = h.join().unwrap();
+        assert!(seen[0].starts_with("GET /fv/setup/inbox HTTP/1.1"), "{}", seen[0]);
+    }
+
+    #[test]
+    fn new_relay_never_sees_the_token_in_the_address() {
+        let legacy = std::sync::atomic::AtomicBool::new(false);
+        let (port, h) = serve_seq(vec![(200, r#"{"pending":[],"claimed":[]}"#)]);
+        let plain = format!("http://127.0.0.1:{}/fv/setup/inbox", port);
+        let r = authed_call_with(&legacy, Verb::Get, &plain, "tok-0123456789", "").unwrap();
+        assert_eq!(r.0, 200);
+        assert!(!legacy.load(std::sync::atomic::Ordering::Relaxed));
+        let seen = h.join().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one request");
+        assert!(!seen[0].contains("token="), "{}", seen[0]);
+    }
+
+    #[test]
     fn sync_401_means_signed_out() {
-        let (port, h) = serve_once(401, "", r#"{"error":"nicht angemeldet"}"#);
+        // header form 401, then the old form 401 as well: the token is simply not valid
+        let (port, h) = serve_seq(vec![
+            (401, r#"{"error":"nicht angemeldet"}"#),
+            (401, r#"{"error":"nicht angemeldet"}"#),
+        ]);
         let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
         let e = match sync(&relay, "tok", vec![]) {
             Err(e) => e.to_string(),

@@ -41,11 +41,28 @@ fi
 if [ -f "$RELAY_LOCAL_CLIENTIP" ]; then
   [ "$(rx relay "sha256sum $RELAY_DIR/clientip.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_CLIENTIP")" ] && ok "live clientip.js == repo clientip.js" || bad "live clientip.js missing or different"
 fi
+if [ -f "$RELAY_LOCAL_REQAUTH" ]; then
+  [ "$(rx relay "sha256sum $RELAY_DIR/reqauth.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_REQAUTH")" ] && ok "live reqauth.js == repo reqauth.js" || bad "live reqauth.js missing or different"
+fi
 rx relay "grep -c client_ip $RELAY_DIR/relay.js || true" | grep -qv '^0$' && ok "relay.js sends client_ip to hosts" || bad "relay.js has no client_ip"
 rx relay "tail -n 40 $RELAY_DIR/relay.log | grep -ci 'Cannot find module' || true" | grep -qx 0 && ok "no 'Cannot find module' in the log" || bad "module error in the relay log"
 expect "health" 200 "curl -s -o /dev/null -m5 -w %{http_code} http://127.0.0.1:7180/fv/health"
 expect "feed readable" 200 "curl -s -o /dev/null -m5 -w %{http_code} http://127.0.0.1:7180/fv/version"
 rx relay "tail -n 5 $RELAY_DIR/relay.log | grep -ci 'error\\|exception' || true" | awk '{ if ($1>0) print "  [WARN] error words in the last log lines"; }'
+
+step "r6 + r7: /fv/online and the login token (read-only requests, no token is used)"
+ONE_ID=$(rx relay "node -e \"const d=JSON.parse(require('fs').readFileSync('$RELAY_DIR/devices.json','utf8'));const k=Object.keys(d).filter(x=>d[x]&&d[x].name)[0]||'';console.log(k)\"" 2>/dev/null || true)
+if [[ "$ONE_ID" =~ ^[0-9]{9,10}$ ]]; then
+  n=$(rx relay "curl -s -m5 'http://127.0.0.1:7180/fv/online?ids=$ONE_ID' | grep -c '\"name\"' || true")
+  [ "$n" = 0 ] && ok "anonymous /fv/online shows no device name" || bad "anonymous /fv/online still leaks a name (r6)"
+  n=$(curl -s -m10 "https://freeviewer.fleitec.com/fv/online?ids=$ONE_ID" | grep -c '"name"' || true)
+  [ "$n" = 0 ] && ok "public /fv/online shows no device name" || bad "public /fv/online still leaks a name (r6)"
+else
+  note "no device with a name in devices.json - name check skipped"
+fi
+expect "/fv/online answers" 200 "curl -s -o /dev/null -m5 -w %{http_code} 'http://127.0.0.1:7180/fv/online?ids=111111111'"
+expect "bogus Authorization token is refused" 401 "curl -s -o /dev/null -m10 -w %{http_code} -H 'Authorization: Bearer bogus-token-0123456789' http://127.0.0.1:7180/fv/account/me"
+rx relay "curl -s -m5 http://127.0.0.1:7180/fv/health" | grep -q account_query_token_hits && ok "health shows account_query_token_hits (deprecated ?token= users; 0 = safe to set FV_ACCOUNT_QUERY_TOKEN=0)" || bad "health lacks account_query_token_hits - old relay.js?"
 
 step "publish endpoint (all must be refused, nothing may be written)"
 expect "no token" 403 "$CURL '$BASE?version=9.9.9&name=smoketest.exe' --data-binary x"

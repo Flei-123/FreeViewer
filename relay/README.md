@@ -3,7 +3,9 @@
 > The code in this folder is the last known **live snapshot** (modules `account.js`, `setups.js`, `buch.js`,
 > update hosting, friends, ...) - see `../docs/RELAY-LIVE-IMPORT.md`. The text below describes the original core.
 > Publishing is hardened (LAN only, token in header, signed releases): `../docs/UPDATE-SIGNING.md`.
-> Tests: `npm install && node test_relay.js && node test_publish.js`.
+> Tests: `npm install && node test_relay.js && node test_publish.js && node test_clientip.js && node test_reqauth.js`.
+> Login token: `Authorization: Bearer` (`?token=` deprecated, `FV_ACCOUNT_QUERY_TOKEN=0` refuses it); `/fv/online`: rate limit `FV_ONLINE_RATE`,
+> name/last-seen only for the signed-in owner (`FV_ONLINE_PUBLIC_DETAILS=1` = old behaviour) - see `reqauth.js`, patch `0004`.
 
 A small Node.js service. Its core does two things:
 

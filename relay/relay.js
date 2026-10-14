@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { clientIp } = require('./clientip');
+const reqauth = require('./reqauth');
 let account = null;
 let setups = null;
 try { account = require(path.join(__dirname, 'account.js')); } catch (e) { console.log('account module missing:', e.message); }
@@ -687,6 +688,10 @@ function frWeiter(p, res, db, ich, b) {
 }
 
 const server = http.createServer((req, res) => {
+  // r7: login token via Authorization header; ?token= only as a deprecated fallback (reqauth.js)
+  if (req.url.startsWith('/fv/account') || req.url.startsWith('/fv/setup')) {
+    if (reqauth.prepare(req, res, clientIp(req), log)) return;
+  }
   // optionales Konto (Adressbuch-Abgleich) - siehe account.js
   if (account && req.url.startsWith('/fv/account')) {
     try { if (account.handle(req, res)) return; }
@@ -752,6 +757,8 @@ const server = http.createServer((req, res) => {
       ids_known: Object.keys(dir).length,
       uptime_s: Math.round((Date.now() - stats.started) / 1000),
       relayed_mb: +(stats.bytes / 1048576).toFixed(1),
+      account_query_token_hits: reqauth.stats.queryTokenHits,
+      online_rate_limited: reqauth.stats.onlineRateLimited,
     }));
     return;
   }
@@ -889,17 +896,13 @@ const server = http.createServer((req, res) => {
   }
 
   // ---- who is online:  GET /fv/online?ids=1,2,3 ----
-  if (req.method === 'GET' && req.url.startsWith('/fv/online')) {
-    const q = new URL(req.url, 'http://x').searchParams.get('ids') || '';
-    const out = {};
-    for (const raw of q.split(',').slice(0, 200)) {
-      const id = raw.replace(/\D/g, '');
-      if (!id) continue;
-      const e = meta[id] || {};
-      out[id] = { online: hosts.has(id), name: e.name || '', seen: e.seen || 0 };
-    }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ids: out }));
+  // r6: rate limited; name/seen only for a signed-in caller and only for IDs in that
+  // caller's own address book, everybody else gets just {online} (see reqauth.js).
+  if (req.method === 'GET' && (req.url === '/fv/online' || req.url.startsWith('/fv/online?'))) {
+    reqauth.onlineReply(req, clientIp(req), hosts, meta, account ? account.whoIs : null, (code, body, headers) => {
+      res.writeHead(code, Object.assign({ 'content-type': 'application/json', 'cache-control': 'no-store' }, headers));
+      res.end(JSON.stringify(body));
+    });
     return;
   }
   res.writeHead(404); res.end('freeviewer-relay');

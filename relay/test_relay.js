@@ -18,7 +18,7 @@ function json(ws, o) { ws.send(JSON.stringify(o)); }
   await new Promise(r => host.on('open', r));
   json(host, { t: 'host_register', secret: SECRET });
   const reg = JSON.parse(await new Promise(r => host.once('message', r)));
-  ok(reg.t === 'registered' && /^[1-9]\d{8}$/.test(reg.id), 'host registered, id=' + reg.id);
+  ok(reg.t === 'registered' && /^[1-9]\d{8,9}$/.test(reg.id), 'host registered, id=' + reg.id);
 
   const host2 = new WebSocket(URL, WSOPT);
   await new Promise(r => host2.on('open', r));

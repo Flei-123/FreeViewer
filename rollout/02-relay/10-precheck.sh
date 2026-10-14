@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Block 2 / step 10 - READ-ONLY precheck for the relay patch (r2).
-#  * the new relay.js in the repo = live snapshot + patches 0001 + 0002 (real client IP) + 0003 (Mac publish) and nothing else;
-#    relay/clientip.js = what patch 0002 creates; its unit test passes
+#  * the new relay.js in the repo = live snapshot + patches 0001 + 0002 (real client IP) + 0003 (Mac publish) + 0004 (r6/r7) and nothing else;
+#    relay/clientip.js = what patch 0002 creates, relay/reqauth.js = what patch 0004 creates; their tests pass
 #  * live relay.js on CT110 is byte-identical to the snapshot (else STOP: drift)
 #  * relay healthy, nobody connected, node syntax of the new file ok
 #  * who still publishes via the public URL (this breaks in strict mode)
@@ -34,7 +34,17 @@ if git -C "$REPO_ROOT" cat-file -e "$RELAY_BASE_COMMIT:relay/relay.js" 2>/dev/nu
   else
     bad "missing $RELAY_PATCH3 (r28 not on this branch)"
   fi
-  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
+  if [ -f "$RELAY_PATCH4" ]; then
+    (cd "$tmp" && patch -s -p1 <"$RELAY_PATCH4") && ok "patch 0004 (r6 + r7: token header, /fv/online) applies on top" || bad "patch 0004 does not apply"
+  else
+    bad "missing $RELAY_PATCH4 (r6/r7 not on this branch)"
+  fi
+  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003+0004 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
+  if [ -f "$tmp/relay/reqauth.js" ] && [ -f "$RELAY_LOCAL_REQAUTH" ]; then
+    [ "$(sha_of "$tmp/relay/reqauth.js")" = "$(sha_of "$RELAY_LOCAL_REQAUTH")" ] && ok "repo reqauth.js == what patch 0004 creates" || bad "repo reqauth.js differs from patch 0004"
+  else
+    bad "reqauth.js missing (patch or repo)"
+  fi
   if [ -f "$tmp/relay/clientip.js" ] && [ -f "$RELAY_LOCAL_CLIENTIP" ]; then
     [ "$(sha_of "$tmp/relay/clientip.js")" = "$(sha_of "$RELAY_LOCAL_CLIENTIP")" ] && ok "repo clientip.js == what patch 0002 creates" || bad "repo clientip.js differs from patch 0002"
   else
@@ -45,6 +55,10 @@ else
   bad "base commit missing"
 fi
 node --check "$RELAY_LOCAL_CLIENTIP" && ok "node --check relay/clientip.js" || bad "clientip.js has a syntax error"
+node --check "$RELAY_LOCAL_REQAUTH" && ok "node --check relay/reqauth.js" || bad "reqauth.js has a syntax error"
+if [ -f "$REPO_ROOT/relay/test_reqauth.js" ]; then
+  (cd "$REPO_ROOT/relay" && node test_reqauth.js >/dev/null 2>&1) && ok "node relay/test_reqauth.js passes (r6 + r7)" || bad "relay/test_reqauth.js FAILED"
+fi
 if [ -f "$REPO_ROOT/relay/test_clientip.js" ]; then
   (cd "$REPO_ROOT/relay" && node test_clientip.js >/dev/null 2>&1) && ok "node relay/test_clientip.js passes" || bad "relay/test_clientip.js FAILED"
 fi

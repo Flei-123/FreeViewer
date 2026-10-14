@@ -7,8 +7,12 @@
 #                  publish only from the LAN, token only in Authorization/X-Upload-Token.
 #   Switching A -> B later: rerun with --mode strict --only-dropin (no file copy, one restart).
 #
-# Files put on CT110: relay.js (r2 + r63) AND clientip.js (new, relay.js requires it from the same directory).
-# clientip.js is moved into place BEFORE relay.js, both before the restart.
+# Files put on CT110: relay.js (r2 + r63 + r28 + r6/r7) AND clientip.js + reqauth.js (new, relay.js requires them from the same directory).
+# Both modules are moved into place BEFORE relay.js, all before the restart.
+# r7 effect: the account/setup token may come as 'Authorization: Bearer' (old '?token=' keeps working, answers carry
+# 'Deprecation: true', counted in /fv/health as account_query_token_hits). Later: FV_ACCOUNT_QUERY_TOKEN=0 refuses it.
+# r6 effect: /fv/online is rate limited (FV_ONLINE_RATE, default 120/min/IP) and gives name/last-seen only to a signed-in
+# caller for IDs in the own address book; old clients without account see online/offline only (FV_ONLINE_PUBLIC_DETAILS=1 = old behaviour).
 #
 # Downtime: one service restart (~3 s). Running sessions drop, hosts reconnect by themselves.
 # The script restarts only if sessions_active == 0 (override: --force) and undoes itself
@@ -33,6 +37,8 @@ if [ "$act" = 0 ]; then ok "no active session"; elif fv_flag force; then warn "s
 if ! fv_flag only-dropin; then
   node --check "$RELAY_LOCAL_JS" && ok "node --check (local)" || bad "local relay.js broken"
   [ -f "$RELAY_LOCAL_CLIENTIP" ] && node --check "$RELAY_LOCAL_CLIENTIP" && ok "node --check clientip.js (local)" || bad "local clientip.js missing or broken (patch 0002)"
+  [ -f "$RELAY_LOCAL_REQAUTH" ] && node --check "$RELAY_LOCAL_REQAUTH" && ok "node --check reqauth.js (local)" || bad "local reqauth.js missing or broken (patch 0004)"
+  grep -q "require('./reqauth')" "$RELAY_LOCAL_JS" && ok "relay.js requires ./reqauth" || bad "relay.js does not require ./reqauth - repo not at patch 0004?"
   grep -q "require('./clientip')" "$RELAY_LOCAL_JS" && ok "relay.js requires ./clientip" || bad "relay.js does not require ./clientip - repo not at patch 0002?"
   live=$(rx relay "sha256sum $RELAY_DIR/relay.js | cut -d' ' -f1")
   new=$(sha_of "$RELAY_LOCAL_JS")
@@ -47,8 +53,9 @@ gate
 if ! fv_flag only-dropin; then
   step "copy + syntax-check the new file on CT110 (service untouched so far)"
   put relay "$RELAY_LOCAL_CLIENTIP" "$RELAY_DIR/clientip.js.new"
+  put relay "$RELAY_LOCAL_REQAUTH" "$RELAY_DIR/reqauth.js.new"
   put relay "$RELAY_LOCAL_JS" "$RELAY_DIR/relay.js.new"
-  mx relay "node --check both, clientip.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f relay.js.new relay.js && node -e \"require('./clientip')\" && sha256sum relay.js clientip.js"
+  mx relay "node --check all, clientip.js + reqauth.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check reqauth.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f reqauth.js.new reqauth.js && mv -f relay.js.new relay.js && node -e \"require('./clientip');require('./reqauth')\" && sha256sum relay.js clientip.js reqauth.js"
 fi
 
 step "drop-in + restart (mode $mode)"

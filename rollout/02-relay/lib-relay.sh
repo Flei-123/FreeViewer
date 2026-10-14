@@ -8,6 +8,8 @@ RELAY_LOCAL_JS="$REPO_ROOT/relay/relay.js"
 RELAY_PATCH="$REPO_ROOT/relay/patches/0001-publish-hardening.patch"
 RELAY_PATCH2="$REPO_ROOT/relay/patches/0002-real-client-ip.patch"   # r63: real viewer IP (X-Forwarded-For) for the host guard
 RELAY_PATCH3="$REPO_ROOT/relay/patches/0003-mac-publish.patch"       # r28: platform=mac publish (mac_* fields, own signature/version)
+RELAY_PATCH4="$REPO_ROOT/relay/patches/0004-token-header-online-minimal.patch"  # r6 + r7: Bearer token header (?token= deprecated), /fv/online minimal + rate limit
+RELAY_LOCAL_REQAUTH="$REPO_ROOT/relay/reqauth.js"                  # required by relay.js after patch 0004 (same directory)
 RELAY_LOCAL_CLIENTIP="$REPO_ROOT/relay/clientip.js"                # required by relay.js after patch 0002 (same directory)
 RELAY_BASE_COMMIT="cc41c25"   # commit that holds the imported live snapshot (docs/RELAY-LIVE-IMPORT.md)
 
