@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # constants are used by the scripts that source this file
 # Helpers shared by the SFU merge scripts (block 4). Source after lib/common.sh.
-# The patch series is the finished W19 package: $SFU_REPO/rollout/0001..0010-*.patch,
+# The patch series is the finished W19 package: $SFU_REPO/rollout/0001..0013-*.patch,
 # built from branch `live-merged` (= `live` import of CT111 43d84ff + fv-w15/w19 work).
 
 SFU_REPO="${SFU_REPO:-/root/projects/freemeet-sfu}"

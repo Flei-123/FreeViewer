@@ -1,6 +1,6 @@
 # Block 4 - SFU live merge (r65, W19 package)
 
-Package: `/root/projects/freemeet-sfu/rollout/0001..0010-*.patch` (override with `SFU_REPO=`). Built from branch
+Package: `/root/projects/freemeet-sfu/rollout/0001..0013-*.patch` (override with `SFU_REPO=`). Built from branch
 `live-merged` = `live` (read-only import of CT111 `43d84ff`) + fv-w15/w19 work. `10-precheck.sh` proves locally that
 the series applied to `live` gives exactly `live-merged`. Nothing here was run against CT111.
 Details/measurements: `$SFU_REPO/docs/LIVE-MERGE.md`, `PERFORMANCE.md`.
