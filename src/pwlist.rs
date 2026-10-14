@@ -6,21 +6,14 @@
 //! Passwoerter hinterlegen (mit einer Bezeichnung, damit man weiss, wem man
 //! welches gegeben hat). Jedes davon oeffnet diesen PC.
 //!
-//! EHRLICH GESAGT: die Passwoerter stehen im Klartext in
-//! `<config>/passwords.json`. Anders geht es nicht - der Rechner muss aus dem
-//! Passwort denselben Argon2-Schluessel ableiten wie die Gegenseite, ein Hash
-//! reicht dafuer nicht. Die Datei liegt im Konfigurationsordner, den nur
-//! Administratoren beschreiben koennen. Wer Zugriff auf diese Datei hat, hat
-//! ohnehin schon den Rechner.
-//!
-//! Why not hashed / encrypted (r10): the proof the viewer sends is
-//! Argon2id(password, per-session salt) -> HMAC. The host has to recompute it
-//! from the plain password for every session, so any stored form must be
-//! reversible by the host itself. Encrypting it needs a machine-bound key
-//! (Windows DPAPI, machine scope, because the service runs as SYSTEM and the
-//! UI as the user) and cannot be tested on this build host; a hash would
-//! break the protocol (needs a PAKE). So: plain text, protected by the file
-//! ACL, until a protocol revision allows verifier-based auth.
+//! Storage (r10/r64): the host has to recompute Argon2id(password, session
+//! salt) for every session, so a one-way hash is impossible without a
+//! protocol change (needs a PAKE). The passwords are therefore stored
+//! ENCRYPTED in `<config>/passwords.json` (see `secstore`: Windows DPAPI,
+//! machine scope; elsewhere AES-GCM with a key derived from the machine
+//! identity; file mode 0600 on Unix). Old plain text files are read and
+//! rewritten sealed on first load. A copied file is worthless on another PC;
+//! anybody who can run code as a user on THIS PC can still open it.
 
 use std::path::PathBuf;
 
@@ -57,15 +50,17 @@ pub fn load() -> Vec<Entry> {
         None => return Vec::new(),
     };
     let mut out = Vec::new();
+    let mut needs_migration = false;
     for item in arr.iter().take(MAX) {
-        let pw = item
-            .get("pw")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        if pw.is_empty() {
-            continue;
+        let stored = item.get("pw").and_then(|x| x.as_str()).unwrap_or("");
+        if !crate::secstore::is_sealed(stored) && !stored.is_empty() {
+            needs_migration = true;
         }
+        // a sealed value that cannot be opened here (other machine) is skipped
+        let pw = match crate::secstore::open(stored) {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
         let label = item
             .get("label")
             .and_then(|x| x.as_str())
@@ -75,6 +70,10 @@ pub fn load() -> Vec<Entry> {
             .take(40)
             .collect();
         out.push(Entry { label, pw });
+    }
+    if needs_migration {
+        // old plain text file: rewrite it sealed, best effort
+        let _ = save(&out);
     }
     out
 }
@@ -87,13 +86,16 @@ pub fn save(list: &[Entry]) -> std::io::Result<()> {
         }
         let mut m = serde_json::Map::new();
         m.insert("label".into(), serde_json::Value::from(e.label.clone()));
-        m.insert("pw".into(), serde_json::Value::from(e.pw.clone()));
+        m.insert(
+            "pw".into(),
+            serde_json::Value::from(crate::secstore::seal(&e.pw)),
+        );
         arr.push(serde_json::Value::Object(m));
     }
     std::fs::create_dir_all(crate::ident::config_dir())?;
     let text = serde_json::to_string_pretty(&serde_json::Value::Array(arr))
         .unwrap_or_else(|_| "[]".to_string());
-    std::fs::write(path(), text)
+    crate::secstore::write_private(&path(), &text)
 }
 
 /// Nur die Passwoerter - das braucht die Anmeldung.
@@ -161,5 +163,54 @@ mod tests {
         assert!(!masked("geheim").contains('g'));
         // sehr lange Passwoerter verraten ihre Laenge nicht
         assert_eq!(masked(&"x".repeat(40)).chars().count(), 16);
+    }
+
+    fn own_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fv-pwl-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&d);
+        crate::ident::set_test_config_dir(d.clone());
+        d
+    }
+
+    #[test]
+    fn list_is_stored_sealed_and_loads_back() {
+        let d = own_dir("sealed");
+        let list = vec![Entry {
+            label: "phone".into(),
+            pw: "very-secret-pw".into(),
+        }];
+        save(&list).unwrap();
+        let raw = std::fs::read_to_string(d.join("passwords.json")).unwrap();
+        assert!(!raw.contains("very-secret-pw"), "plain text on disk");
+        assert!(raw.contains("phone"));
+        assert!(load() == list);
+    }
+
+    #[test]
+    fn legacy_plain_list_is_migrated() {
+        let d = own_dir("migrate");
+        std::fs::write(
+            d.join("passwords.json"),
+            r#"[{"label":"old","pw":"legacy-plain-pw"}]"#,
+        )
+        .unwrap();
+        let l = load();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].pw, "legacy-plain-pw");
+        let raw = std::fs::read_to_string(d.join("passwords.json")).unwrap();
+        assert!(!raw.contains("legacy-plain-pw"), "not migrated");
+        assert_eq!(load()[0].pw, "legacy-plain-pw");
+        assert_eq!(candidates(), vec!["legacy-plain-pw".to_string()]);
+    }
+
+    #[test]
+    fn unopenable_sealed_entry_is_skipped() {
+        let d = own_dir("foreign");
+        std::fs::write(
+            d.join("passwords.json"),
+            r#"[{"label":"x","pw":"fvk1:00ff"}]"#,
+        )
+        .unwrap();
+        assert!(load().is_empty());
     }
 }

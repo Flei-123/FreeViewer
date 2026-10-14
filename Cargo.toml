@@ -62,6 +62,7 @@ nokhwa = { version = "0.10", features = ["input-avfoundation"] }
 version = "0.58"
 features = [
     "Win32_Foundation",
+    "Win32_Security_Cryptography",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dwm",

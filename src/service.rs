@@ -48,7 +48,10 @@ pub fn state_file() -> PathBuf {
 /// Reads what the running agent published (id and password to show).
 pub fn published() -> Option<Published> {
     let raw = std::fs::read_to_string(state_file()).ok()?;
-    serde_json::from_str(&raw).ok()
+    let mut p: Published = serde_json::from_str(&raw).ok()?;
+    // the agent publishes the password sealed (r10); old agents plain
+    p.password = crate::secstore::open(&p.password)?;
+    Some(p)
 }
 
 fn now() -> u64 {
@@ -69,7 +72,7 @@ pub fn publish_loop(shared: std::sync::Arc<crate::shared::Shared>) {
             if !id.is_empty() {
                 let p = Published {
                     id: id.clone(),
-                    password: pw.clone(),
+                    password: crate::secstore::seal(&pw),
                     at: now(),
                     desktop: std::env::var("FV_DESKTOP").unwrap_or_default(),
                 };
@@ -78,7 +81,7 @@ pub fn publish_loop(shared: std::sync::Arc<crate::shared::Shared>) {
                 // rewrite once a minute anyway, so `at` stays fresh
                 if key != last || now() % 60 < 3 {
                     last = key;
-                    let _ = std::fs::write(state_file(), json);
+                    let _ = crate::secstore::write_private(&state_file(), &json);
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -228,7 +231,7 @@ mod imp {
         // unattended access needs a password that survives restarts
         if !dir.join("password.txt").exists() {
             let pw = crate::ident::random_password();
-            std::fs::write(dir.join("password.txt"), &pw)?;
+            crate::secstore::write_sealed_file(&dir.join("password.txt"), &pw)?;
         }
         Ok(dir)
     }
