@@ -6,12 +6,12 @@
 #   2. viewer auto-reconnect: relay dies and comes back, the viewer session
 #      resumes by itself (r25)
 #
-#   tools/hostguard-test.sh [--bin PATH] [--port N]
+#   tools/hostguard-test.sh [--bin PATH] [--port N]   (default port: a free one)
 #
 # Everything lives in one mktemp directory that is removed on exit.
 set -uo pipefail
 
-PORT=17190
+PORT=""
 BIN="${FV_BIN:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -21,6 +21,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# default: a free port picked by the kernel (a fixed port can collide with another test run on the same machine)
+if [ -z "$PORT" ]; then
+  PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 17190)"
+fi
 [ -n "$BIN" ] || BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/freeviewer"
 [ -x "$BIN" ] || { echo "binary not found: $BIN" >&2; exit 1; }
 
