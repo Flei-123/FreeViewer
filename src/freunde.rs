@@ -1,45 +1,45 @@
-//! Freunde - Freundschaftsanfragen, Freundesliste, Ein-Klick-Zugriff.
+//! Friends - friend requests, friend list, one-click access.
 //!
-//! Der Unterschied zum Adressbuch (`partners.rs`): dort traegt jeder fuer sich
-//! ein, wen er kennt - niemand muss zustimmen. Eine FREUNDSCHAFT entsteht nur,
-//! wenn BEIDE Seiten zugestimmt haben. Erst dann sieht man einander in der
-//! Liste, sieht wer online ist, und kann mit einem Klick ein Meeting starten
-//! oder um Fernwartung bitten.
+//! The difference from the address book (`partners.rs`): there everyone enters
+//! on their own whom they know - nobody has to agree. A FRIENDSHIP only arises
+//! when BOTH sides have agreed. Only then do you see each other in the
+//! list, see who is online, and can start a meeting with one click
+//! or ask for remote support.
 //!
-//! Wo was liegt:
+//! Where things live:
 //!
-//! * Der Relay fuehrt die Wahrheit: `/fv/freunde/*` (siehe relay.js). Er ist
-//!   der einzige Weg, auf dem eine Anfrage den anderen ueberhaupt erreicht.
-//! * Diese Datei haelt eine KOPIE davon neben den anderen Einstellungen
-//!   (`freunde.json` im Ordner aus `ident::config_dir()`, genau wie
-//!   `partners.json`). Damit steht die Liste sofort auf dem Schirm, auch wenn
-//!   der Relay gerade nicht erreichbar ist.
+//! * The relay holds the truth: `/fv/freunde/*` (see relay.js). It is
+//!   the only way a request reaches the other side at all.
+//! * This file keeps a COPY of it next to the other settings
+//!   (`freunde.json` in the folder from `ident::config_dir()`, just like
+//!   `partners.json`). This way the list is on screen immediately, even when
+//!   the relay is currently not reachable.
 //!
-//! Ohne Konto haengt alles an der FreeViewer-ID dieses Rechners. Mit Konto
-//! traegt der Relay zusaetzlich den Kontonamen ein - dann ist dieselbe
-//! Freundesliste auf jedem angemeldeten Geraet zu sehen. Beides gleichzeitig
-//! ist der Normalfall: die ID gilt immer, das Konto kommt obendrauf.
+//! Without an account everything hangs on the FreeViewer ID of this machine. With an account
+//! the relay additionally records the account name - then the same
+//! friend list is visible on every logged-in device. Both at the same time
+//! is the normal case: the ID always applies, the account comes on top.
 //!
-//! SEIT r7 (24.09.2026) - EIN ADRESSBUCH: Mit Konto liest der Relay die
-//! Freunde aus dem Fleitec-Adressbuch (fleikontakte), demselben wie FirnChat
-//! und die Kontakte-Seite. Eine Freundschaft ist dann eine zwischen PERSONEN:
-//! ein Freund kann mehrere PCs haben (`geraete`), oder gar keinen - dann ist
-//! `fvid` leer und er wird ueber `person` (Konto-ID) bzw. `@handle`
-//! angesprochen. Ohne Konto bleibt alles wie vorher an der FreeViewer-ID.
-//! Der Schluessel eines Eintrags ist deshalb `schluessel()`: die Nummer,
-//! sonst "k:<person>", sonst "@handle" - genau das versteht der Relay auch.
+//! SINCE r7 (24.09.2026) - ONE ADDRESS BOOK: With an account the relay reads the
+//! friends from the Fleitec address book (fleikontakte), the same one as FirnChat
+//! and the contacts page. A friendship is then one between PERSONS:
+//! a friend can have several PCs (`geraete`), or none at all - then
+//! `fvid` is empty and they are addressed via `person` (account ID) or
+//! `@handle`. Without an account everything stays on the FreeViewer ID as before.
+//! The key of an entry is therefore `schluessel()`: the number,
+//! otherwise "k:<person>", otherwise "@handle" - the relay understands exactly that too.
 //!
-//! Ausweisen tut sich der Client genau wie beim WebSocket-Anmelden
-//! (`net::json_register`): mit dem Geheimnis aus `identity.txt`. Es steht
-//! IMMER im Rumpf der Anfrage, nie in der Adresse.
+//! The client identifies itself exactly as with the WebSocket login
+//! (`net::json_register`): with the secret from `identity.txt`. It is
+//! ALWAYS in the request body, never in the URL.
 //!
-//! Nichts hier blockiert die Oberflaeche. Jeder Netzaufruf laeuft in einem
-//! eigenen Faden; Ergebnisse kommen ueber `Dienst::meldung()` zurueck - dasselbe
-//! Briefkasten-Muster wie in `account.rs` und `presence.rs`.
+//! Nothing here blocks the UI. Every network call runs in its
+//! own thread; results come back via `Dienst::meldung()` - the same
+//! mailbox pattern as in `account.rs` and `presence.rs`.
 
-// Das Modul ist vollstaendig, die Oberflaeche wird getrennt angebunden.
-// Bis dahin sind die oeffentlichen Bausteine aus Sicht des Binaerprogramms
-// "unbenutzt" - ohne diese Zeile stuenden hier dutzende Warnungen.
+// The module is complete, the UI is attached separately.
+// Until then the public building blocks are "unused" from the point of view of the
+// binary program - without this line dozens of warnings would appear here.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -48,13 +48,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Wie oft im Hintergrund abgeglichen wird, wenn nichts los ist.
+/// How often to sync in the background when nothing is going on.
 const ABGLEICH_SEKUNDEN: u64 = 20;
 
-/// Kennt der Relay keine Einladungen, wird so lange nicht danach gefragt.
+/// If the relay does not know invitations, it is not asked for them for this long.
 const EINLADUNG_PAUSE_SEKUNDEN: u64 = 600;
 
-/// Obergrenze, damit eine kaputte Antwort die Datei nicht sprengt.
+/// Upper limit, so that a broken answer cannot blow up the file.
 const MAX_FREUNDE: usize = 500;
 const MAX_ANFRAGEN: usize = 200;
 
@@ -63,30 +63,30 @@ const MAX_ANFRAGEN: usize = 200;
 /// Ein bestaetigter Freund. Beide haben zugestimmt.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Freund {
-    /// Die FreeViewer-ID des anderen - damit geht Meeting und Fernwartung.
+    /// The FreeViewer ID of the other - used for meeting and remote support.
     pub fvid: String,
-    /// Wie der andere sich nennt (leer = ID anzeigen).
+    /// What the other calls themselves (empty = show ID).
     #[serde(default)]
     pub name: String,
     /// Seit wann befreundet, unix Sekunden.
     #[serde(default)]
     pub seit: u64,
-    /// Ist er gerade erreichbar? Kommt vom Relay.
+    /// Is the friend reachable right now? Comes from the relay.
     #[serde(default)]
     pub online: bool,
     /// Zuletzt gesehen, unix MILLIsekunden (wie in `presence.rs`).
     #[serde(default)]
     pub gesehen: u64,
-    /// Konto-ID der Person im Adressbuch (leer = Freund nur ueber die ID).
+    /// Account ID of the person in the address book (empty = friend only via ID).
     #[serde(default)]
     pub person: String,
-    /// Sein @Benutzername (ohne @), falls er ein Konto hat.
+    /// Their @username (without @), if they have an account.
     #[serde(default)]
     pub handle: String,
-    /// Alle FreeViewer-PCs dieser Person, online zuerst. `fvid` ist der erste.
+    /// All FreeViewer PCs of this person, online first. `fvid` is the first.
     #[serde(default)]
     pub geraete: Vec<FreundGeraet>,
-    /// "buch" (Adressbuch) oder "fv" (alte Liste am Relay, ohne Konto).
+    /// "buch" (address book) or "fv" (old list at the relay, without account).
     #[serde(default)]
     pub quelle: String,
 }
@@ -103,8 +103,8 @@ pub struct FreundGeraet {
     pub gesehen: u64,
 }
 
-/// Nummer, sonst "k:<person>", sonst "@handle" - der Schluessel, den der
-/// Relay fuer diesen Eintrag versteht.
+/// Number, otherwise "k:<person>", otherwise "@handle" - the key the
+/// relay understands for this entry.
 fn schluessel_aus(fvid: &str, person: &str, handle: &str) -> String {
     if !fvid.is_empty() {
         fvid.to_string()
@@ -117,8 +117,8 @@ fn schluessel_aus(fvid: &str, person: &str, handle: &str) -> String {
     }
 }
 
-/// Passt der Schluessel `k` (schon mit `ziel_norm` bereinigt) zu diesem
-/// Eintrag? Nummer, Konto oder @Name - alles zeigt auf dieselbe Person.
+/// Does key `k` (already cleaned with `ziel_norm`) match this
+/// entry? Number, account or @name - all point to the same person.
 fn passt(k: &str, fvid: &str, person: &str, handle: &str) -> bool {
     if k.is_empty() {
         return false;
@@ -133,7 +133,7 @@ fn passt(k: &str, fvid: &str, person: &str, handle: &str) -> bool {
 }
 
 impl Freund {
-    /// Was in der Liste steht: Name, sonst @Name, sonst die huebsch gesetzte ID.
+    /// What shows in the list: name, otherwise @name, otherwise the nicely formatted ID.
     pub fn anzeige(&self) -> String {
         if !self.name.trim().is_empty() {
             self.name.clone()
@@ -148,19 +148,19 @@ impl Freund {
         schluessel_aus(&self.fvid, &self.person, &self.handle)
     }
 
-    /// Ist `k` dieser Freund - ueber irgendeinen seiner PCs, sein Konto oder
-    /// seinen @Namen?
+    /// Is `k` this friend - via any of their PCs, their account or
+    /// their @name?
     pub fn ist(&self, k: &str) -> bool {
         passt(k, &self.fvid, &self.person, &self.handle)
             || (!k.is_empty() && self.geraete.iter().any(|g| g.fvid == k))
     }
 
-    /// Hat er einen PC, zu dem man sich verbinden kann?
+    /// Does the friend have a PC one can connect to?
     pub fn hat_pc(&self) -> bool {
         !self.fvid.is_empty()
     }
 
-    /// "gerade eben", "vor 3 Min." - gleiche Sprache wie das Adressbuch.
+    /// "just now", "3 min ago" - same wording as the address book.
     pub fn zuletzt(&self) -> String {
         if self.online {
             "online".to_string()
@@ -169,19 +169,19 @@ impl Freund {
         }
     }
 
-    /// Kann man ihn jetzt sofort anklingeln? (Nur mit PC.)
+    /// Can the friend be rung up right now? (Only with a PC.)
     pub fn erreichbar(&self) -> bool {
         self.online && self.hat_pc()
     }
 }
 
-/// Wer hat gefragt - ich oder der andere?
+/// Who asked - me or the other?
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Richtung {
-    /// Jemand will mich als Freund. Ich muss annehmen oder ablehnen.
+    /// Someone wants me as a friend. I have to accept or decline.
     Eingehend,
-    /// Ich habe gefragt und warte auf die Antwort.
+    /// I asked and am waiting for the answer.
     Ausgehend,
 }
 
@@ -194,12 +194,12 @@ impl Default for Richtung {
 /// Eine offene Freundschaftsanfrage.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Anfrage {
-    /// Die ANDERE Seite: bei `Eingehend` der Absender, bei `Ausgehend` der
-    /// Empfaenger. (Der Name ist so gewaehlt, weil die Liste fast immer die
-    /// eingehenden zeigt - dort ist es woertlich "von wem".)
+    /// The OTHER side: for `Eingehend` the sender, for `Ausgehend` the
+    /// recipient. (The name is chosen this way because the list almost always shows
+    /// the incoming ones - there it literally means "from whom".)
     #[serde(rename = "fvid", alias = "von_fvid")]
     pub von_fvid: String,
-    /// Wie der andere sich nennt.
+    /// What the other calls themselves.
     #[serde(default)]
     pub name: String,
     /// Wann gestellt, unix Sekunden.
@@ -209,10 +209,10 @@ pub struct Anfrage {
     /// Freier Gruss des Absenders (darf leer sein).
     #[serde(default)]
     pub nachricht: String,
-    /// Ist der andere gerade online?
+    /// Is the other currently online?
     #[serde(default)]
     pub online: bool,
-    /// Konto-ID der anderen Seite (Anfrage aus dem Adressbuch).
+    /// Account ID of the other side (request from the address book).
     #[serde(default)]
     pub person: String,
     #[serde(default)]
@@ -222,8 +222,8 @@ pub struct Anfrage {
 }
 
 impl Anfrage {
-    /// Der Schluessel der anderen Seite - unabhaengig von der Richtung:
-    /// ihre Nummer, sonst "k:<person>", sonst "@handle".
+    /// The key of the other side - independent of the direction:
+    /// their number, otherwise "k:<person>", otherwise "@handle".
     pub fn gegenueber(&self) -> String {
         schluessel_aus(&self.von_fvid, &self.person, &self.handle)
     }
@@ -247,7 +247,7 @@ impl Anfrage {
     }
 }
 
-/// Ein Eintrag der Blockliste.
+/// An entry of the block list.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Blockiert {
     #[serde(default)]
@@ -272,28 +272,28 @@ impl Blockiert {
     }
 }
 
-/// Was schiefgehen kann. Alle Meldungen sind fertige deutsche Saetze und
-/// koennen direkt angezeigt werden.
+/// What can go wrong. All messages are ready-made German sentences and
+/// can be displayed directly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fehler {
-    /// Die eigene ID kann nicht der eigene Freund sein.
+    /// The own ID cannot be the own friend.
     SelbstAnfrage,
     SchonBefreundet,
     SchonAngefragt,
-    /// Annehmen/Ablehnen ohne dass eine Anfrage vorliegt.
+    /// Accept/decline without a request being present.
     KeineAnfrage,
     KeinFreund,
     Blockiert,
     UngueltigeId,
-    /// Ein @Name geht nur mit Konto (das Adressbuch haengt am Konto).
+    /// An @name only works with an account (the address book hangs on the account).
     KontoNoetig,
-    /// Der Relay hat abgelehnt oder war nicht erreichbar.
+    /// The relay declined or was not reachable.
     Netz(String),
-    /// Der Relay kennt noch keine Meeting-Einladungen (aelterer Stand).
+    /// The relay does not know meeting invitations yet (older version).
     KeinKanal,
-    /// Der Freund hat (noch) keinen FreeViewer-PC, an den eine Einladung gehen koennte.
+    /// The friend has no (yet) FreeViewer PC an invitation could go to.
     KeinGeraet,
-    /// Ein Link mit Ende-zu-Ende-Schluessel darf nie ueber den Relay.
+    /// A link with an end-to-end key must never go through the relay.
     LinkMitSchluessel,
 }
 
@@ -321,41 +321,41 @@ impl std::fmt::Display for Fehler {
 
 impl std::error::Error for Fehler {}
 
-/// Was ein Hintergrundlauf der Oberflaeche zurueckmeldet.
+/// What a background run reports back to the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Meldung {
     /// Abgleich fertig: so viele Freunde, so viele offene Anfragen.
     Abgeglichen { freunde: usize, offen: usize },
-    /// Anfrage ist beim Relay angekommen.
+    /// Request has arrived at the relay.
     Angefragt(String),
-    /// Der andere hatte mich schon gefragt - wir sind jetzt sofort Freunde.
+    /// The other had already asked me - we are friends immediately now.
     SofortBefreundet(String),
     Angenommen(String),
     Abgelehnt(String),
     Entfernt(String),
-    /// Meeting-Einladung ist beim Relay (und damit beim Freund) angekommen.
+    /// Meeting invitation has arrived at the relay (and thus at the friend).
     EinladungGesendet(String),
-    /// Der Relay kann keine Einladungen zustellen: der Link muss von Hand zum Freund.
+    /// The relay cannot deliver invitations: the link has to go to the friend by hand.
     EinladungNurLink(String),
-    /// Ein Freund hat mich in ein Meeting eingeladen (Name, Titel).
+    /// A friend invited me to a meeting (name, title).
     EinladungErhalten(String, String),
-    /// Der Relay hat abgelehnt (Text ist anzeigefertig).
+    /// The relay declined (text is ready to display).
     Fehlgeschlagen(String),
 }
 
-/// Nur Ziffern - der Nutzer tippt "497 628 420" oder "497-628-420".
+/// Digits only - the user types "497 628 420" or "497-628-420".
 pub fn normalisieren(fvid: &str) -> String {
     fvid.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
-/// Sieht das nach einer FreeViewer-ID aus? (9 oder 10 Stellen)
+/// Does this look like a FreeViewer ID? (9 or 10 digits)
 pub fn ist_id(fvid: &str) -> bool {
     let d = normalisieren(fvid);
     (9..=10).contains(&d.len())
 }
 
-/// Was der Nutzer eintippt, bereinigt: "@Anna " -> "@anna",
-/// "k:<konto>" bleibt, alles andere -> nur die Ziffern.
+/// What the user types, cleaned: "@Anna " -> "@anna",
+/// "k:<account>" stays, everything else -> digits only.
 pub fn ziel_norm(s: &str) -> String {
     let t = s.trim();
     if let Some(h) = t.strip_prefix('@') {
@@ -376,13 +376,13 @@ pub fn ziel_norm(s: &str) -> String {
     normalisieren(t)
 }
 
-/// Taugt das als Ziel? Eine FreeViewer-ID, ein @Name oder "k:<konto>".
+/// Is this usable as a target? A FreeViewer ID, an @name or "k:<account>".
 pub fn ist_ziel(s: &str) -> bool {
     let z = ziel_norm(s);
     z.starts_with('@') || z.starts_with("k:") || ist_id(&z)
 }
 
-/// Fuer Meldungen: "497 628 420", "@anna" oder "dieser Kontakt".
+/// For messages: "497 628 420", "@anna" or "dieser Kontakt".
 pub fn ziel_anzeige(s: &str) -> String {
     let z = ziel_norm(s);
     if z.starts_with('@') {
@@ -403,11 +403,11 @@ fn jetzt() -> u64 {
 
 // =================================================================== Buch
 
-/// Die lokale Kopie: Freunde, offene Anfragen, Blockliste.
+/// The local copy: friends, open requests, block list.
 ///
-/// Liegt als `freunde.json` im selben Ordner wie `partners.json` und
-/// `identity.txt`. Ohne Konto ist das die einzige Fassung, die dieser Rechner
-/// hat; mit Konto ist sie zusaetzlich beim Relay hinterlegt.
+/// Lives as `freunde.json` in the same folder as `partners.json` and
+/// `identity.txt`. Without an account this is the only version this machine
+/// has; with an account it is additionally stored at the relay.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Buch {
     #[serde(default)]
@@ -418,10 +418,10 @@ pub struct Buch {
     pub anfragen: Vec<Anfrage>,
     #[serde(default)]
     pub blockiert: Vec<Blockiert>,
-    /// Zu welcher FreeViewer-ID dieser Stand gehoert (Kontrolle beim Laden).
+    /// Which FreeViewer ID this state belongs to (check on load).
     #[serde(default)]
     pub fvid: String,
-    /// Zu welchem Konto - leer heisst "ohne Konto".
+    /// Which account - empty means "without account".
     #[serde(default)]
     pub konto: String,
     /// Wann zuletzt erfolgreich abgeglichen, unix Sekunden.
@@ -451,12 +451,12 @@ impl Buch {
         crate::ident::config_dir().join("freunde.bak.json")
     }
 
-    /// Laedt die Liste.
+    /// Loads the list.
     ///
-    /// Anders als beim Adressbuch ist eine LEERE Liste hier voellig gueltig -
-    /// wer seinen letzten Freund entfernt, hat eben keine mehr. Die
-    /// Sicherungskopie kommt deshalb nur zum Zug, wenn die Datei fehlt oder
-    /// kaputt ist; sonst wuerden entfernte Freunde wieder auftauchen.
+    /// Unlike the address book, an EMPTY list is perfectly valid here -
+    /// whoever removes their last friend simply has none left. The
+    /// backup copy therefore only comes into play when the file is missing or
+    /// broken; otherwise removed friends would reappear.
     pub fn load() -> Self {
         if let Ok(s) = std::fs::read_to_string(Self::path()) {
             if let Ok(b) = serde_json::from_str::<Self>(&s) {
@@ -471,8 +471,8 @@ impl Buch {
         Self::default()
     }
 
-    /// Schreibt die Liste - erst daneben, dann umbenennen, damit es nie eine
-    /// halbe Datei gibt.
+    /// Writes the list - first next to it, then rename, so that there is never
+    /// a half file.
     pub fn save(&self) {
         let dir = crate::ident::config_dir();
         let _ = std::fs::create_dir_all(&dir);
@@ -503,7 +503,7 @@ impl Buch {
         self.blockiert.iter().any(|b| b.ist(&id))
     }
 
-    /// Wie heisst der Eintrag hinter diesem Schluessel? Fuer Meldungen.
+    /// What is the entry behind this key called? For messages.
     pub fn anzeige_fuer(&self, k: &str) -> String {
         let id = ziel_norm(k);
         if let Some(f) = self.freunde.iter().find(|f| f.ist(&id)) {
@@ -515,7 +515,7 @@ impl Buch {
         ziel_anzeige(&id)
     }
 
-    /// Online zuerst, dann nach Namen - so liest sich eine Freundesliste.
+    /// Online first, then by name - that is how a friend list reads well.
     pub fn sortiert(&self) -> Vec<Freund> {
         let mut v = self.freunde.clone();
         v.sort_by(|a, b| {
@@ -549,12 +549,12 @@ impl Buch {
             .position(|a| a.ist(&id) && a.richtung == richtung)
     }
 
-    // ------------------------------------------------------- Zustandswechsel
+    // ------------------------------------------------------- state changes
     //
-    // Diese Schritte laufen OHNE Netz und sind die Stellen, an denen der
-    // Zustand sich aendern darf. Der Relay macht dieselben Pruefungen noch
-    // einmal - hier stehen sie, damit die Oberflaeche sofort antworten kann
-    // und nicht erst auf die Leitung wartet.
+    // These steps run WITHOUT network and are the places where the
+    // state may change. The relay makes the same checks once
+    // more - they are here so that the UI can answer immediately
+    // and does not first wait on the wire.
 
     /// Ich stelle eine Anfrage.
     pub fn anfrage_stellen(&mut self, fvid: &str, name: &str) -> Result<Anfrage, Fehler> {
@@ -574,7 +574,7 @@ impl Buch {
         if self.anfrage_von(&id, Richtung::Ausgehend).is_some() {
             return Err(Fehler::SchonAngefragt);
         }
-        // Er hat mich schon gefragt: dann sind sich beide einig.
+        // They already asked me: then both agree.
         if let Some(i) = self.anfrage_von(&id, Richtung::Eingehend) {
             let a = self.anfragen[i].clone();
             self.annehmen(&a.gegenueber())?;
@@ -603,7 +603,7 @@ impl Buch {
         Ok(a)
     }
 
-    /// Eine Anfrage kam vom Relay herein. `true`, wenn sie neu war.
+    /// A request came in from the relay. `true` if it was new.
     pub fn anfrage_eintragen(&mut self, mut a: Anfrage) -> bool {
         a.von_fvid = normalisieren(&a.von_fvid);
         let k = a.gegenueber();
@@ -619,9 +619,9 @@ impl Buch {
         true
     }
 
-    /// Ich nehme eine EINGEHENDE Anfrage an - erst damit entsteht die
-    /// Freundschaft. Ohne vorliegende Anfrage geht das nicht; ein Fremder
-    /// wird so niemals still zum Freund.
+    /// I accept an INCOMING request - only with this does the
+    /// friendship arise. Without a pending request this is not possible; a stranger
+    /// can thus never silently become a friend.
     pub fn annehmen(&mut self, fvid: &str) -> Result<Freund, Fehler> {
         let id = ziel_norm(fvid);
         if let Some(f) = self.freund(&id) {
@@ -631,7 +631,7 @@ impl Buch {
             .anfrage_von(&id, Richtung::Eingehend)
             .ok_or(Fehler::KeineAnfrage)?;
         let a = self.anfragen.remove(i);
-        // eine eigene Anfrage in die Gegenrichtung faellt mit weg
+        // an own request in the opposite direction is dropped too
         if let Some(j) = self.anfrage_von(&id, Richtung::Ausgehend) {
             self.anfragen.remove(j);
         }
@@ -651,9 +651,9 @@ impl Buch {
         Ok(f)
     }
 
-    /// Ablehnen (eingehend) bzw. die eigene Anfrage zuruecknehmen
-    /// (ausgehend). Beides wirft nur die Anfrage weg - es entsteht KEINE
-    /// Freundschaft.
+    /// Decline (incoming) or withdraw the own request
+    /// (outgoing). Both only throw the request away - NO
+    /// friendship arises.
     pub fn ablehnen(&mut self, fvid: &str) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         let vorher = self.anfragen.len();
@@ -664,8 +664,8 @@ impl Buch {
         Ok(())
     }
 
-    /// Freundschaft aufloesen. Gilt fuer beide Seiten - der Relay raeumt sie
-    /// auch beim anderen weg.
+    /// Dissolve a friendship. Applies to both sides - the relay cleans it up
+    /// at the other end too.
     pub fn entfernen(&mut self, fvid: &str) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         let vorher = self.freunde.len();
@@ -676,8 +676,8 @@ impl Buch {
         Ok(())
     }
 
-    /// Auf die Blockliste setzen (oder wieder herunternehmen). Wer blockiert
-    /// ist, kann nicht mehr anfragen; offene Anfragen fallen weg.
+    /// Put on the block list (or take off again). Whoever is blocked
+    /// can no longer ask; open requests are dropped.
     pub fn blockieren(&mut self, fvid: &str, an: bool) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         if !ist_ziel(&id) {
@@ -710,8 +710,8 @@ impl Buch {
         Ok(())
     }
 
-    /// Der Relay hat gesprochen. Seine Fassung gilt - sie ist die einzige, die
-    /// beide Seiten kennen. Gibt zurueck, ob sich etwas geaendert hat.
+    /// The relay has spoken. Its version applies - it is the only one both
+    /// sides know. Returns whether something changed.
     pub fn uebernehmen(&mut self, stand: &Stand) -> bool {
         let mut neu = Buch {
             version: 1,
@@ -747,8 +747,8 @@ impl Buch {
         for b in &mut neu.blockiert {
             b.fvid = normalisieren(&b.fvid);
         }
-        // Ein Freund aus dem Adressbuch darf auch OHNE PC dastehen - dann
-        // traegt ihn sein Konto (person) bzw. sein @Name.
+        // A friend from the address book may also stand there WITHOUT a PC - then
+        // they are carried by their account (person) or their @name.
         neu.freunde.retain(|f| !f.schluessel().is_empty());
         neu.anfragen.retain(|a| !a.gegenueber().is_empty());
         neu.blockiert.retain(|b| !b.schluessel().is_empty());
@@ -774,7 +774,7 @@ impl Buch {
 
 // ================================================================ Netzteil
 
-/// Die Antwort des Relays auf `/fv/freunde/stand` (und `/liste`).
+/// The answer of the relay to `/fv/freunde/stand` (and `/liste`).
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct Stand {
     #[serde(default)]
@@ -811,12 +811,12 @@ pub fn url(relay_url: &str, was: &str) -> String {
     format!("{}/freunde/{}", basis, was)
 }
 
-/// Ein POST an den Relay. Fehlercodes werden zu lesbaren deutschen Saetzen.
+/// A POST to the relay. Error codes become readable German sentences.
 fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_json::Value, Fehler> {
     let ziel = url(relay_url, was);
     let body = rumpf.to_string();
-    // Auch bei 4xx/5xx den Rumpf lesen: nur so kommen die deutschen Saetze des
-    // Relays an (und ein alter Relay ohne /einladen ist als 404 "unbekannt" erkennbar).
+    // Also read the body on 4xx/5xx: only then do the German sentences of the
+    // relay arrive (and an old relay without /einladen is recognisable as 404 "unbekannt").
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .build()
@@ -841,8 +841,8 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
     if status == 200 {
         return Ok(wert);
     }
-    // Ein Relay vor Patch 0005 kennt /einladen nicht und antwortet 404 "unbekannt"
-    // (ein bekannter Weg mit unbekannter ID sagt etwas anderes).
+    // A relay before patch 0005 does not know /einladen and answers 404 "unbekannt"
+    // (a known path with an unknown ID says something different).
     if status == 404 && wert.get("error").and_then(|e| e.as_str()) == Some("unbekannt") {
         return Err(Fehler::KeinKanal);
     }
@@ -861,7 +861,7 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
     Err(Fehler::Netz(meldung))
 }
 
-/// Der Ausweis, der in jedem Rumpf steht.
+/// The credentials that are in every body.
 fn ausweis(geheimnis: &str, token: &str, name: &str) -> serde_json::Value {
     let mut v = serde_json::json!({ "secret": geheimnis, "name": name });
     if !token.is_empty() {
@@ -875,7 +875,7 @@ fn mit(mut v: serde_json::Value, schluessel: &str, wert: &str) -> serde_json::Va
     v
 }
 
-/// Kompletten Stand holen (ein Rundlauf fuer Freunde + Anfragen + Blockliste).
+/// Fetch the complete state (one round trip for friends + requests + block list).
 pub fn hole_stand(relay: &str, geheimnis: &str, token: &str, name: &str) -> Result<Stand, Fehler> {
     let v = ruf(relay, "stand", ausweis(geheimnis, token, name))?;
     serde_json::from_value(v).map_err(|e| Fehler::Netz(format!("Antwort unverstaendlich: {}", e)))
@@ -892,7 +892,7 @@ pub fn sende_anfrage(
     let mut v = mit(ausweis(geheimnis, token, name), "an", &ziel_norm(an));
     v["nachricht"] = serde_json::Value::String(nachricht.to_string());
     let a = ruf(relay, "anfragen", v)?;
-    // true = der andere hatte schon gefragt, wir sind sofort befreundet
+    // true = the other had already asked, we are friends immediately
     Ok(a.get("angenommen").and_then(|x| x.as_bool()).unwrap_or(false))
 }
 
@@ -921,21 +921,21 @@ pub fn sende_blockieren(
     ruf(relay, "blockieren", v).map(|_| ())
 }
 
-// ============================================ Meeting-Einladung an Freunde (r32)
+// ============================================ Meeting invitation to friends (r32)
 //
-// Ablauf: Knopf "Meeting" -> Meeting anlegen -> Einladung (nur die https-Adresse)
-// geht ueber den Relay in das Postfach des Freundes (`/einladen`), der Freund
-// holt sie beim naechsten Abgleich (`/einladungen`) und raeumt sie mit
-// `/einladung-weg` wieder ab. Alles ist zusaetzlich: ein Relay ohne diese Wege
-// antwortet 404 "unbekannt" -> `Fehler::KeinKanal`, dann bleibt es beim alten
-// Weg (Link in der Zwischenablage). Der Ende-zu-Ende-Schluessel steht im
-// Fragment (#k=) und geht NIE ueber den Relay - solche Links werden hier schon
-// vor dem Senden abgewiesen (und vom Relay noch einmal).
+// Flow: button "Meeting" -> create meeting -> invitation (only the https address)
+// goes via the relay into the friend's mailbox (`/einladen`), the friend
+// fetches it on the next sync (`/einladungen`) and clears it with
+// `/einladung-weg`. Everything is additive: a relay without these paths
+// answers 404 "unbekannt" -> `Fehler::KeinKanal`, then the old way
+// stays (link in the clipboard). The end-to-end key is in the
+// fragment (#k=) and NEVER goes through the relay - such links are rejected here already
+// before sending (and by the relay once more).
 
-/// Eine Meeting-Einladung eines Freundes, die im Postfach liegt.
+/// A meeting invitation from a friend that is in the mailbox.
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Einladung {
-    /// Eindeutige Nummer beim Relay (zum Abraeumen).
+    /// Unique number at the relay (for clearing).
     #[serde(default)]
     pub id: String,
     /// FreeViewer-ID des Absenders.
@@ -973,8 +973,8 @@ struct EinladungenAntwort {
     einladungen: Vec<Einladung>,
 }
 
-/// An welchen PC des Freundes die Einladung geht: ein erreichbarer zuerst,
-/// sonst der erste. Leer = der Freund hat keinen FreeViewer-PC.
+/// To which PC of the friend the invitation goes: a reachable one first,
+/// otherwise the first. Empty = the friend has no FreeViewer PC.
 pub fn einladung_ziel(fr: &Freund) -> String {
     let g = fr
         .geraete
@@ -988,7 +988,7 @@ pub fn einladung_ziel(fr: &Freund) -> String {
     }
 }
 
-/// Der Link, der zum Relay darf: nie mit Fragment (dort steht der Schluessel).
+/// The link that may go to the relay: never with a fragment (the key is in it).
 pub fn link_fuer_relay(link: &str) -> Option<String> {
     let l = link.trim();
     if l.is_empty() || l.contains('#') {
@@ -997,9 +997,9 @@ pub fn link_fuer_relay(link: &str) -> Option<String> {
     Some(l.to_string())
 }
 
-/// Darf ein eingegangener Link geoeffnet werden? Nur die Meeting-Seite dieser
-/// Marke (`base`, z. B. https://meet.fleitec.com) - ein Freund (oder wer sich
-/// als einer ausgibt) soll keine beliebige Adresse im Browser aufmachen koennen.
+/// May a received link be opened? Only the meeting page of this
+/// brand (`base`, e.g. https://meet.fleitec.com) - a friend (or whoever poses
+/// as one) must not be able to open an arbitrary address in the browser.
 pub fn einladung_link_ok(link: &str, base: &str) -> bool {
     let l = link.trim();
     let b = base.trim().trim_end_matches('/');
@@ -1007,7 +1007,7 @@ pub fn einladung_link_ok(link: &str, base: &str) -> bool {
         return false;
     }
     match l.strip_prefix(b) {
-        // "https://meet.fleitec.com.evil.de" und "...com@evil.de" fallen hier durch
+        // "https://meet.fleitec.com.evil.de" and "...com@evil.de" fail here
         Some(rest) => rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'),
         None => false,
     }
@@ -1026,7 +1026,7 @@ pub fn hole_einladungen(
     Ok(a.einladungen)
 }
 
-/// Einladung an einen PC des Freundes. `true` = zugestellt.
+/// Invitation to a PC of the friend. `true` = delivered.
 pub fn sende_einladung(
     relay: &str,
     geheimnis: &str,
@@ -1058,18 +1058,18 @@ pub fn sende_einladung_weg(
 
 // ================================================================= Dienst
 
-/// Der Freunde-Dienst: haelt die Liste, gleicht im Hintergrund ab und laesst
-/// die Oberflaeche NIE warten.
+/// The friends service: holds the list, syncs in the background and lets
+/// the UI NEVER wait.
 ///
-/// Muster wie `presence::Watch` (Hintergrundfaden + Zwischenspeicher) und
-/// `account::sync_async` (Briefkasten fuer das Ergebnis).
+/// Pattern like `presence::Watch` (background thread + cache) and
+/// `account::sync_async` (mailbox for the result).
 ///
 /// ```ignore
 /// let freunde = freunde::Dienst::vom_geraet(shared.relay_url.clone());
 /// freunde.starten();
-/// // in jedem Bild der Oberflaeche:
-/// if let Some(m) = freunde.meldung() { /* kurz anzeigen */ }
-/// for f in freunde.liste() { /* Zeile zeichnen, Knopf "Meeting" */ }
+/// // in every frame of the UI:
+/// if let Some(m) = freunde.meldung() { /* show briefly */ }
+/// for f in freunde.liste() { /* draw row, button "Meeting" */ }
 /// ```
 pub struct Dienst {
     relay: String,
@@ -1077,26 +1077,26 @@ pub struct Dienst {
     name: Mutex<String>,
     token: Mutex<String>,
     buch: Mutex<Buch>,
-    /// Briefkasten fuer die Oberflaeche. Als Arc, damit ein Hintergrundfaden
-    /// hineinschreiben kann, ohne den ganzen Dienst festzuhalten.
+    /// Mailbox for the UI. As an Arc, so that a background thread can
+    /// write into it without holding on to the whole service.
     postfach: Arc<Mutex<Vec<Meldung>>>,
     gestartet: AtomicBool,
     beschaeftigt: AtomicBool,
-    /// "Bitte gleich abgleichen" - setzt jeder Schritt, liest der Faden.
+    /// "Please sync soon" - every step sets it, the thread reads it.
     sofort: Arc<AtomicBool>,
     letzter: AtomicU64,
     /// Letzter Abgleich hat geklappt?
     verbunden: AtomicBool,
-    /// Eingegangene Meeting-Einladungen (Zwischenspeicher, nicht auf der Platte).
+    /// Received meeting invitations (cache, not on disk).
     einladungen: Mutex<Vec<Einladung>>,
-    /// Schon gemeldete Einladungs-IDs - jede wird nur EINMAL gemeldet.
+    /// Invitation IDs already reported - each is reported only ONCE.
     einl_gemeldet: Mutex<std::collections::HashSet<String>>,
-    /// Bis wann (unix s) nicht nach Einladungen gefragt wird, weil der Relay sie nicht kennt.
+    /// Until when (unix s) invitations are not asked for, because the relay does not know them.
     einl_pause_bis: AtomicU64,
 }
 
 impl Dienst {
-    /// Mit ausdruecklichem Geheimnis und Namen (fuer Tests und Sonderfaelle).
+    /// With explicit secret and name (for tests and special cases).
     pub fn neu(relay_url: String, geheimnis: String, name: String) -> Arc<Self> {
         Arc::new(Self {
             relay: relay_url,
@@ -1116,7 +1116,7 @@ impl Dienst {
         })
     }
 
-    /// Der Normalfall: Geheimnis und Name kommen von diesem Rechner.
+    /// The normal case: secret and name come from this machine.
     pub fn vom_geraet(relay_url: String) -> Arc<Self> {
         let g = crate::ident::load_or_create_secret();
         let n = crate::presence::device_name();
@@ -1141,12 +1141,12 @@ impl Dienst {
         !self.token.lock().unwrap().is_empty()
     }
 
-    /// Hat der letzte Abgleich geklappt?
+    /// Did the last sync succeed?
     pub fn verbunden(&self) -> bool {
         self.verbunden.load(Ordering::Relaxed)
     }
 
-    /// Der Hintergrundfaden. Darf mehrfach aufgerufen werden.
+    /// The background thread. May be called several times.
     pub fn starten(self: &Arc<Self>) {
         if self.gestartet.swap(true, Ordering::SeqCst) {
             return;
@@ -1162,10 +1162,10 @@ impl Dienst {
         });
     }
 
-    // ------------------------------------------------------- Was die GUI holt
+    // ------------------------------------------------------- What the GUI fetches
 
-    /// Die Freundesliste - online zuerst. Kommt aus dem Zwischenspeicher,
-    /// wartet also nie auf das Netz.
+    /// The friend list - online first. Comes from the cache,
+    /// so it never waits for the network.
     pub fn liste(&self) -> Vec<Freund> {
         self.buch.lock().unwrap().sortiert()
     }
@@ -1175,7 +1175,7 @@ impl Dienst {
         self.buch.lock().unwrap().anfragen.clone()
     }
 
-    /// Nur die, auf die ich antworten muss.
+    /// Only those I have to answer.
     pub fn eingehende(&self) -> Vec<Anfrage> {
         self.buch.lock().unwrap().eingehende()
     }
@@ -1192,7 +1192,7 @@ impl Dienst {
         self.buch.lock().unwrap().ist_freund(fvid)
     }
 
-    /// Erreichbarer Freund? (Ein-Klick-Meeting/Fernwartung nur dann anbieten.)
+    /// Reachable friend? (Offer one-click meeting/remote support only then.)
     pub fn erreichbar(&self, fvid: &str) -> bool {
         self.buch
             .lock()
@@ -1207,7 +1207,7 @@ impl Dienst {
         self.buch.lock().unwrap().clone()
     }
 
-    /// Naechste Meldung aus dem Briefkasten (und aus ihm heraus).
+    /// Next message from the mailbox (and out of it).
     pub fn meldung(&self) -> Option<Meldung> {
         let mut p = self.postfach.lock().unwrap();
         if p.is_empty() {
@@ -1225,21 +1225,21 @@ impl Dienst {
         p.push(m);
     }
 
-    // --------------------------------------------------------- Was die GUI tut
+    // --------------------------------------------------------- What the GUI does
     //
-    // Alle vier melden SOFORT zurueck, ob der Schritt ueberhaupt zulaessig ist
-    // (Selbst-Anfrage, doppelt, kein Freund ...). Das Netz laeuft danach in
-    // einem eigenen Faden; sein Ergebnis kommt ueber meldung().
+    // All four report back IMMEDIATELY whether the step is permissible at all
+    // (self request, duplicate, not a friend ...). The network runs afterwards in
+    // its own thread; its result comes via meldung().
 
-    /// Freundschaftsanfrage an eine FreeViewer-ID.
+    /// Friend request to a FreeViewer ID.
     pub fn anfragen(&self, fvid: &str) -> Result<(), Fehler> {
         self.anfragen_mit(fvid, "")
     }
 
-    /// Wie `anfragen`, aber mit einem kurzen Gruss.
+    /// Like `anfragen`, but with a short greeting.
     pub fn anfragen_mit(&self, fvid: &str, nachricht: &str) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
-        // @Name und Konto-ID leben im Adressbuch - das haengt am Konto.
+        // @name and account ID live in the address book - that hangs on the account.
         if ist_ziel(&id) && !ist_id(&id) && !self.angemeldet() {
             return Err(Fehler::KontoNoetig);
         }
@@ -1263,7 +1263,7 @@ impl Dienst {
         Ok(())
     }
 
-    /// Eine eingehende Anfrage annehmen - erst damit sind beide Freunde.
+    /// Accept an incoming request - only with this are both friends.
     pub fn annehmen(&self, fvid: &str) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         let wer;
@@ -1285,7 +1285,7 @@ impl Dienst {
         Ok(())
     }
 
-    /// Ablehnen bzw. die eigene Anfrage zuruecknehmen.
+    /// Decline or withdraw the own request.
     pub fn ablehnen(&self, fvid: &str) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         let wer;
@@ -1329,7 +1329,7 @@ impl Dienst {
         Ok(())
     }
 
-    /// Blockieren (`an = true`) oder wieder freigeben.
+    /// Block (`an = true`) or unblock again.
     pub fn blockieren(&self, fvid: &str, an: bool) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         {
@@ -1350,15 +1350,15 @@ impl Dienst {
 
     // ------------------------------------------------- Meeting-Einladungen (r32)
 
-    /// Die Einladungen, die gerade im Postfach liegen (neueste zuerst).
+    /// The invitations currently in the mailbox (newest first).
     pub fn einladungen(&self) -> Vec<Einladung> {
         self.einladungen.lock().unwrap().clone()
     }
 
-    /// Einem Freund ein angelegtes Meeting schicken. Der Link darf keinen
-    /// Schluessel tragen. Sofort zulaessig oder nicht; die Zustellung laeuft im
-    /// Hintergrund und meldet sich als `EinladungGesendet` bzw. `EinladungNurLink`
-    /// (Relay ohne Postfach: dann hilft nur die Zwischenablage).
+    /// Send a created meeting to a friend. The link must not carry a
+    /// key. Permissible immediately or not; the delivery runs in the
+    /// background and reports as `EinladungGesendet` or `EinladungNurLink`
+    /// (relay without mailbox: then only the clipboard helps).
     pub fn meeting_einladen(&self, fr: &Freund, titel: &str, link: &str) -> Result<(), Fehler> {
         let an = einladung_ziel(fr);
         if an.is_empty() {
@@ -1379,8 +1379,8 @@ impl Dienst {
         Ok(())
     }
 
-    /// Eine Einladung abhaken (angenommen oder verworfen): sie verschwindet
-    /// hier sofort, beim Relay im Hintergrund.
+    /// Tick off an invitation (accepted or discarded): it disappears
+    /// here immediately, at the relay in the background.
     pub fn einladung_erledigt(&self, id: &str) {
         self.einladungen.lock().unwrap().retain(|e| e.id != id);
         let (relay, geheimnis, token, name) = self.zugang();
@@ -1390,8 +1390,8 @@ impl Dienst {
         });
     }
 
-    /// Neuen Postfach-Stand uebernehmen; meldet jede NEUE Einladung genau einmal.
-    /// Gibt zurueck, wie viele neu waren.
+    /// Take over a new mailbox state; reports every NEW invitation exactly once.
+    /// Returns how many were new.
     pub fn einladungen_uebernehmen(&self, mut liste: Vec<Einladung>) -> usize {
         liste.retain(|e| !e.id.is_empty() && !e.link.is_empty());
         if liste.len() > 50 {
@@ -1426,7 +1426,7 @@ impl Dienst {
             Ok(liste) => {
                 self.einladungen_uebernehmen(liste);
             }
-            // Aelterer Relay: eine Weile nicht mehr fragen (er kann ja aktualisiert werden).
+            // Older relay: stop asking for a while (it can be updated, after all).
             Err(Fehler::KeinKanal) => self
                 .einl_pause_bis
                 .store(jetzt() + EINLADUNG_PAUSE_SEKUNDEN, Ordering::Relaxed),
@@ -1439,8 +1439,8 @@ impl Dienst {
         self.sofort.store(true, Ordering::SeqCst);
     }
 
-    /// Abgleich JETZT und hier - blockiert. Nur fuer den Hintergrundfaden und
-    /// den kopflosen Betrieb; die Oberflaeche nimmt `synchronisieren()`.
+    /// Sync NOW and here - blocks. Only for the background thread and
+    /// headless operation; the UI uses `synchronisieren()`.
     pub fn abgleich_blockierend(&self) -> Result<Stand, Fehler> {
         let (relay, geheimnis, token, name) = self.zugang();
         let stand = hole_stand(&relay, &geheimnis, &token, &name)?;
@@ -1488,8 +1488,8 @@ impl Dienst {
         )
     }
 
-    /// Ein kleiner Griff, mit dem ein Hintergrundfaden melden und den
-    /// naechsten Abgleich anstossen kann - mehr braucht er nicht.
+    /// A small handle with which a background thread can report and trigger the
+    /// next sync - it needs nothing more.
     fn klon_briefkasten(&self) -> Briefkasten {
         Briefkasten {
             postfach: Arc::clone(&self.postfach),
@@ -1498,7 +1498,7 @@ impl Dienst {
     }
 }
 
-/// Ein kleiner Griff fuer Hintergrundfaeden.
+/// A small handle for background threads.
 struct Briefkasten {
     postfach: Arc<Mutex<Vec<Meldung>>>,
     sofort: Arc<AtomicBool>,
@@ -1520,8 +1520,8 @@ impl Briefkasten {
 mod tests {
     use super::*;
 
-    /// Eigener Wegwerf-Ordner - ein Test fasst NIE die echte Konfiguration an
-    /// (der Datenverlust vom 31.07.2026 kam genau daher).
+    /// Own throwaway folder - a test NEVER touches the real configuration
+    /// (the data loss of 31.07.2026 came from exactly that).
     fn eigener_ordner(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("fv-freunde-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
@@ -1588,7 +1588,7 @@ mod tests {
         b.anfrage_eintragen(eingehend("222222222", "Weg"));
         b.annehmen("222222222").unwrap();
         b.save();
-        // zweiter Schreibvorgang legt die Sicherungskopie an
+        // second write creates the backup copy
         b.entfernen("222222222").unwrap();
         b.save();
         let wieder = Buch::load();
@@ -1613,7 +1613,7 @@ mod tests {
     fn eine_anfrage_an_sich_selbst_wird_abgewiesen() {
         let mut b = buch_mit_mir("111111111");
         assert_eq!(b.anfrage_stellen("111111111", "Ich"), Err(Fehler::SelbstAnfrage));
-        // auch mit Leerzeichen getippt
+        // also typed with spaces
         assert_eq!(b.anfrage_stellen("111 111 111", "Ich"), Err(Fehler::SelbstAnfrage));
         assert!(b.anfragen.is_empty());
     }
@@ -1647,11 +1647,11 @@ mod tests {
     #[test]
     fn ohne_anfrage_wird_niemand_still_zum_freund() {
         let mut b = buch_mit_mir("111111111");
-        // Anfrage von einem voellig Unbekannten liegt nicht vor
+        // request from a complete stranger is not present
         assert_eq!(b.annehmen("999999999"), Err(Fehler::KeineAnfrage));
         assert!(b.freunde.is_empty());
-        // eine AUSGEHENDE Anfrage macht mich nicht zum Freund - der andere
-        // muss zustimmen
+        // an OUTGOING request does not make me a friend - the other
+        // has to agree
         b.anfrage_stellen("222222222", "Ich").unwrap();
         assert_eq!(b.annehmen("222222222"), Err(Fehler::KeineAnfrage));
         assert!(b.freunde.is_empty());
@@ -1668,7 +1668,7 @@ mod tests {
         assert!(f.seit > 0);
         assert!(b.ist_freund("222222222"));
         assert!(b.anfragen.is_empty(), "die Anfrage muss aus der Liste raus");
-        // zweiter Klick ist kein Fehler
+        // second click is not an error
         assert!(b.annehmen("222222222").is_ok());
         assert_eq!(b.freunde.len(), 1);
     }
@@ -1780,8 +1780,8 @@ mod tests {
         let stand = Stand {
             ok: true,
             fvid: "111111111".into(),
-            // der Relay schickt in beiden Listen "richtung", hier absichtlich
-            // falsch herum - die Zuordnung nach Liste muss gewinnen
+            // the relay sends "richtung" in both lists, deliberately
+            // the wrong way round here - the assignment by list must win
             eingehend: vec![Anfrage {
                 von_fvid: "222222222".into(),
                 richtung: Richtung::Ausgehend,
@@ -1842,7 +1842,7 @@ mod tests {
         let j = serde_json::to_string(&a).unwrap();
         assert!(j.contains("\"richtung\":\"eingehend\""), "{}", j);
         assert!(j.contains("\"fvid\":\"222222222\""), "{}", j);
-        // und wieder zurueck - genau so schickt es der Relay
+        // and back again - exactly how the relay sends it
         let roh = r#"{"fvid":"333333333","name":"Handy","wann":5,"richtung":"ausgehend","nachricht":"hi","online":true}"#;
         let b: Anfrage = serde_json::from_str(roh).unwrap();
         assert_eq!(b.von_fvid, "333333333");
@@ -1887,7 +1887,7 @@ mod tests {
 
     // ------------------------------------------------ r7: ein Adressbuch
 
-    /// Genau so antwortet der Relay seit r7 fuer ein Konto (buch.js).
+    /// This is exactly how the relay answers for an account since r7 (buch.js).
     const BUCH_STAND: &str = r#"{"ok":true,"fvid":"111111111","konto":"anna","handle":"anna","person":"u_ANNA","buch":true,
         "freunde":[
           {"fvid":"222222222","name":"Bert","seit":1790000000,"online":true,"gesehen":0,"person":"u_BERT","handle":"bert",
@@ -1915,7 +1915,7 @@ mod tests {
         assert!(!carla.hat_pc());
         assert!(!carla.erreichbar());
         assert_eq!(carla.schluessel(), "k:u_CARLA");
-        // Anfragen ohne PC-Nummer bleiben stehen, ueber das Konto
+        // requests without a PC number stay, via the account
         assert_eq!(b.eingehende().len(), 1);
         assert_eq!(b.eingehende()[0].gegenueber(), "k:u_EMIL");
         assert_eq!(b.ausgehende()[0].anzeige(), "@frida");
@@ -1933,7 +1933,7 @@ mod tests {
         assert_eq!(b.freund("333333333").unwrap().name, "Bert");
         assert!(!b.ist_freund("555555555"));
         assert!(!b.ist_freund("@niemand"));
-        // der alte Freund ohne Konto bleibt, wie er war
+        // the old friend without account stays as it was
         assert!(b.ist_freund("444444444"));
     }
 
@@ -2004,7 +2004,7 @@ mod tests {
 
     #[test]
     fn die_alte_relay_antwort_geht_weiter() {
-        // FreeViewer ohne Konto und ein Relay vor r7: keine neuen Felder
+        // FreeViewer without account and a relay before r7: no new fields
         let roh = r#"{"ok":true,"fvid":"111111111","konto":"","freunde":[{"fvid":"222222222","name":"X","seit":1,"online":false,"gesehen":0}],
             "eingehend":[],"ausgehend":[],"blockiert":[{"fvid":"333333333","seit":2}]}"#;
         let s: Stand = serde_json::from_str(roh).unwrap();
@@ -2034,8 +2034,8 @@ mod tests {
         }
     }
 
-    /// Ein Mini-Relay: nimmt EINE Verbindung an, merkt sich die Anfrage und
-    /// antwortet mit Status + Rumpf. Liefert (Port, Empfangenes).
+    /// A mini relay: accepts ONE connection, remembers the request and
+    /// answers with status + body. Returns (port, received).
     fn mini_relay(status: u16, rumpf: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2095,7 +2095,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(einladung_ziel(&f), "");
-        // nur die alte Liste: die ID selbst
+        // only the old list: the ID itself
         let f = Freund {
             fvid: "333 444 555".into(),
             ..Default::default()
@@ -2119,7 +2119,7 @@ mod tests {
         assert!(einladung_link_ok("https://meet.fleitec.com/?room=1-2-3&pass=x", b));
         assert!(einladung_link_ok("https://meet.fleitec.com", b));
         assert!(einladung_link_ok("https://meet.fleitec.com?room=1", b));
-        // Basis mit Schraegstrich am Ende ist dasselbe
+        // base with a slash at the end is the same
         assert!(einladung_link_ok("https://meet.fleitec.com/?room=1", "https://meet.fleitec.com/"));
         assert!(!einladung_link_ok("https://meet.fleitec.com.evil.de/?room=1", b));
         assert!(!einladung_link_ok("https://meet.fleitec.com@evil.de/", b));
@@ -2138,7 +2138,7 @@ mod tests {
         assert_eq!(a.einladungen.len(), 1);
         assert_eq!(a.einladungen[0].von(), "Anna");
         assert_eq!(a.einladungen[0].titel, "Mit Justin");
-        // ohne Postfach-Feld (alter Relay mit 200?) bleibt es leer
+        // without a mailbox field (old relay with 200?) it stays empty
         let a: EinladungenAntwort = serde_json::from_str(r#"{"ok":true}"#).unwrap();
         assert!(a.einladungen.is_empty());
     }
@@ -2169,7 +2169,7 @@ mod tests {
             }
         }
         assert_eq!(erhalten, 3);
-        // Eintraege ohne ID oder Link sind Muell und werden ignoriert
+        // entries without ID or link are junk and are ignored
         assert_eq!(
             d.einladungen_uebernehmen(vec![Einladung::default(), Einladung { id: "x".into(), ..Default::default() }]),
             0
@@ -2206,7 +2206,7 @@ mod tests {
         let roh = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(roh.starts_with("POST /fv/freunde/einladen "), "{}", roh);
 
-        // eine unbekannte ID ist DAGEGEN ein normaler Fehler (der Weg existiert)
+        // an unknown ID, in contrast, is a normal error (the path exists)
         let (port, _rx) = mini_relay(404, r#"{"error":"Diese FreeViewer-ID gibt es nicht"}"#);
         let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
         let r = sende_einladung(&relay, &"ab".repeat(16), "", "Test", "222222222", "T", "https://meet.fleitec.com/?room=1");
