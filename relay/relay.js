@@ -197,7 +197,7 @@ function unpair(ws, reason) {
 }
 
 // ==========================================================================
-// Freunde - Freundschaftsanfragen, Freundesliste, Blockliste
+// Friends - friend requests, friend list, block list
 //
 // A friendship exists ONLY when both sides agreed: one asks
 // (/fv/freunde/anfragen), the other accepts (/fv/freunde/annehmen).
@@ -208,7 +208,7 @@ function unpair(ws, reason) {
 // its SHA-256 (hosts.json) and uses it to find the FreeViewer ID. The
 // secret is ALWAYS in the request body, never in the URL - it should
 // not end up in access logs. New IDs are NOT issued here;
-// wer noch nie verbunden war, bekommt 401.
+// whoever has never connected gets 401.
 //
 // WITHOUT AN ACCOUNT the friend list hangs on the FreeViewer ID. WITH AN ACCOUNT
 // the account name (via JARVIS, as in account.js) is additionally noted on the
@@ -306,9 +306,9 @@ function frWer(b, cb) {
   const token = String((b && b.token) || '');
   if (!token || !account) return cb(null, { fvid, konto: '' });
   account.whoIs(token, (err, user) => {
-        // Account unreachable or token expired: it continues without an
-        // account, the ID alone is enough. The caller sees in the field "konto" whether
-    // seine Anmeldung erkannt wurde.
+    // Account unreachable or token expired: it continues without an
+    // account, the ID alone is enough. The caller sees in the field "konto" whether
+    // their login was recognised.
     if (err) return cb(null, { fvid, konto: '' });
     cb(null, { fvid, konto: user ? String(user).toLowerCase() : '' });
   });
@@ -438,7 +438,7 @@ function frAntwort(res, code, obj) {
   frAus(res, code, obj);
 }
 
-// ------------------------------------------------------------- die Schritte
+// ------------------------------------------------------------- the steps
 
 /** Eine Freundschaft schliessen (beide haben zugestimmt). */
 function frSchliessen(db, a, ich, meinName) {
@@ -482,8 +482,8 @@ function frAnfragen(res, db, ich, b) {
     return frAntwort(res, 409, { error: 'Ihr seid schon befreundet' });
 
   const ziel = { fvid: an, konto: frKontoVon(db, an) };
-    // Whoever was blocked does not find out - otherwise the block list becomes a
-    // reporter. From the outside it looks as if the request were not possible.
+  // Whoever was blocked does not find out - otherwise the block list becomes a
+  // reporter. From the outside it looks as if the request were not possible.
   if (frBlockiert(db, ziel, ich))
     return frAntwort(res, 403, { error: 'Anfrage nicht moeglich' });
   if (frBlockiert(db, ich, ziel))
@@ -494,7 +494,7 @@ function frAnfragen(res, db, ich, b) {
   if (schon)
     return frAntwort(res, 409, { error: 'Anfrage laeuft schon', anfrage: frAnfrageAus(schon, ich) });
 
-    // The other one has already asked ME: then both agree.
+  // The other one has already asked ME: then both agree.
   const gegen = db.anfragen.find((x) => x.von_fvid === an && frAnMich(x, ich));
   if (gegen) {
     const f = frSchliessen(db, gegen, ich, meinName);
@@ -546,7 +546,7 @@ function frAnnehmen(res, db, ich, b) {
   if (!von) return frAntwort(res, 400, { error: 'FreeViewer-ID fehlt' });
   const a = db.anfragen.find((x) => x.von_fvid === von && frAnMich(x, ich));
   if (!a) {
-        // Already friends? Then it was a second click, not an error.
+    // Already friends? Then it was a second click, not an error.
     const da = frFreundschaft(db, ich, von);
     if (da) return frAntwort(res, 200, { ok: true, konto: ich.konto, freund: frFreundAus(db, da, ich) });
     return frAntwort(res, 404, { error: 'Keine offene Anfrage von dieser ID' });
@@ -863,8 +863,8 @@ const server = http.createServer((req, res) => {
       return res.end('Link unbekannt oder schon aufgebraucht');
     }
     const name = (u.searchParams.get('name') || '').replace(/[\x00-\x1f"\\]/g, '').slice(0, 40);
-        // Brand of the code (stored at creation) - otherwise a
-        // Xoffi device would get the FreeViewer file. ?brand= stays as an override.
+    // Brand of the code (stored at creation) - otherwise a
+    // Xoffi device would get the FreeViewer file. ?brand= stays as an override.
     const MARKEN = { freeviewer: 'freeviewer.exe', xoffi: 'x-remote.exe' };
     // r30: the download carries the product name of ITS brand (was always FreeViewer-...)
     const DL_NAMEN = { freeviewer: 'FreeViewer-Einrichtung.exe', xoffi: 'X-Remote-Einrichtung.exe' };
@@ -903,10 +903,10 @@ const server = http.createServer((req, res) => {
   }
   // ---- what is the newest build? ----
   if (req.method === 'GET' && req.url === '/fv/version') {
-        // EVERY BRAND ITS OWN FEED. Previously 'version.json' was hard-coded here:
-        // that way an X-Remote client was also offered the FreeViewer file and
-        // would have turned into another brand on the next update.
-        // Decided by the address that was asked for.
+    // EVERY BRAND ITS OWN FEED. Previously 'version.json' was hard-coded here:
+    // that way an X-Remote client was also offered the FreeViewer file and
+    // would have turned into another brand on the next update.
+    // Decided by the address that was asked for.
     const host = String(req.headers.host || '').toLowerCase();
     const feed = /(^|\.)remote\.fleitec\.com|xoffi/.test(host) ? 'version-xoffi.json' : 'version.json';
     let j = null;
@@ -991,7 +991,7 @@ const server = http.createServer((req, res) => {
         const meta = {
           version, sha256: sha, size, notes,
           file: name,
-                    // Each brand points to its own address.
+          // Each brand points to its own address.
           url: (/^x-remote/i.test(name) ? 'https://remote.fleitec.com/fv/dist/'
                                         : 'https://freeviewer.fleitec.com/fv/dist/') + name,
           published: new Date().toISOString(),
@@ -1011,13 +1011,13 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ platform: 'mac', mac_version: version, mac_sha256: sha, mac_size: size, mac_url: meta.url, mac_sig: sigHex || undefined }));
         }
         if (sigHex) meta.sig = sigHex;
-                // noversion=1: only put the file down (e.g. Mac zip from CI) -
-        // version.json bleibt dem Haupt-Build vorbehalten.
+        // noversion=1: only put the file down (e.g. Mac zip from CI) -
+        // version.json stays reserved for the main build.
         if (u.searchParams.get('noversion') !== '1') {
-          // Feed je nach Datei: x-remote.* -> version-xoffi.json (mac_*-Felder erhalten)
+          // Feed depends on the file: x-remote.* -> version-xoffi.json (mac_* fields kept)
           const feed = /^x-remote/i.test(name) ? 'version-xoffi.json' : 'version.json';
-                    // Mac fields belong to the Mac build: they ALWAYS stay
-          // egal welche Marke gerade eine Windows-Exe veroeffentlicht.
+          // Mac fields belong to the Mac build: they ALWAYS stay
+          // no matter which brand is currently publishing a Windows exe.
           let outmeta = Object.assign({}, meta);
           try {
             const old = JSON.parse(fs.readFileSync(path.join(DIST, feed), 'utf8'));
