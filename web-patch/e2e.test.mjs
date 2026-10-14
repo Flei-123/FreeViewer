@@ -197,3 +197,62 @@ test('forged salts do not fill the key cache', async () => {
   assert.equal(rx.cache.size, 1);
   void h;
 });
+
+test('replay guard windows match the reference model (shared vectors)', () => {
+  for (const c of V.guard) {
+    const w = E2E.neueWache();
+    c.steps.forEach((st, i) => {
+      assert.equal(w(hex(st.salt), st.counter), st.accept, `${c.name} step ${i}`);
+    });
+  }
+});
+
+test('replay guard: a step of exactly 64 keeps the old highest, bits stay 64 wide', () => {
+  const w = E2E.neueWache();
+  const s = hex('0707070707070707');
+  assert.ok(w(s, 0)); assert.ok(w(s, 64)); assert.ok(!w(s, 0));
+  // long run: must stay fast and correct (the bit field used to grow without bound)
+  for (let z = 65; z < 20000; z++) assert.ok(w(s, z));
+  assert.ok(!w(s, 19999)); assert.ok(!w(s, 19990));
+});
+
+test('video replay guard through spurSchuetzen matches the reference (r60)', async () => {
+  const frames = V.replay_video.frames.map(hex);
+  for (const c of V.replay_video.cases) {
+    const h = await handle();
+    const input = c.steps.map((st) => frame(frames[st.frame]));
+    const got = await run(h, 'video', 'rein', input);
+    const expected = [];
+    for (const st of c.steps) {
+      if (st.accept) expected.push(toHex(await E2E.oeffnenH264(h, frames[st.frame])));
+    }
+    assert.deepEqual(got.map((f) => toHex(new Uint8Array(f.data))), expected, c.name);
+  }
+});
+
+test('a live video replay and a spliced frame are dropped', async () => {
+  const h = await handle();
+  const sent = await run(h, 'video', 'raus', [frame(sample), frame(sample)]);
+  assert.equal(sent.length, 2);
+  const [a, b] = sent.map((f) => new Uint8Array(f.data));
+  const got = await run(await handle(), 'video', 'rein', [frame(a), frame(b), frame(a), frame(b)]);
+  assert.equal(got.length, 2, 'replayed video frames must be dropped');
+});
+
+test('moeglich(): only browsers with createEncodedStreams count (r62)', () => {
+  const saved = { s: globalThis.RTCRtpSender, t: globalThis.RTCRtpScriptTransform };
+  try {
+    delete globalThis.RTCRtpSender; delete globalThis.RTCRtpScriptTransform;
+    assert.equal(E2E.moeglich(), false, 'no WebRTC');
+    // Firefox / Safari: ScriptTransform but no createEncodedStreams -> no E2E (no worker exists)
+    globalThis.RTCRtpSender = function RTCRtpSender() {};
+    globalThis.RTCRtpScriptTransform = function RTCRtpScriptTransform() {};
+    assert.equal(E2E.moeglich(), false, 'ScriptTransform alone must not claim E2E');
+    // Chromium
+    globalThis.RTCRtpSender.prototype.createEncodedStreams = function () {};
+    assert.equal(E2E.moeglich(), true);
+  } finally {
+    if (saved.s === undefined) delete globalThis.RTCRtpSender; else globalThis.RTCRtpSender = saved.s;
+    if (saved.t === undefined) delete globalThis.RTCRtpScriptTransform; else globalThis.RTCRtpScriptTransform = saved.t;
+  }
+});

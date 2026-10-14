@@ -44,6 +44,9 @@ use std::sync::{Arc, Mutex};
 /// First byte of every v2 frame. A v1 receiver sees a foreign marker and
 /// drops the frame instead of showing garbage.
 pub const KENNUNG: u8 = 0xE3;
+
+/// Frame format version announced to the server in the join (`caps.e2e_ver`).
+pub const FORMAT_VERSION: u8 = 2;
 /// First byte of v1 audio frames (the vulnerable format). Never accepted.
 pub const MARKER_V1: u8 = 0xE2;
 /// Length of the clear audio header: version, flags, salt, counter.
@@ -490,13 +493,37 @@ impl Schluessel {
     }
 
     /// Open an encrypted H.264 frame. None = wrong key, tampered, or an old
-    /// (v1) / foreign format.
+    /// (v1) / foreign format. Does NOT guard against replays: use
+    /// `oeffnen_h264_wache` in a receiver.
     pub fn oeffnen_h264(&self, rahmen: &[u8]) -> Option<Vec<u8>> {
+        self.oeffnen_h264_kopf(rahmen).map(|(klar, _)| klar)
+    }
+
+    /// Open an encrypted H.264 frame AND reject replays (r60). The check runs
+    /// only after the tags verified, so forged frames cannot move the window.
+    /// A frame without any encrypted NAL unit (only SPS/PPS/AUD) has no
+    /// counter and is passed on.
+    pub fn oeffnen_h264_wache(&self, wache: &mut Wache, rahmen: &[u8]) -> Option<Vec<u8>> {
+        let (klar, kopf) = self.oeffnen_h264_kopf(rahmen)?;
+        match kopf {
+            Some((salz, zaehler)) if !wache.pruefen(&salz, zaehler) => None,
+            _ => Some(klar),
+        }
+    }
+
+    /// Like `oeffnen_h264`, plus the (salt, counter) every encrypted NAL unit
+    /// of the frame carries. Frame-level rules on top of the per-NAL tags:
+    /// all encrypted NAL units must name the SAME salt+counter, and their NAL
+    /// indices must strictly increase. Otherwise NAL units of different frames
+    /// could be spliced (each tag is valid on its own), repeated or reordered.
+    pub fn oeffnen_h264_kopf(&self, rahmen: &[u8]) -> Option<(Vec<u8>, Option<(Salt, u32)>)> {
         let teile = nal_einheiten(rahmen);
         if teile.is_empty() {
             return None;
         }
         let mut aus = Vec::with_capacity(rahmen.len());
+        let mut frame_kopf: Option<(Salt, u32)> = None;
+        let mut letzte_nr: Option<u16> = None;
         for (sc, db, ende) in teile {
             let kopf_byte = rahmen[db];
             let typ = kopf_byte & 0x1f;
@@ -515,6 +542,14 @@ impl Schluessel {
             let o = 1 + SALT_LEN;
             let counter = u32::from_be_bytes([roh[o], roh[o + 1], roh[o + 2], roh[o + 3]]);
             let nr16 = u16::from_be_bytes([roh[o + 4], roh[o + 5]]);
+            match frame_kopf {
+                Some(k) if k != (salt, counter) => return None, // spliced from two frames
+                _ => frame_kopf = Some((salt, counter)),
+            }
+            if letzte_nr.is_some_and(|l| nr16 <= l) {
+                return None; // repeated or reordered NAL unit
+            }
+            letzte_nr = Some(nr16);
             let mut aad = Vec::with_capacity(1 + NAL_HEAD);
             aad.push(kopf_byte);
             aad.extend_from_slice(&roh[..NAL_HEAD]);
@@ -537,7 +572,7 @@ impl Schluessel {
             }
             aus.extend_from_slice(&klar);
         }
-        Some(aus)
+        Some((aus, frame_kopf))
     }
 }
 
@@ -597,10 +632,13 @@ impl Window {
     fn pruefen(&mut self, zaehler: u32) -> bool {
         if zaehler > self.hoechste {
             let schritt = zaehler - self.hoechste;
-            self.fenster = if schritt >= 64 {
-                0
-            } else {
-                (self.fenster << schritt) | (1u64 << (schritt - 1))
+            // The old highest becomes bit (schritt - 1). With a step of
+            // exactly 64 that is bit 63 and the old bits fall out; a larger
+            // step forgets everything.
+            self.fenster = match schritt {
+                1..=63 => (self.fenster << schritt) | (1u64 << (schritt - 1)),
+                64 => 1u64 << 63,
+                _ => 0,
             };
             self.hoechste = zaehler;
             return true;
@@ -1243,5 +1281,83 @@ mod tests {
         let v = vektoren();
         let ref_plain = hex::decode(v["h264"][0]["plain"].as_str().unwrap()).unwrap();
         assert_eq!(beispielrahmen(), ref_plain, "sample frame drifted from ref.py");
+    }
+
+    // ------------------------------------------------ replay (r60) --------
+
+    #[test]
+    fn vectors_guard_windows() {
+        let v = vektoren();
+        for c in v["guard"].as_array().unwrap() {
+            let mut w = Wache::default();
+            for (i, st) in c["steps"].as_array().unwrap().iter().enumerate() {
+                let got = w.pruefen(
+                    &salz_hex(st["salt"].as_str().unwrap()),
+                    st["counter"].as_u64().unwrap() as u32,
+                );
+                assert_eq!(got, st["accept"].as_bool().unwrap(), "{} step {}", c["name"], i);
+            }
+        }
+    }
+
+    #[test]
+    fn vectors_video_replay() {
+        let v = vektoren();
+        let frames: Vec<Vec<u8>> = v["replay_video"]["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| hex::decode(f.as_str().unwrap()).unwrap())
+            .collect();
+        for c in v["replay_video"]["cases"].as_array().unwrap() {
+            let k = vector_key(&v);
+            let mut w = Wache::default();
+            for (i, st) in c["steps"].as_array().unwrap().iter().enumerate() {
+                let f = &frames[st["frame"].as_u64().unwrap() as usize];
+                let got = k.oeffnen_h264_wache(&mut w, f).is_some();
+                assert_eq!(got, st["accept"].as_bool().unwrap(), "{} step {}", c["name"], i);
+            }
+        }
+    }
+
+    #[test]
+    fn window_step_of_64_keeps_the_old_highest() {
+        // Regression: a step of exactly 64 used to drop the old highest, so
+        // its replay was accepted.
+        let mut w = Wache::default();
+        let s = [7u8; SALT_LEN];
+        assert!(w.pruefen(&s, 0));
+        assert!(w.pruefen(&s, 64));
+        assert!(!w.pruefen(&s, 0), "replay of the old highest accepted");
+    }
+
+    #[test]
+    fn video_replay_is_dropped_live() {
+        let k = Schluessel::neu();
+        let mut tx = video(&k);
+        let f = beispielrahmen();
+        let a = tx.schuetzen_h264(&f);
+        let b = tx.schuetzen_h264(&f);
+        let rx = Schluessel::aus_roh(k.roh);
+        let mut w = Wache::default();
+        assert_eq!(rx.oeffnen_h264_wache(&mut w, &a).as_deref(), Some(&f[..]));
+        assert_eq!(rx.oeffnen_h264_wache(&mut w, &b).as_deref(), Some(&f[..]));
+        assert!(rx.oeffnen_h264_wache(&mut w, &a).is_none(), "replay shown");
+        assert!(rx.oeffnen_h264_wache(&mut w, &b).is_none(), "replay shown");
+    }
+
+    #[test]
+    fn forged_video_frame_does_not_move_the_window() {
+        let k = Schluessel::neu();
+        let mut tx = video(&k);
+        let f = beispielrahmen();
+        let a = tx.schuetzen_h264(&f);
+        let mut bad = tx.schuetzen_h264(&f);
+        let n = bad.len();
+        bad[n - 1] ^= 1; // break the tag of the last NAL unit
+        let rx = Schluessel::aus_roh(k.roh);
+        let mut w = Wache::default();
+        assert!(rx.oeffnen_h264_wache(&mut w, &bad).is_none());
+        assert!(rx.oeffnen_h264_wache(&mut w, &a).is_some(), "forgery used up the counter");
     }
 }

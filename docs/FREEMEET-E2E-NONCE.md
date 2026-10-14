@@ -27,7 +27,8 @@ Root secret (32 byte, from the link `#k=`) is unchanged, so links stay valid.
 | nonce (12 byte) | `kind(1: ton=1, bild=2) ‖ nal index(2, BE) ‖ salt[0..5] ‖ counter(4, BE)` |
 | audio frame | `0xE3 ‖ flags(1, bit0 = key frame) ‖ salt(8) ‖ counter(4, BE) ‖ AES-GCM(ct ‖ tag16)`; AAD = the 14 header bytes |
 | video, per encrypted NAL | blob = `0xE3 ‖ salt(8) ‖ counter(4) ‖ nal index(2) ‖ ct ‖ tag16`, then emulation-prevention escaping; AAD = NAL header byte ‖ first 15 blob bytes |
-| unchanged | start codes, NAL header byte, SPS/PPS/AUD stay clear (server repacks RTP), 64-number replay window |
+| unchanged | start codes, NAL header byte, SPS/PPS/AUD stay clear (server repacks RTP) |
+| replay guard | per sender salt: 64-number window (audio AND, since r60, video) - receiver-side only, **no change of the wire format** |
 
 Differences to v1 that matter:
 
@@ -38,7 +39,7 @@ Differences to v1 that matter:
   uses an outdated end-to-end format".
 * Overhead: audio +8 byte (14 instead of 6), video +10 byte per encrypted NAL.
 * Replay guard is per sender salt (last 16 salts per track). Limit: a replay of
-  a stream evicted from that list is not detected.
+  a stream evicted from that list is not detected. Video: see "Replay guard for video (r60)".
 * Receivers only cache a derived key after a frame authenticated (forged salts
   cannot flush the cache).
 * The media server is NOT affected: it never parses the audio header or the
@@ -114,3 +115,62 @@ The "Deploy" section above is WRONG about the browser file: on CT111 `signal.rs`
 `include_str!("../../web/e2e.js")`, i.e. it is compiled into the SFU binary. Copying the file changes nothing;
 the SFU must be rebuilt (`cargo build --release`) and restarted (this ends running meetings).
 The tested, scripted procedure is in `rollout/03-freemeet-nonce/` (see `rollout/README.md`).
+
+## Replay guard for video (r60, 14.10.2026)
+
+Before: only audio had the 64-number window; a server-side attacker could re-inject
+old (valid) video frames. Now every receiver checks video too. **Wire format v2 is
+unchanged** (receiver-side check only): v2 senders and old v2 receivers keep working,
+old v2 receivers just do not have the check yet.
+
+Rules for one received video frame (`Schluessel::oeffnen_h264_wache` / `oeffnenH264Kopf` + `wache`):
+
+1. Every encrypted NAL unit of the frame must carry the SAME salt and counter. Each NAL has
+   its own tag, so without this rule NAL units of different frames could be spliced
+   into a frame that opens fine.
+2. NAL indices must strictly increase inside the frame (no repeated, no reordered NAL
+   units; the sender numbers by position, so this holds for every honest frame).
+3. Only after ALL tags verified: (salt, counter) goes through the replay window of that
+   track (`Wache`, one window per sender salt, last 16 salts). Forged frames cannot move
+   the window.
+4. A frame without any encrypted NAL unit (only SPS/PPS/AUD) has no counter and is passed on
+   (it carries no picture content).
+
+Same rules in Rust (`src/meete2e.rs`, wired in `meetrtc.rs`, one `Wache` per received track)
+and in the browser (`web-patch/e2e.js`, `spurSchuetzen`, incoming video).
+
+**Bug found while doing this (fixed in both):** a counter jump of EXACTLY 64 dropped the
+old highest counter from the window, so a replay of the frame just before the jump was
+accepted. The JS bit field also grew without bound over a long meeting (BigInt, never
+masked); it is now masked to 64 bits.
+
+Tests: the reference `tools/freemeet-e2e/ref.py` models the window with a SET (not a bit
+field) and writes `guard` (13 counter sequences incl. step 63/64/65, wrap edge, 17-salt
+eviction) and `replay_video` (9 frame sequences: replay, reorder, splice, swapped,
+repeated NAL, second stream, clear-only frame) into `tests/freemeet-e2e-vectors.json`.
+Rust (`vectors_guard_windows`, `vectors_video_replay`, ...) and JS (`node --test web-patch/`)
+must reproduce every accept/reject. Documented limits unchanged: a replay of a stream
+evicted from the 16-salt list is not detected; a replay older than 64 frames is
+dropped (also legit late frames).
+
+## Old clients in an E2E room (r61, 14.10.2026)
+
+Correction to "No SFU deploy needed": for the SILENT DROP the SFU is indeed not involved
+(it never parses audio; its `e2e_geschuetzt` only knows the v1 marker `0xE2` and is only
+called for video keyframe detection, where a v1/v2 blob never starts the frame). But the
+SFU can refuse an outdated client with a clear message instead of black tiles:
+
+* `caps.e2e_ver` (u8, default 0 = not announced) in the join. Native client announces 2
+  (`meete2e::FORMAT_VERSION`), the browser with the one-line patch
+  `web-patch/app-join-e2e-ver.patch` (made against the LIVE `web/app.js`, sha256
+  `714edc88...`, line 336; `patch -p1 --dry-run` checked on a synthetic copy only).
+* SFU (`freemeet-sfu`, branch `main` + `live-merged`, rollout patch `0010`): env
+  `FM_E2E_MIN_VER` (default **0 = off**). With `FM_E2E_MIN_VER=2` a join with `e2e: true` and
+  `e2e_ver < 2` gets `denied` ("Dein Programm nutzt noch das alte Verschluesselungsformat ...")
+  and the socket is closed. Plain joins are never touched. Always logs a warning for
+  `e2e` joins without `e2e_ver`.
+* Order: SFU patch (inert) -> native release (announces 2) -> app.js patch (browser announces 2)
+  -> only then set `FM_E2E_MIN_VER=2` (systemd drop-in) and restart. Switching it on earlier
+  would lock out every browser (they do not announce yet).
+* Not proven live: the real join of old/new browsers against the patched SFU (unit tests +
+  JSON parse only).

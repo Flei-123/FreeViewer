@@ -268,11 +268,26 @@ async function schuetzenH264(schluessel, salz, zaehler, rahmen) {
   return zusammen(stuecke);
 }
 
-/** Open one encrypted H.264 frame. Returns Uint8Array or null (old/foreign/forged). */
+/** Open one encrypted H.264 frame. Returns Uint8Array or null (old/foreign/forged).
+ *  Does NOT guard against replays: a receiver uses oeffnenH264Kopf + wache. */
 async function oeffnenH264(schluessel, rahmen) {
+  const r = await oeffnenH264Kopf(schluessel, rahmen);
+  return r ? r.klar : null;
+}
+
+/**
+ * Like oeffnenH264, but returns {klar, salz, zaehler} (salz/zaehler = null when
+ * the frame has no encrypted NAL unit, e.g. only SPS/PPS). Frame-level rules on
+ * top of the per-NAL tags (r60): all encrypted NAL units must name the SAME
+ * salt+counter and their NAL indices must strictly increase, otherwise NAL
+ * units of different frames could be spliced, repeated or reordered (every tag
+ * is valid on its own).
+ */
+async function oeffnenH264Kopf(schluessel, rahmen) {
   const teile = nalEinheiten(rahmen);
   if (!teile.length) return null;
   const stuecke = [];
+  let frameSalz = null, frameZaehler = 0, letzteNr = -1;
   for (const [sc, db, ende] of teile) {
     const kopf = rahmen[db];
     stuecke.push(rahmen.slice(sc, db + 1));
@@ -285,6 +300,13 @@ async function oeffnenH264(schluessel, rahmen) {
     const dv = new DataView(roh.buffer, roh.byteOffset);
     const zaehler = dv.getUint32(1 + E2E_SALZ, false);
     const nr = dv.getUint16(1 + E2E_SALZ + 4, false);
+    if (frameSalz === null) {
+      frameSalz = salz; frameZaehler = zaehler;
+    } else if (zaehler !== frameZaehler || hexVon(salz) !== hexVon(frameSalz)) {
+      return null;                 // spliced from two frames
+    }
+    if (nr <= letzteNr) return null;   // repeated or reordered NAL unit
+    letzteNr = nr;
     const aad = new Uint8Array(1 + E2E_NAL_KOPF);
     aad[0] = kopf;
     aad.set(roh.subarray(0, E2E_NAL_KOPF), 1);
@@ -300,7 +322,7 @@ async function oeffnenH264(schluessel, rahmen) {
     if (merken) merken();
     stuecke.push(klar);
   }
-  return zusammen(stuecke);
+  return { klar: zusammen(stuecke), salz: frameSalz, zaehler: frameSalz === null ? null : frameZaehler };
 }
 
 // ------------------------------------------------------- replay guard -----
@@ -311,6 +333,7 @@ async function oeffnenH264(schluessel, rahmen) {
  * evicted since is not detected (documented limit). Call it only AFTER a
  * frame decrypted.
  */
+const MASKE64 = (1n << 64n) - 1n;
 function neueWache() {
   const fenster = new Map(); // salt hex -> {hoechste, bits}
   return function pruefen(salz, z) {
@@ -323,7 +346,10 @@ function neueWache() {
     }
     if (z > f.hoechste) {
       const schritt = z - f.hoechste;
-      f.bits = schritt >= 64 ? 0n : ((f.bits << BigInt(schritt)) | (1n << BigInt(schritt - 1)));
+      // The old highest becomes bit (schritt - 1); a step of exactly 64 keeps
+      // only that one (bit 63), a larger step forgets everything. Mask to 64
+      // bits so the number cannot grow over a long meeting.
+      f.bits = schritt > 64 ? 0n : (((f.bits << BigInt(schritt)) | (1n << BigInt(schritt - 1))) & MASKE64);
       f.hoechste = z;
       return true;
     }
@@ -386,8 +412,12 @@ function spurSchuetzen(schluessel, art, lesbar, schreibbar, richtung) {
         }
         // ---- incoming ----
         if (!istTon) {
-          const klar = await oeffnenH264(schluessel, daten);
-          if (!klar) return;          // wrong key, forged, or old format
+          const offen = await oeffnenH264Kopf(schluessel, daten);
+          if (!offen) return;         // wrong key, forged, or old format
+          // Replay guard (r60), only after the tags verified. A frame without
+          // an encrypted NAL unit has no counter and is passed on.
+          if (offen.salz !== null && !wache(offen.salz, offen.zaehler)) return;
+          const klar = offen.klar;
           rahmen.data = klar.buffer;
           weiter.enqueue(rahmen);
           return;
@@ -441,11 +471,19 @@ async function schluesselAufbauen(roh) {
   return ableiten(roh);
 }
 
-/** Can this browser do end-to-end at all? */
+/**
+ * Can this browser do end-to-end at all?
+ *
+ * Only the legacy Insertable Streams API (createEncodedStreams, Chromium) is
+ * wired up in app.js. RTCRtpScriptTransform (Firefox/Safari) needs a worker
+ * that does not exist yet (state.e2eWorker is never set): answering "yes" for
+ * it made those browsers show "E2E: on" and announce e2e in the join while
+ * the media went out UNENCRYPTED (r62). So: no createEncodedStreams, no E2E -
+ * the page then says so and the server keeps the browser out of E2E rooms.
+ */
 function moeglich() {
   return typeof RTCRtpSender !== 'undefined' &&
-    (typeof RTCRtpScriptTransform !== 'undefined' ||
-     typeof RTCRtpSender.prototype.createEncodedStreams === 'function');
+    typeof RTCRtpSender.prototype.createEncodedStreams === 'function';
 }
 
 
@@ -454,6 +492,6 @@ window.FreeMeetE2E = {
   spurSchuetzen, schluesselAusLink, schluesselAufbauen, moeglich,
   schluesselBytes, E2E_KENNUNG, E2E_KENNUNG_V1, E2E_KOPF,
   // for the check against the shared test vectors (tests/freemeet-e2e-vectors.json)
-  schuetzenTon, oeffnenTon, schuetzenH264, oeffnenH264, nalEinheiten, epbEin, epbRaus,
+  schuetzenTon, oeffnenTon, schuetzenH264, oeffnenH264, oeffnenH264Kopf, nalEinheiten, epbEin, epbRaus,
   neuerSender, neueWache, neuesSalz, streamKey, nonce,
 };

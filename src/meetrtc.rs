@@ -606,12 +606,15 @@ fn lauf(
                         // also nicht.
                         let schluessel = ist_schluesselbild(&d.data);
                         let inhalt: Vec<u8> = match &e2e {
-                            Some(k) => match k.oeffnen_h264(&d.data) {
+                            Some(k) => match k.oeffnen_h264_wache(
+                                e2e_wachen.entry(d.mid.to_string()).or_default(),
+                                &d.data,
+                            ) {
                                 Some(klar) => klar,
                                 None => {
-                                    // Falscher Schluessel oder verfaelscht:
-                                    // NICHT anzeigen. Lieber kein Bild als
-                                    // ein Bild, dem man nicht trauen kann.
+                                    // Wrong key, forged, or a replayed frame
+                                    // (r60): do NOT show it. Better no picture
+                                    // than one that cannot be trusted.
                                     continue;
                                 }
                             },

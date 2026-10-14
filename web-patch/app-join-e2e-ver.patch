@@ -1,0 +1,9 @@
+--- a/web/app.js
++++ b/web/app.js
+@@ -334,5 +334,5 @@
+   // Schluessel kam, sass schwarz drin statt abgewiesen zu werden.
+   await e2eVorbereiten();
+-  send({ t: 'join', room, name, pass, fvid: '', caps: { simulcast: true, codecs: ['opus', 'h264', 'vp8'], e2e: !!state.e2eKey } });
++  send({ t: 'join', room, name, pass, fvid: '', caps: { simulcast: true, codecs: ['opus', 'h264', 'vp8'], e2e: !!state.e2eKey, e2e_ver: state.e2eKey ? 2 : 0 } });
+   // Der Knopf erscheint nur, wenn das Meeting aus FreeViewer heraus geoeffnet
+   // wurde - im nackten Browser gibt es nichts zu steuern.

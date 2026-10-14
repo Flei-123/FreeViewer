@@ -159,6 +159,141 @@ def open_h264(root, frame: bytes):
     return bytes(out)
 
 
+def open_h264_checked(root, frame: bytes):
+    """Open a video frame AND enforce the frame-level rules of r60.
+
+    Returns (plain, (salt, counter) | None) or None. Rules on top of the tags:
+    every encrypted NAL of one frame carries the SAME salt+counter and the NAL
+    indices strictly increase (no splicing, repeating or reordering of NALs).
+    A frame without any encrypted NAL has no counter (nothing to guard).
+    """
+    units = nal_units(frame)
+    if not units:
+        return None
+    head, last_nr = None, -1
+    for sc, db, end in units:
+        hdr_byte = frame[db]
+        body = frame[db + 1:end]
+        if (hdr_byte & 0x1F) in (7, 8, 9) or not body:
+            continue
+        raw = epb_out(body)
+        if len(raw) < NAL_HEAD + 16 or raw[0] != VERSION:
+            return None
+        this = (raw[1:9], int.from_bytes(raw[9:13], "big"))
+        nr = int.from_bytes(raw[13:15], "big")
+        if head is not None and this != head:
+            return None
+        head = this
+        if nr <= last_nr:
+            return None
+        last_nr = nr
+    plain = open_h264(root, frame)
+    if plain is None:
+        return None
+    return plain, head
+
+
+class Guard:
+    """Model of the replay guard: highest counter + a SET of seen counters.
+
+    Deliberately not a bit field (the implementations use one), so an off-by-one
+    in the bit arithmetic shows up as a vector mismatch. Per sender salt; only
+    the last 16 salts are remembered (older streams are forgotten).
+    """
+    SALTS_MAX = 16
+    WINDOW = 64
+
+    def __init__(self):
+        self.streams = []   # [(salt, highest, seen_set)] oldest first
+
+    def check(self, salt: bytes, counter: int) -> bool:
+        for i, (s, hi, seen) in enumerate(self.streams):
+            if s != salt:
+                continue
+            if counter > hi:
+                self.streams[i] = (s, counter, seen | {counter})
+                return True
+            if hi - counter > self.WINDOW or counter in seen:
+                return False
+            self.streams[i] = (s, hi, seen | {counter})
+            return True
+        if len(self.streams) >= self.SALTS_MAX:
+            self.streams.pop(0)
+        self.streams.append((salt, counter, {counter}))
+        return True
+
+
+def guard_cases():
+    """(name, [(salt_hex, counter)]) sequences; expectations come from Guard."""
+    a, b = "a1a2a3a4a5a6a7a8", "0102030405060708"
+    cases = [
+        ("in order", [(a, c) for c in (0, 1, 2, 3)]),
+        ("duplicate of the highest", [(a, 5), (a, 5)]),
+        ("duplicate of an older one", [(a, 5), (a, 6), (a, 7), (a, 6)]),
+        ("reordered inside the window", [(a, 10), (a, 12), (a, 11), (a, 11)]),
+        ("exactly 64 behind is still inside", [(a, 100), (a, 36), (a, 36)]),
+        ("65 behind is too old", [(a, 100), (a, 35)]),
+        ("jump of 63", [(a, 0), (a, 63), (a, 0), (a, 62)]),
+        ("jump of exactly 64 keeps the old highest", [(a, 0), (a, 64), (a, 0)]),
+        ("jump of 65 forgets it", [(a, 0), (a, 65), (a, 0), (a, 1)]),
+        ("first frame seen is remembered", [(a, 500), (a, 500), (a, 499)]),
+        ("two salts count independently", [(a, 1), (b, 1), (a, 1), (b, 1), (b, 2)]),
+        ("counter wrap edge", [(a, 0xFFFFFFFE), (a, 0xFFFFFFFF), (a, 0xFFFFFFFF), (a, 0xFFFFFFFD)]),
+    ]
+    # 17 streams: the oldest one is evicted (documented limit), so its
+    # replay is accepted again.
+    salts = [bytes([i] * 8).hex() for i in range(1, 18)]
+    cases.append(("17 salts evict the oldest (documented limit)",
+                  [(s, 1) for s in salts] + [(salts[0], 1), (salts[16], 1)]))
+    out = []
+    for name, steps in cases:
+        g = Guard()
+        out.append({"name": name,
+                    "steps": [{"salt": s, "counter": c, "accept": g.check(bytes.fromhex(s), c)}
+                              for s, c in steps]})
+    return out
+
+
+def replay_video_cases(root):
+    """Frames + expectations for the frame-level video guard (r60)."""
+    a = bytes.fromhex("a1a2a3a4a5a6a7a8")
+    b = bytes.fromhex("0102030405060708")
+    plain = sample_frame()
+    fa, fb, fc = (seal_h264(root, a, c, plain) for c in (10, 11, 12))
+    fother = seal_h264(root, b, 77, plain)
+    units = nal_units(fa)                      # sps, pps, idr (nr 2), non-idr (nr 3)
+    cut = lambda f, i: f[nal_units(f)[i][0]:nal_units(f)[i][2]]
+    head = fa[:nal_units(fa)[2][0]]            # SPS + PPS in the clear
+    spliced = head + cut(fa, 2) + cut(fb, 3)   # NAL 2 of frame 10 + NAL 3 of frame 11
+    swapped = head + cut(fa, 3) + cut(fa, 2)   # indices 3, 2: out of order
+    repeated = head + cut(fa, 2) + cut(fa, 2)  # index 2 twice
+    only_clear = fa[:nal_units(fa)[2][0]]      # SPS + PPS only
+    assert len(units) == 4
+    cases = [
+        ("in order", [fa, fb, fc]),
+        ("replay of an old frame", [fa, fb, fa, fb]),
+        ("reordered inside the window", [fa, fc, fb, fb]),
+        ("spliced from two frames", [fa, spliced]),
+        ("spliced frame as first sight", [spliced]),
+        ("NAL units swapped", [swapped]),
+        ("NAL unit repeated", [repeated]),
+        ("second stream counts on its own", [fa, fother, fother, fa]),
+        ("frame without encrypted NAL has no counter", [only_clear, only_clear]),
+    ]
+    frames, out = [], []
+    for name, seq in cases:
+        g = Guard()
+        steps = []
+        for fr in seq:
+            if fr not in frames:
+                frames.append(fr)
+            r = open_h264_checked(root, fr)
+            ok = r is not None and (r[1] is None or g.check(*r[1]))
+            steps.append({"frame": frames.index(fr), "accept": ok})
+        out.append({"name": name, "steps": steps})
+    return {"frames": [f.hex() for f in frames], "cases": out}
+
+
 def sample_frame() -> bytes:
     f = bytearray()
     f += bytes([0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1F, 0x96, 0x54])      # SPS
@@ -182,6 +317,8 @@ def build() -> dict:
         "nonces": [],
         "audio": [],
         "h264": [],
+        "guard": [],
+        "replay_video": {},
     }
     for spur in ("ton", "bild"):
         for salt in (salt_a, salt_b):
@@ -207,6 +344,8 @@ def build() -> dict:
         assert open_h264(root, fr) == sample
         v["h264"].append({"salt": salt.hex(), "counter": counter, "plain": sample.hex(),
                           "frame": fr.hex()})
+    v["guard"] = guard_cases()
+    v["replay_video"] = replay_video_cases(root)
     return v
 
 

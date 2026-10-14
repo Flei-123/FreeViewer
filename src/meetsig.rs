@@ -470,7 +470,10 @@ async fn lauf(
         "name": name,
         "pass": pass,
         "fvid": fvid,
-        "caps": { "simulcast": false, "codecs": [], "e2e": e2e }
+        // e2e_ver: frame format we speak (r61). A server with FM_E2E_MIN_VER
+        // refuses E2E joins that do not announce it. Old servers ignore it.
+        "caps": { "simulcast": false, "codecs": [], "e2e": e2e,
+                  "e2e_ver": if e2e { crate::meete2e::FORMAT_VERSION } else { 0 } }
     }));
     ws.send(Message::Text(join.into())).await?;
 
