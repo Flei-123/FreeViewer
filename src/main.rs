@@ -28,6 +28,7 @@ mod ident;
 #[cfg(feature = "license")]
 mod license;
 mod link;
+mod machineacl;
 mod meet;
 mod meetsig;
 mod meete2e;

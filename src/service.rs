@@ -89,6 +89,7 @@ pub fn publish_loop(shared: std::sync::Arc<crate::shared::Shared>) {
     });
 }
 
+
 #[cfg(windows)]
 mod imp {
     use super::*;
@@ -204,14 +205,6 @@ mod imp {
         let pd = std::env::var("ProgramData").map_err(|_| anyhow!("ProgramData unbekannt"))?;
         let dir = PathBuf::from(pd).join(crate::brand::DIR);
         std::fs::create_dir_all(&dir)?;
-        // let normal users read and write it, otherwise the GUI could not
-        // change the password of an installation owned by SYSTEM
-        let _ = std::process::Command::new("icacls")
-            .arg(dir.display().to_string())
-            .arg("/grant")
-            .arg("*S-1-5-32-545:(OI)(CI)M")
-            .output();
-
         let old = crate::ident::user_config_dir();
         if old != dir {
             for name in [
@@ -232,6 +225,24 @@ mod imp {
         if !dir.join("password.txt").exists() {
             let pw = crate::ident::random_password();
             crate::secstore::write_sealed_file(&dir.join("password.txt"), &pw)?;
+        }
+        // Normal users must still be able to edit the files the GUI owns,
+        // otherwise they could not change the password of an installation
+        // owned by SYSTEM - but not delete/replace the identity (r74).
+        let protect: Vec<&str> = ["identity.txt"]
+            .into_iter()
+            .filter(|n| dir.join(n).exists())
+            .collect();
+        for args in crate::machineacl::machine_acl_commands(&dir, &protect) {
+            match std::process::Command::new("icacls").args(&args).output() {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => log(&format!(
+                    "icacls {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&o.stdout).trim()
+                )),
+                Err(e) => log(&format!("icacls not started: {e}")),
+            }
         }
         Ok(dir)
     }

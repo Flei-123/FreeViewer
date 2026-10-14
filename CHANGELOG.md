@@ -8,6 +8,7 @@ Security release. **FreeMeet end-to-end format changes (v1 -> v2): old and new c
 - Update signature check (Ed25519, `mac_version` for macOS) - the client only installs signed updates (r2, r28).
 - Host proves the password to the viewer (additive, r5); brute-force lock for password attempts (r4); viewer auto-reconnect (r25).
 - Host passwords are stored encrypted, not in plain text (r10/r64): Windows DPAPI (machine scope), macOS/Linux AES-GCM keyed from the machine identity, files 0600; the service state file too. Old plain files migrate on first start. Replacing a permanent password needs the current one; the start page password auto-hides after 10 s; stored passwords are read-only (delete + add).
+- macOS: the host-password key now lives in the login Keychain (`fvmk1:`, r75); old `fvk1:` files are upgraded on first load, `FV_NO_KEYCHAIN=1` keeps the old format. Windows service install: the ProgramData folder no longer lets ordinary users delete/replace files (identity.txt is read-only for them), r74.
 - Fixes: friendlier connect errors + retry button (r31), requester name marked unconfirmed (r14), password hidden by default (r10).
 - Dependencies: `cargo audit` clean (rustls 0.23.45, xcb 1.7.1) (r9).
 Rollout order: native release first, then the browser/SFU switch (rollout/03-freemeet-nonce/RELEASE-CHECKLIST.md).

@@ -225,8 +225,8 @@ pub fn fixed_password() -> Option<String> {
     if plain.is_empty() {
         return None;
     }
-    if !crate::secstore::is_sealed(&raw) {
-        // migrate the old plain text file; failing to do so changes nothing
+    if crate::secstore::needs_reseal(&raw) {
+        // migrate the old plain text / pre-Keychain file; failing to do so changes nothing
         let _ = crate::secstore::write_sealed_file(&password_file(), &plain);
     }
     Some(plain)

@@ -1,0 +1,29 @@
+# Stand-alone test exe for the Windows password sealing (r73/r74/r75): pulls in
+# only secstore.rs + machineacl.rs, so it builds (and cross-compiles from
+# Linux) without the GUI/audio/video stack. Not part of the main build.
+#   cargo test --locked --target x86_64-pc-windows-gnu --no-run
+#   cargo check --locked --target aarch64-apple-darwin      # Keychain code
+[package]
+name = "fv-secstore-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+[target.'cfg(target_os="macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = ["Win32_Foundation", "Win32_Security_Cryptography"]
+
+[profile.dev]
+debug = 0

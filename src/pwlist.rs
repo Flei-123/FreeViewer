@@ -51,15 +51,19 @@ pub fn load() -> Vec<Entry> {
     };
     let mut out = Vec::new();
     let mut needs_migration = false;
+    let mut skipped = false;
     for item in arr.iter().take(MAX) {
         let stored = item.get("pw").and_then(|x| x.as_str()).unwrap_or("");
-        if !crate::secstore::is_sealed(stored) && !stored.is_empty() {
+        if crate::secstore::needs_reseal(stored) {
             needs_migration = true;
         }
         // a sealed value that cannot be opened here (other machine) is skipped
         let pw = match crate::secstore::open(stored) {
             Some(p) if !p.is_empty() => p,
-            _ => continue,
+            _ => {
+                skipped = true;
+                continue;
+            }
         };
         let label = item
             .get("label")
@@ -71,7 +75,9 @@ pub fn load() -> Vec<Entry> {
             .collect();
         out.push(Entry { label, pw });
     }
-    if needs_migration {
+    // never rewrite while an entry could not be opened (other machine,
+    // Keychain locked): saving would drop it for good
+    if needs_migration && !skipped {
         // old plain text file: rewrite it sealed, best effort
         let _ = save(&out);
     }
