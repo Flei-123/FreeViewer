@@ -1,20 +1,20 @@
-//! Natives Meeting - Stufe 1c: Mikrofon, Lautsprecher, Mischer und
-//! Echo-Unterdrueckung.
+//! Native meeting - stage 1c: microphone, speaker, mixer and
+//! echo cancellation.
 //!
-//! Der Browser hat uns das bisher abgenommen. Drei Dinge fehlen also:
-//!   1. Aufnahme und Wiedergabe (cpal - liegt schon im Projekt).
-//!   2. MISCHEN: mehrere Gegenueber kommen als getrennte Tonspuren an,
-//!      der Lautsprecher will EINE.
-//!   3. ECHO: was aus dem Lautsprecher kommt, hoert das Mikrofon wieder.
-//!      Ohne Gegenmassnahme hoert der andere sich selbst - der haeufigste
-//!      Grund, warum Selbstgebautes "billig" klingt.
+//! The browser used to handle this for us. So three things are missing:
+//!   1. Capture and playback (cpal - already in the project).
+//!   2. MIXING: several peers arrive as separate audio tracks,
+//!      the speaker wants ONE.
+//!   3. ECHO: what comes out of the speaker is heard again by the microphone.
+//!      Without a countermeasure the other person hears themselves - the most common
+//!      reason why home-built software sounds "cheap".
 //!
-//! Die Echo-Unterdrueckung ist bewusst REINES RUST (Blockweise im
-//! Frequenzbereich, NLMS + Nachfilter). Der uebliche Weg waere eine
-//! C++-Bibliothek (WebRTC-APM oder Speex); beide brauchen cmake, libclang
-//! und Extra-Werkzeuge auf JEDEM Baurechner - das wollen wir uns fuer
-//! Windows und Mac nicht einhandeln. Wie gut es wirklich ist, wird
-//! gemessen (ERLE in dB, siehe Tests unten), nicht behauptet.
+//! The echo cancellation is deliberately PURE RUST (block-wise in the
+//! frequency domain, NLMS + post-filter). The usual way would be a
+//! C++ library (WebRTC APM or Speex); both need cmake, libclang
+//! and extra tools on EVERY build machine - we do not want to take that on for
+//! Windows and Mac. How good it really is gets
+//! measured (ERLE in dB, see tests below), not claimed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,38 +26,38 @@ use rustfft::{Fft, FftPlanner};
 pub const RATE: usize = 48_000;
 pub const RAHMEN: usize = 960;
 
-/// Blocklaenge der Echo-Unterdrueckung (10 ms) und Laenge der Nachhallfahne.
+/// Block length of the echo cancellation (10 ms) and length of the reverb tail.
 const BLOCK: usize = 480;
 const FFT_N: usize = 2 * BLOCK;
-/// Wie weit zurueck wird das Echo gesucht (Anzahl Bloecke a 10 ms).
+/// How far back the echo is searched (number of 10 ms blocks).
 const TEILE: usize = 20; // 200 ms - deckt Zimmerhall und Puffer ab
 
-/// Blockweise Echo-Unterdrueckung im Frequenzbereich (partitioniertes NLMS).
+/// Block-wise echo cancellation in the frequency domain (partitioned NLMS).
 ///
-/// Ablauf je 10-ms-Block: das, was gerade zum Lautsprecher geht (Referenz),
-/// wandert in einen Verlauf. Aus dem Verlauf wird das erwartete Echo
-/// geschaetzt und vom Mikrofonsignal abgezogen. Der Filter lernt dabei
-/// weiter - aber NUR, wenn nicht gerade beide gleichzeitig reden
-/// (Gegensprech-Erkennung), sonst zerstoert man die eigene Stimme.
+/// Flow per 10 ms block: what is currently going to the speaker (reference)
+/// moves into a history. From the history the expected echo is
+/// estimated and subtracted from the microphone signal. The filter keeps
+/// learning meanwhile - but ONLY when both are not talking at the same time
+/// (double-talk detection), otherwise you destroy your own voice.
 pub struct Echo {
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,
     /// Gewichte des Filters, je Teil ein Spektrum.
     w: Vec<Vec<Complex32>>,
-    /// Verlauf der Referenzspektren (Ringpuffer).
+    /// History of the reference spectra (ring buffer).
     x: Vec<Vec<Complex32>>,
     pos: usize,
-    /// Letzter Referenzblock (fuer die Ueberlappung).
+    /// Last reference block (for the overlap).
     letzte_ref: Vec<f32>,
-    /// Mittlere Leistung der Referenz je Frequenz - Schrittweite des NLMS.
+    /// Mean power of the reference per frequency - step size of the NLMS.
     leistung: Vec<f32>,
-    /// Wie stark der Nachfilter zuletzt gedaempft hat (zum Weichzeichnen).
+    /// How strongly the post-filter attenuated last time (for smoothing).
     daempfung: Vec<f32>,
-    /// Spitzenwerte der letzten Referenzbloecke - fuer die
-    /// Gegensprech-Erkennung nach Geigel (braucht KEINEN fertig gelernten
-    /// Filter, das war der Fehler in der ersten Fassung).
+    /// Peak values of the last reference blocks - for the
+    /// double-talk detection after Geigel (needs NO fully trained
+    /// filter, that was the mistake in the first version).
     ref_spitzen: std::collections::VecDeque<f32>,
-    /// Zaehler fuer die reihum laufende Zwangsbedingung.
+    /// Counter for the round-robin constraint.
     runde: usize,
 }
 
@@ -85,7 +85,7 @@ impl Echo {
         assert_eq!(mikro.len(), BLOCK);
         assert_eq!(referenz.len(), BLOCK);
 
-        // --- Referenz in den Verlauf (mit 50 % Ueberlappung) ---------------
+        // --- reference into the history (with 50 % overlap) ---------------
         let mut ein: Vec<Complex32> = Vec::with_capacity(FFT_N);
         for i in 0..BLOCK {
             ein.push(Complex32::new(self.letzte_ref[i], 0.0));
@@ -98,7 +98,7 @@ impl Echo {
         self.pos = (self.pos + 1) % TEILE;
         self.x[self.pos] = ein;
 
-        // --- geschaetztes Echo = Summe ueber alle Teile --------------------
+        // --- estimated echo = sum over all parts --------------------------
         let mut y = vec![Complex32::new(0.0, 0.0); FFT_N];
         for t in 0..TEILE {
             let xi = (self.pos + TEILE - t) % TEILE;
@@ -108,18 +108,18 @@ impl Echo {
         }
         self.ifft.process(&mut y);
         let skal = 1.0 / FFT_N as f32;
-        // gueltig ist nur die zweite Haelfte (Overlap-Save)
+        // only the second half is valid (overlap-save)
         let echo: Vec<f32> = (BLOCK..FFT_N).map(|i| y[i].re * skal).collect();
 
         // --- Fehler = Mikrofon minus geschaetztes Echo ---------------------
         let fehler: Vec<f32> = (0..BLOCK).map(|i| mikro[i] - echo[i]).collect();
 
-        // --- Gegensprech-Erkennung (Geigel) --------------------------------
-        // Der Filter ist am Anfang leer, also kann man NICHT mit dem
-        // geschaetzten Echo vergleichen (genau daran ist die erste Fassung
-        // gescheitert: sie hat nie gelernt). Stattdessen der bewaehrte
-        // Vergleich: ist das Mikrofon lauter als ein gedaempfter
-        // Lautsprecher je sein kann, redet ein Mensch mit.
+        // --- double-talk detection (Geigel) --------------------------------
+        // The filter is empty at the start, so one can NOT compare with the
+        // estimated echo (that is exactly where the first version
+        // failed: it never learned). Instead the proven
+        // comparison: if the microphone is louder than an attenuated
+        // speaker can ever be, a person is talking along.
         let spitze_mik = mikro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let spitze_ref = referenz.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         self.ref_spitzen.push_back(spitze_ref);
@@ -132,7 +132,7 @@ impl Echo {
         let lernen = e_ref > 1e-6 && ref_max > 1e-4 && !gegensprechen;
 
         if lernen {
-            // Fehlerspektrum (vorne Nullen, hinten der Fehler - Overlap-Save)
+            // error spectrum (zeros in front, the error behind - overlap-save)
             let mut ef: Vec<Complex32> = Vec::with_capacity(FFT_N);
             for _ in 0..BLOCK {
                 ef.push(Complex32::new(0.0, 0.0));
@@ -142,7 +142,7 @@ impl Echo {
             }
             self.fft.process(&mut ef);
 
-            // Leistung je Frequenz ueber alle Teile - daraus die Schrittweite.
+            // Power per frequency over all parts - the step size comes from that.
             for k in 0..FFT_N {
                 let mut p = 0.0;
                 for t in 0..TEILE {
@@ -151,10 +151,10 @@ impl Echo {
                 }
                 self.leistung[k] = 0.8 * self.leistung[k] + 0.2 * p;
             }
-            // Ein reiner Dauerton belegt nur wenige Frequenzen - dort wird
-            // die Schrittweite sonst riesig und der Filter fliegt weg.
-            // Deshalb ein Boden, der sich am Mittel aller Frequenzen
-            // orientiert (Tichonow-Regelung).
+            // A pure steady tone occupies only few frequencies - there
+            // the step size otherwise becomes huge and the filter diverges.
+            // Hence a floor that is oriented on the mean of all
+            // frequencies (Tikhonov regularisation).
             let mittel: f32 = self.leistung.iter().sum::<f32>() / FFT_N as f32;
             let boden = (mittel * 0.05).max(1e-3);
             for k in 0..FFT_N {
@@ -162,9 +162,9 @@ impl Echo {
                     self.leistung[k] = boden;
                 }
             }
-            // Schrittweite klein halten: lieber langsam und stabil als
-            // schnell und dann wegfliegend (erste Fassung: -57 dB, also das
-            // Gegenteil von Echo-Unterdrueckung).
+            // Keep the step size small: better slow and stable than
+            // fast and then diverging (first version: -57 dB, i.e. the
+            // opposite of echo cancellation).
             let mu = 0.1;
             for t in 0..TEILE {
                 let xi = (self.pos + TEILE - t) % TEILE;
@@ -173,10 +173,10 @@ impl Echo {
                     self.w[t][k] += self.x[xi][k].conj() * ef[k] * g;
                 }
             }
-            // Zwangsbedingung: ein Teil des Filters darf nur die ersten
-            // BLOCK Abtastwerte belegen. Ohne das faltet sich das Signal um
-            // (zirkulaere Faltung) und der Filter wird instabil. Aus
-            // Rechenzeitgruenden reihum immer ein Teil pro Block.
+            // Constraint: a part of the filter may only occupy the first
+            // BLOCK samples. Without it the signal wraps around
+            // (circular convolution) and the filter becomes unstable. For
+            // compute-time reasons always one part per block, round robin.
             self.runde = self.runde.wrapping_add(1);
             let skal2 = 1.0 / FFT_N as f32;
             for t in 0..TEILE {
@@ -192,8 +192,8 @@ impl Echo {
                 self.fft.process(&mut zeit);
                 self.w[t] = zeit;
             }
-            // Leckstrom: alte Lernergebnisse verblassen langsam, damit sich
-            // der Filter nicht in ein altes Zimmer verbeisst.
+            // Leakage: old learning results fade slowly, so that
+            // the filter does not cling to an old room.
             for t in 0..TEILE {
                 for k in 0..FFT_N {
                     self.w[t][k] *= 0.9999;
@@ -201,10 +201,10 @@ impl Echo {
             }
         }
 
-        // --- Notbremse ------------------------------------------------------
-        // Wenn die Schaetzung lauter wird als das Mikrofon, ist der Filter
-        // weggelaufen (bei reinen Dauertoenen der Klassiker). Dann lieber
-        // alles halbieren als dem Gegenueber die Ohren wegblasen.
+        // --- emergency brake ------------------------------------------------
+        // If the estimate becomes louder than the microphone, the filter has
+        // run away (the classic with pure steady tones). Then better
+        // halve everything than blow the other person's ears off.
         let e_mik: f32 = mikro.iter().map(|v| v * v).sum::<f32>() + 1e-12;
         let e_echo: f32 = echo.iter().map(|v| v * v).sum::<f32>();
         if e_echo > 4.0 * e_mik {
@@ -215,10 +215,10 @@ impl Echo {
             }
         }
 
-        // --- Nachfilter: was uebrig bleibt, wird frequenzweise gedaempft ---
-        // Der lineare Filter erwischt nie alles (Zimmer aendern sich,
-        // Lautsprecher verzerren). Rest per Daempfung nach Verhaeltnis
-        // Fehler zu geschaetztem Echo.
+        // --- post-filter: what is left is attenuated per frequency ---
+        // The linear filter never catches everything (rooms change,
+        // speakers distort). The rest is attenuated by the ratio
+        // of error to estimated echo.
         let mut fspek: Vec<Complex32> = Vec::with_capacity(FFT_N);
         for _ in 0..BLOCK {
             fspek.push(Complex32::new(0.0, 0.0));
@@ -239,7 +239,7 @@ impl Echo {
             let f = fspek[k].norm_sqr();
             let e = espek[k].norm_sqr();
             let ziel = (f / (f + 2.0 * e + 1e-9)).clamp(0.05, 1.0);
-            // weich nachziehen, sonst "pumpt" es hoerbar
+            // follow softly, otherwise it audibly "pumps"
             self.daempfung[k] = 0.7 * self.daempfung[k] + 0.3 * ziel;
             fspek[k] *= self.daempfung[k];
         }
@@ -259,42 +259,42 @@ impl Echo {
     }
 }
 
-/// Mischt die Tonrahmen mehrerer Teilnehmer zu einem Lautsprechersignal.
+/// Mixes the audio frames of several participants into one speaker signal.
 ///
-/// Jeder Teilnehmer bekommt eine eigene Warteschlange - Pakete kommen nie
-/// gleichmaessig an. Der Mischer nimmt, was da ist, und fuellt fehlende
-/// Stellen mit Stille auf, statt zu knacksen.
-/// Rauschsperre fuers Mikrofon ("noise gate").
+/// Every participant gets their own queue - packets never arrive
+/// evenly. The mixer takes what is there and fills missing
+/// spots with silence instead of crackling.
+/// Noise gate for the microphone.
 ///
-/// WARUM ueberhaupt: bisher ging JEDES Geraeusch raus - Luefter, Tastatur,
-/// die Strasse. In einer Runde mit acht Leuten summiert sich das zu einem
-/// Rauschteppich, durch den niemand mehr angenehm reden kann.
+/// WHY at all: previously EVERY noise went out - fans, keyboard,
+/// the street. In a round of eight people this adds up to a carpet of noise
+/// in which nobody can talk comfortably any more.
 ///
-/// Das Grundrauschen wird SELBST geschaetzt, nicht vom Nutzer erfragt:
-/// jeder Raum ist anders, und niemand kann in Dezibel angeben, wie laut
-/// sein Kuehlschrank ist. Die Schaetzung faellt schnell (leiser Raum wird
-/// sofort erkannt) und steigt sehr langsam - sonst wuerde eine lange
-/// Wortmeldung nach und nach als "Grundrauschen" durchgehen und die Sperre
-/// wuerde sich selbst zudrehen.
+/// The noise floor is estimated BY ITSELF, not asked from the user:
+/// every room is different, and nobody can state in decibels how loud
+/// their fridge is. The estimate falls fast (a quiet room is
+/// recognised immediately) and rises very slowly - otherwise a long
+/// contribution would gradually pass as "noise floor" and the gate
+/// would close itself.
 ///
-/// Zwei Dinge, die den Unterschied zwischen "brauchbar" und "unbenutzbar"
+/// Two things that make the difference between "usable" and "unusable":
 /// machen:
-/// * **Nachlaufzeit.** Nach dem letzten lauten Rahmen bleibt das Tor noch
-///   rund 300 ms offen. Ohne das schneidet die Sperre die leisen Ausklaenge
-///   von Woertern ab, und man klingt abgehackt.
-/// * **Weiche Rampen.** Auf- und Zublenden ueber ein paar Millisekunden.
-///   Ein hartes Umschalten erzeugt ein hoerbares Knacken.
+/// * **Hold time.** After the last loud frame the gate stays
+///   open for about 300 ms. Without it the gate cuts off the quiet tails
+///   of words, and you sound choppy.
+/// * **Soft ramps.** Fading in and out over a few milliseconds.
+///   A hard switch produces an audible click.
 #[derive(Debug, Clone)]
 pub struct Rauschsperre {
     /// Geschaetztes Grundrauschen als Effektivwert (0..1).
     grund: f32,
     /// Aktuelle Durchlassstaerke (0 = zu, 1 = offen).
     verstaerkung: f32,
-    /// Wie viele Rahmen das Tor noch offen bleibt.
+    /// How many frames the gate stays open.
     nachlauf: u32,
-    /// Die ersten Rahmen dienen nur dem Einmessen.
+    /// The first frames are only for calibration.
     einmessen: u32,
-    /// Stand fuer die Anzeige.
+    /// State for the display.
     offen: bool,
 }
 
@@ -305,9 +305,9 @@ impl Default for Rauschsperre {
 }
 
 impl Rauschsperre {
-    /// So viele 20-ms-Rahmen bleibt das Tor nach dem letzten Ton offen.
+    /// For this many 20 ms frames the gate stays open after the last sound.
     const NACHLAUF: u32 = 15; // 300 ms
-    /// So lange (Rahmen) wird nur gemessen und alles durchgelassen.
+    /// For this long (frames) only measuring happens and everything passes.
     const EINMESSEN: u32 = 25; // 500 ms
 
     pub fn neu() -> Rauschsperre {
@@ -320,10 +320,10 @@ impl Rauschsperre {
         }
     }
 
-    /// Einen Rahmen durchlassen, daempfen oder sperren - an Ort und Stelle.
+    /// Let a frame pass, attenuate or block it - in place.
     ///
-    /// `staerke` 0..100: 0 laesst fast alles durch, 100 ist streng.
-    /// Rueckgabe: ob gerade durchgelassen wird (fuer die Anzeige).
+    /// `staerke` 0..100: 0 lets almost everything through, 100 is strict.
+    /// Returns: whether it is currently passing (for the display).
     pub fn rahmen(&mut self, pcm: &mut [f32], staerke: u8) -> bool {
         if pcm.is_empty() {
             return self.offen;
@@ -331,9 +331,9 @@ impl Rauschsperre {
         let quadrat: f32 = pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32;
         let pegel = quadrat.sqrt();
 
-        // Grundrauschen nachfuehren: schnell nach unten, sehr langsam nach
-        // oben. Beim ersten Rahmen einfach uebernehmen, sonst braeuchte die
-        // Schaetzung Sekunden, um von 0 hochzukommen.
+        // Track the noise floor: fast downwards, very slowly
+        // upwards. At the first frame simply take it over, otherwise the
+        // estimate would need seconds to climb up from 0.
         if self.einmessen == Self::EINMESSEN {
             self.grund = pegel;
         } else if pegel < self.grund {
@@ -348,10 +348,10 @@ impl Rauschsperre {
         }
 
         let s = (staerke.min(100) as f32) / 100.0;
-        // Abstand zum Grundrauschen: das Doppelte bis das Achtfache.
+        // Distance to the noise floor: double to eight times.
         let faktor = 2.0 + s * 6.0;
-        // Absolute Untergrenze - in einem voellig stillen Raum ginge der
-        // Faktor sonst gegen null und die Sperre waere wirkungslos.
+        // Absolute lower bound - in a completely quiet room the
+        // factor would otherwise go towards zero and the gate would be ineffective.
         let mindest = 0.0015 + s * 0.010;
         let schwelle = (self.grund * faktor).max(mindest);
 
@@ -382,12 +382,12 @@ impl Rauschsperre {
         self.offen
     }
 
-    /// Geschaetztes Grundrauschen (0..1) - fuer die Anzeige.
+    /// Estimated noise floor (0..1) - for the display.
     pub fn grundrauschen(&self) -> f32 {
         self.grund
     }
 
-    /// Laesst die Sperre gerade durch?
+    /// Is the gate currently letting sound through?
     pub fn durchlass(&self) -> bool {
         self.offen
     }
@@ -411,13 +411,13 @@ impl Mischer {
     pub fn dazu(&mut self, peer: u64, pcm: &[i16]) {
         let p = self.puffer.entry(peer).or_default();
         p.extend(pcm.iter().copied());
-        // Nie mehr als 400 ms aufstauen - sonst laeuft das Gespraech davon.
+        // Never queue up more than 400 ms - otherwise the conversation runs away.
         while p.len() > RATE / 1000 * 400 {
             p.pop_front();
         }
     }
 
-    /// Einen Rahmen fuer den Lautsprecher holen.
+    /// Fetch a frame for the speaker.
     pub fn abmischen(&mut self, n: usize) -> Vec<i16> {
         let mut aus = vec![0i32; n];
         for p in self.puffer.values_mut() {
@@ -444,7 +444,7 @@ impl Mischer {
     }
 }
 
-/// i16 -> f32 (-1..1) und zurueck.
+/// i16 -> f32 (-1..1) and back.
 pub fn zu_f32(pcm: &[i16]) -> Vec<f32> {
     pcm.iter().map(|v| *v as f32 / 32768.0).collect()
 }
@@ -465,7 +465,7 @@ pub fn zu_mono(daten: &[f32], kanaele: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Einfaches lineares Umtasten auf 48 kHz (Geraete liefern auch 44,1 kHz).
+/// Simple linear resampling to 48 kHz (devices also deliver 44.1 kHz).
 pub fn auf_48k(daten: &[f32], von: usize) -> Vec<f32> {
     if von == RATE || daten.is_empty() {
         return daten.to_vec();
@@ -483,25 +483,25 @@ pub fn auf_48k(daten: &[f32], von: usize) -> Vec<f32> {
 }
 
 
-// ---------------------------------------------------------------- Geraete
-// Mikrofon und Lautsprecher. cpal-Stroeme duerfen den Faden nicht
-// verlassen (sie sind nicht "Send"), deshalb laeuft alles in EINEM eigenen
-// Faden, der ueber Kanaele mit dem Rest redet.
+// ---------------------------------------------------------------- devices
+// Microphone and speaker. cpal streams must not leave the thread
+// (they are not "Send"), therefore everything runs in ONE own
+// thread that talks to the rest via channels.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 pub struct Geraete {
-    /// Fertige 20-ms-Rahmen vom Mikrofon - schon ohne Echo.
+    /// Finished 20 ms frames from the microphone - already without echo.
     pub mikro: std::sync::mpsc::Receiver<Vec<i16>>,
-    /// Was der Lautsprecher spielen soll (wird gemischt).
+    /// What the speaker should play (gets mixed).
     pub lautsprecher: Arc<Mutex<Mischer>>,
     pub stumm: Arc<AtomicBool>,
-    /// Rauschsperre an? Wird im laufenden Betrieb umgeschaltet.
+    /// Noise gate on? Switched at runtime.
     pub sperre_an: Arc<AtomicBool>,
-    /// Strenge der Rauschsperre, 0..100.
+    /// Strictness of the noise gate, 0..100.
     pub sperre_staerke: Arc<std::sync::atomic::AtomicU32>,
-    /// Nur Anzeige: laesst die Sperre gerade durch?
+    /// Display only: is the gate currently letting sound through?
     pub sperre_offen: Arc<AtomicBool>,
     /// Nur Anzeige: geschaetztes Grundrauschen * 10000.
     pub sperre_grund: Arc<std::sync::atomic::AtomicU32>,
@@ -516,7 +516,7 @@ impl Drop for Geraete {
     }
 }
 
-/// Startet Aufnahme und Wiedergabe. Namen leer = Standardgeraet.
+/// Starts capture and playback. Empty names = default device.
 pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> anyhow::Result<Geraete> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
@@ -524,15 +524,15 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     let mischer = Arc::new(Mutex::new(Mischer::neu()));
     let stumm = Arc::new(AtomicBool::new(false));
     let ende = Arc::new(AtomicBool::new(false));
-    // Standardmaessig AN: ein Rauschteppich faellt jedem auf, eine leicht
-    // zu streng eingestellte Sperre nur dem Sprecher selbst - und der kann
-    // sie in den Einstellungen sofort abschalten.
+    // ON by default: a noise carpet is noticed by everyone, a slightly
+    // too strict gate only by the speaker themselves - and they can
+    // switch it off in the settings immediately.
     let sperre_an = Arc::new(AtomicBool::new(true));
     let sperre_staerke = Arc::new(std::sync::atomic::AtomicU32::new(45));
     let sperre_offen = Arc::new(AtomicBool::new(true));
     let sperre_grund = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-    // Namen vorab bestimmen, damit die Oberflaeche sie anzeigen kann.
+    // Determine names in advance, so that the UI can show them.
     let host = cpal::default_host();
     let ein_dev = match &ein_name {
         Some(n) if !n.is_empty() => host
@@ -584,7 +584,7 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     })
 }
 
-/// Die Griffe an der Rauschsperre, wie der Tonfaden sie sieht.
+/// The handles on the noise gate, as the audio thread sees them.
 struct Sperrgriffe {
     an: Arc<AtomicBool>,
     staerke: Arc<std::sync::atomic::AtomicU32>,
@@ -610,7 +610,7 @@ fn geraete_faden(
     let aus_rate = aus_cfg.sample_rate().0 as usize;
     let aus_kan = aus_cfg.channels() as usize;
 
-    // Ringe zwischen Rueckruf und Arbeitsschleife.
+    // Rings between callback and work loop.
     let mikro_ring: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let referenz_ring: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -646,7 +646,7 @@ fn geraete_faden(
                 .map(|mut m| m.abmischen(noetig))
                 .unwrap_or_else(|_| vec![0i16; noetig]);
             let f = zu_f32(&gemischt);
-            // Referenz fuer die Echo-Unterdrueckung mitschreiben.
+            // Also record the reference for the echo cancellation.
             if let Ok(mut r) = rr.lock() {
                 r.extend_from_slice(&f);
                 let zu_viel = r.len().saturating_sub(RATE);
@@ -654,7 +654,7 @@ fn geraete_faden(
                     r.drain(0..zu_viel);
                 }
             }
-            // auf die Geraeterate zuruecktasten und auf alle Kanaele legen
+            // resample to the device rate and spread over all channels
             let raus = if aus_rate == RATE {
                 f
             } else {
@@ -684,7 +684,7 @@ fn geraete_faden(
     let mut echo = Echo::neu();
     let mut sperr = Rauschsperre::neu();
     while !ende.load(Ordering::Relaxed) {
-        // Ein 20-ms-Paar aus Mikrofon und Referenz holen.
+        // Fetch a 20 ms pair of microphone and reference.
         let mikro = {
             let mut r = mikro_ring.lock().unwrap();
             if r.len() < RAHMEN {
@@ -706,8 +706,8 @@ fn geraete_faden(
             }
         };
         let mut sauber = echo.rahmen(&mikro, &referenz);
-        // Erst Echo weg, DANN die Rauschsperre: sonst wuerde das Echo als
-        // Nutzsignal gelten und das Tor sinnlos aufhalten.
+        // First remove the echo, THEN the noise gate: otherwise the echo would count as
+        // useful signal and hold the gate open pointlessly.
         if sperre.an.load(Ordering::Relaxed) {
             let staerke = sperre.staerke.load(Ordering::Relaxed).min(100) as u8;
             let durch = sperr.rahmen(&mut sauber, staerke);
@@ -730,7 +730,7 @@ fn geraete_faden(
     Ok(())
 }
 
-/// Namen der vorhandenen Geraete - fuer die Auswahl in der Oberflaeche.
+/// Names of the available devices - for the selection in the UI.
 pub fn geraete_liste() -> (Vec<String>, Vec<String>) {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -759,7 +759,7 @@ mod tests {
             .collect()
     }
 
-    /// Ein Rahmen "Sprache": ein kraeftiger Ton mit etwas Rauschen darauf.
+    /// A "speech" frame: a strong tone with some noise on it.
     fn sprache(t: &mut f32, saat: &mut u32) -> Vec<f32> {
         (0..960)
             .map(|_| {
@@ -802,7 +802,7 @@ mod tests {
             let mut r = rauschen(0.01, &mut saat);
             sp.rahmen(&mut r, 50);
         }
-        // Jetzt wird gesprochen - nach spaetestens 100 ms muss es durch.
+        // Now speaking - within 100 ms at the latest it must pass.
         let mut letzter = Vec::new();
         for _ in 0..5 {
             let mut r = sprache(&mut t, &mut saat);
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn rauschsperre_schneidet_das_wortende_nicht_ab() {
-        // Der Nachlauf ist der Grund, warum es nicht abgehackt klingt.
+        // The hold time is the reason why it does not sound choppy.
         let mut sp = Rauschsperre::neu();
         let (mut saat, mut t) = (7u32, 0.0f32);
         for _ in 0..100 {
@@ -827,8 +827,8 @@ mod tests {
             let mut r = sprache(&mut t, &mut saat);
             sp.rahmen(&mut r, 50);
         }
-        // Direkt nach dem letzten lauten Rahmen muss noch durchgelassen
-        // werden - sonst faellt das Ende jedes Wortes weg.
+        // Directly after the last loud frame sound must still pass
+        // - otherwise the end of every word is lost.
         let mut r = rauschen(0.01, &mut saat);
         sp.rahmen(&mut r, 50);
         assert!(sp.durchlass(), "Nachlauf greift nicht");
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn staerke_null_laesst_mehr_durch_als_staerke_hundert() {
-        // Der Regler muss auch wirklich etwas bewirken.
+        // The control must actually have an effect.
         let mess = |staerke: u8| {
             let mut sp = Rauschsperre::neu();
             let mut saat = 7u32;
@@ -869,15 +869,15 @@ mod tests {
         x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32
     }
 
-    /// ERLE = wie viel Echo weg ist, in dB. Ueber 20 dB gilt als brauchbar,
-    /// ueber 30 dB als gut.
+    /// ERLE = how much echo is gone, in dB. Above 20 dB counts as usable,
+    /// above 30 dB as good.
     #[test]
     fn echo_wird_wirklich_leiser() {
         let mut e = Echo::neu();
         let mut ph = 0.0;
         let mut rest_leistung = 0.0;
         let mut echo_leistung = 0.0;
-        // Zimmer: das Echo ist eine gedaempfte, verzoegerte Fassung.
+        // Room: the echo is an attenuated, delayed version.
         let verzoegerung = 240; // 5 ms
         let mut verlauf = vec![0.0f32; verzoegerung + BLOCK];
         for i in 0..300 {
@@ -906,7 +906,7 @@ mod tests {
         let mut ein_l = 0.0;
         let mut aus_l = 0.0;
         for i in 0..200 {
-            // Kein Lautsprecher -> nichts abzuziehen, die Stimme muss bleiben.
+            // No speaker -> nothing to subtract, the voice must stay.
             let referenz = vec![0.0f32; BLOCK];
             let stimme = sinus(BLOCK, 220.0, 0.4, &mut ph1);
             let _ = sinus(BLOCK, 1000.0, 0.0, &mut ph2);
@@ -935,7 +935,7 @@ mod tests {
             let start = verlauf.len() - BLOCK - verzoegerung;
             let echo: Vec<f32> = verlauf[start..start + BLOCK].iter().map(|v| v * 0.5).collect();
             verlauf.drain(0..BLOCK);
-            // ab der Haelfte redet der Mensch mit
+            // from the half onwards the person talks along
             let stimme = if i > 200 {
                 sinus(BLOCK, 150.0, 0.4, &mut p2)
             } else {
@@ -972,8 +972,8 @@ mod tests {
         let echtzeit = bloecke as f32 * 0.01;
         let faktor = dauer / echtzeit;
         println!("Echo-Rechenzeit: {:.1} % der Echtzeit", faktor * 100.0);
-        // Im Debug-Bau rechnet Rust ohne Optimierung (Faktor ~40). Gemessen
-        // wird die Auslieferung: dort sind es 3,6 % der Echtzeit.
+        // In the debug build Rust computes without optimisation (factor ~40). What is measured
+        // is the release build: there it is 3.6 % of real time.
         let grenze = if cfg!(debug_assertions) { 3.0 } else { 0.2 };
         assert!(faktor < grenze, "zu langsam: {:.0} % der Echtzeit", faktor * 100.0);
     }
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(aus.len(), RAHMEN);
         assert_eq!(aus[0], 3000);
         assert_eq!(m.leute(), 2);
-        // Ist nichts mehr da, kommt Stille - kein Knacksen.
+        // If nothing is left, silence comes - no crackling.
         let leer = m.abmischen(RAHMEN);
         assert!(leer.iter().all(|v| *v == 0));
     }

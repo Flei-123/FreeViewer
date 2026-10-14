@@ -1,20 +1,20 @@
-//! Natives Meeting - Stufe 1b: Ton ohne Browser.
+//! Native meeting - stage 1b: audio without a browser.
 //!
-//! Hier passiert das, was bisher der Browser gemacht hat: eine echte
-//! WebRTC-Verbindung zum Medienserver aufbauen (ICE, DTLS, SRTP) und Ton in
-//! Opus hin- und herschicken. Wir benutzen dieselbe Bibliothek wie der
-//! Server selbst (str0m) - was auf der einen Seite laeuft, versteht die
-//! andere garantiert.
+//! This is where what the browser used to do happens: build a real
+//! WebRTC connection to the media server (ICE, DTLS, SRTP) and send audio
+//! back and forth in Opus. We use the same library as the
+//! server itself (str0m) - what runs on one side is guaranteed to be understood
+//! by the other.
 //!
-//! Aufteilung:
-//!   meetsig.rs  - die Steuerleitung (wer ist da, Chat, Hand, Warteraum)
-//!   meetrtc.rs  - dieses Modul: Ton (spaeter auch Bild und Bildschirm)
+//! Division:
+//!   meetsig.rs  - the control line (who is there, chat, hand, waiting room)
+//!   meetrtc.rs  - this module: audio (later also video and screen)
 //!
-//! Bewusst ohne Geraete-Zugriff: dieses Modul bekommt Bild/Ton als
-//! Zahlenreihen herein und gibt sie so wieder heraus. Mikrofon und
-//! Lautsprecher (cpal) und die Echo-Unterdrueckung haengen eine Ebene
-//! darueber - so laesst sich der ganze Netzweg auf einem Server ohne
-//! Soundkarte messen und nicht nur behaupten.
+//! Deliberately without device access: this module receives video/audio as
+//! number series and hands them out the same way. Microphone and
+//! speaker (cpal) and the echo cancellation sit one level
+//! above - so the whole network path can be measured on a server without
+//! a sound card and not just claimed.
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -28,50 +28,50 @@ use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
-/// Abtastrate und Rahmenlaenge wie im Browser: 48 kHz, 20 ms, Mono.
+/// Sample rate and frame length as in the browser: 48 kHz, 20 ms, mono.
 pub const RATE: u32 = 48_000;
 pub const RAHMEN: usize = 960; // 20 ms bei 48 kHz
 
-/// Was der Ton-Teil nach oben meldet.
+/// What the audio part reports upwards.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TonEreignis {
-    /// ICE und DTLS stehen - ab jetzt fliesst Ton.
+    /// ICE and DTLS are up - audio flows from now on.
     Verbunden,
     /// Ein entschluesselter, dekodierter Tonrahmen eines anderen Teilnehmers.
     Rahmen { quelle: u64, pcm: Vec<i16> },
-    /// Ein kodierter Bildrahmen (H.264) eines anderen Teilnehmers. Das
-    /// Dekodieren macht die Plattform (Media Foundation / VideoToolbox),
-    /// nicht dieses Modul.
+    /// An encoded video frame (H.264) of another participant. Decoding
+    /// is done by the platform (Media Foundation / VideoToolbox),
+    /// not by this module.
     Bild {
         quelle: u64,
-        /// true = geteilter Bildschirm, false = Kamera. Ohne das laegen
-        /// Kamera und Bildschirm desselben Teilnehmers im selben Topf.
+        /// true = shared screen, false = camera. Without it camera
+        /// and screen of the same participant would land in the same bucket.
         bildschirm: bool,
         daten: Vec<u8>,
         schluesselbild: bool,
-        /// Welches Bildformat der Server schickt ("H264", "VP8", ...).
-        /// Entscheidet, welcher Dekodierer drankommt.
+        /// Which video format the server sends ("H264", "VP8", ...).
+        /// Decides which decoder is used.
         codec: String,
     },
     Fehler(String),
     Ende(String),
 }
 
-/// Laufende Zahlen - damit man Behauptungen nachrechnen kann.
+/// Running numbers - so that claims can be checked by calculation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Zahlen {
     pub gesendet: u64,
     pub empfangen: u64,
     pub bild_gesendet: u64,
     pub bild_empfangen: u64,
-    /// Rahmen der eigenen BILDSCHIRM-Spur (Stufe 3).
+    /// Frames of the own SCREEN track (stage 3).
     pub schirm_gesendet: u64,
     pub bytes_raus: u64,
     pub bytes_rein: u64,
     /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
     pub pegel_rein: f32,
-    /// Tonrahmen, die wegen Rueckstau verworfen wurden. Frueher gab es
-    /// das nicht - der Stau blieb fuer immer als Verzoegerung stehen.
+    /// Audio frames that were dropped because of backlog. Previously this did not
+    /// exist - the backlog stayed forever as delay.
     pub ton_verworfen: u64,
     /// Wie viele 20-ms-Rahmen gerade auf ihren Sendeschlitz warten.
     pub ton_stau: u32,
@@ -82,9 +82,9 @@ pub struct Zahlen {
 
 /// Steuerung des Ton-Teils von aussen.
 pub struct Ton {
-    /// PCM-Rahmen, die raus sollen (20 ms, Mono, 48 kHz).
+    /// PCM frames that should go out (20 ms, mono, 48 kHz).
     raus: std::sync::mpsc::Sender<Vec<i16>>,
-    /// Kodierte Bildrahmen, die raus sollen.
+    /// Encoded video frames that should go out.
     bild_raus: std::sync::mpsc::Sender<Vec<u8>>,
     /// Kodierte Bildschirmrahmen (eigene Spur, Stufe 3).
     schirm_raus: std::sync::mpsc::Sender<Vec<u8>>,
@@ -92,16 +92,16 @@ pub struct Ton {
     zahlen: Arc<Mutex<Zahlen>>,
     stumm: Arc<AtomicBool>,
     ende: Arc<AtomicBool>,
-    /// Das SDP-Angebot, das an den Server geschickt werden muss.
+    /// The SDP offer that has to be sent to the server.
     pub angebot: String,
-    /// m-line unseres eigenen Tons (der Server will sie im "publish" wissen).
+    /// m-line of our own audio (the server wants to know it in "publish").
     pub mid: String,
     /// m-line unseres eigenen Bildes.
     pub vid: String,
     /// m-line unserer eigenen Bildschirmfreigabe.
     pub vid2: String,
-    /// Welche m-line gehoert zu wem - und ob sie ein Bildschirm ist
-    /// (aus den "track"-Meldungen der Signalisierung).
+    /// Which m-line belongs to whom - and whether it is a screen
+    /// (from the "track" messages of the signalling).
     spuren: Arc<Mutex<HashMap<String, (u64, bool)>>>,
     antwort: std::sync::mpsc::Sender<Sdp>,
 }
@@ -110,7 +110,7 @@ pub struct Ton {
 pub enum Sdp {
     /// Antwort auf UNSER Angebot.
     Antwort(String),
-    /// Der Server bietet selbst etwas an (neue Teilnehmer) - wir antworten.
+    /// The server offers something itself (new participants) - we answer.
     Angebot(String),
 }
 
@@ -118,13 +118,13 @@ impl Ton {
     pub fn senden(&self, pcm: Vec<i16>) {
         let _ = self.raus.send(pcm);
     }
-    /// Einen fertig kodierten H.264-Rahmen verschicken (Annex-B oder AVCC
-    /// ohne Startcode - str0m packt ihn selbst in RTP).
+    /// Send a fully encoded H.264 frame (Annex-B or AVCC
+    /// without start code - str0m packs it into RTP itself).
     pub fn bild_senden(&self, daten: Vec<u8>) {
         let _ = self.bild_raus.send(daten);
     }
-    /// Einen H.264-Rahmen der BILDSCHIRM-Spur verschicken. Eigene Spur,
-    /// damit die Gegenseite Kamera und Bildschirm trennen kann.
+    /// Send an H.264 frame of the SCREEN track. Own track,
+    /// so that the other side can separate camera and screen.
     pub fn schirm_senden(&self, daten: Vec<u8>) {
         let _ = self.schirm_raus.send(daten);
     }
@@ -145,15 +145,15 @@ impl Ton {
     pub fn antwort(&self, sdp: &str) {
         let _ = self.antwort.send(Sdp::Antwort(sdp.to_string()));
     }
-    /// Ein Angebot des Servers - die Antwort kommt als Ereignis zurueck.
+    /// An offer from the server - the answer comes back as an event.
     pub fn server_angebot(&self, sdp: &str) {
         let _ = self.antwort.send(Sdp::Angebot(sdp.to_string()));
     }
-    /// Antwort-SDP abholen, das auf ein Server-Angebot hin entstanden ist.
+    /// Fetch the answer SDP that arose in response to a server offer.
     pub fn offene_antwort(&self) -> Option<String> {
         ANTWORT_RAUS.lock().ok().and_then(|mut a| a.pop())
     }
-    /// Zuordnung aus der Signalisierung nachtragen (Kamera).
+    /// Add the mapping from the signalling afterwards (camera).
     pub fn spur(&self, mid: &str, peer: u64) {
         self.spur_art(mid, peer, false);
     }
@@ -174,22 +174,22 @@ impl Drop for Ton {
     }
 }
 
-/// Antworten, die der Ton-Faden fuer die Signalisierung hinterlegt.
+/// Answers that the audio thread leaves for the signalling.
 static ANTWORT_RAUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Startet den Ton-Teil: baut das Angebot und laeuft danach im Hintergrund.
+/// Starts the audio part: builds the offer and then runs in the background.
 pub fn starten() -> Result<Ton> {
     starten_mit(None)
 }
 
-/// Wie `starten`, aber mit Ende-zu-Ende-Schluessel.
+/// Like `starten`, but with an end-to-end key.
 ///
-/// Ohne Schluessel bleibt alles wie bisher (nur auf dem Weg verschluesselt).
-/// MIT Schluessel wird die Nutzlast schon HIER geheim gemacht - der Server
-/// verteilt dann nur Kauderwelsch. Bild und Ton werden unterschiedlich
-/// behandelt: beim Bild bleibt die H.264-Struktur lesbar (sonst kann der
-/// Server die Pakete nicht packen, gemessen am 07.08.2026), beim Ton wird
-/// der ganze Opus-Rahmen verschluesselt.
+/// Without a key everything stays as before (encrypted only in transit).
+/// WITH a key the payload is made secret already HERE - the server
+/// then distributes only gibberish. Video and audio are treated
+/// differently: with video the H.264 structure stays readable (otherwise the
+/// server cannot packetise, measured on 07.08.2026), with audio
+/// the whole Opus frame is encrypted.
 pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
     // Krypto-Anbieter einmalig setzen (reines Rust, s. Cargo.toml).
     static EINMAL: std::sync::Once = std::sync::Once::new();
@@ -201,18 +201,18 @@ pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
     socket.set_nonblocking(true)?;
     let lokal = socket.local_addr()?;
 
-    // Bandbreitenschaetzung an. Ohne sie sendet der Client stur mit
-    // fester Bitrate weiter, auch wenn die Leitung laengst zu ist -
-    // die Pakete stapeln sich dann im Router (Bufferbloat) und das
-    // Bild kommt Sekunden zu spaet an. Der Browser macht genau das
-    // hier von sich aus, unser nativer Client bisher nicht.
+    // bandwidth estimation on. Without it the client keeps sending stubbornly with a
+    // fixed bitrate, even when the line has long been full -
+    // the packets then pile up in the router (bufferbloat) and the
+    // image arrives seconds too late. The browser does exactly this
+    // on its own, our native client did not so far.
     let mut rtc = Rtc::builder()
         .enable_bwe(Some(str0m::bwe::Bitrate::bps(2_000_000)))
         .build(Instant::now());
     rtc.bwe().set_desired_bitrate(str0m::bwe::Bitrate::bps(2_500_000));
-    // Kandidaten: jede eigene Adresse, die kein Loopback ist. Der Server ist
-    // oeffentlich erreichbar - wir muessen also nur hinaus telefonieren
-    // koennen, ein STUN-Server ist dafuer nicht noetig.
+    // Candidates: every own address that is not loopback. The server is
+    // publicly reachable - so we only need to be able to
+    // call out, a STUN server is not necessary for that.
     for ip in eigene_adressen() {
         let addr = SocketAddr::new(ip, lokal.port());
         if let Ok(k) = Candidate::host(addr, "udp") {
@@ -222,15 +222,15 @@ pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
 
     let mut api = rtc.sdp_api();
     let mid = api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-    // Zweite Spur fuer Bild. H.264, weil Windows und Mac dafuer eine
-    // Hardware-Einheit haben (Media Foundation bzw. VideoToolbox) und jeder
-    // Browser es versteht. VP8 koennten wir nur in Software - das waere auf
-    // aelteren Rechnern eine Zumutung.
+    // Second track for video. H.264, because Windows and Mac have a hardware
+    // unit for it (Media Foundation or VideoToolbox) and every
+    // browser understands it. We could only do VP8 in software - that would be
+    // an imposition on older machines.
     let vid = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
-    // Dritte Spur: der geteilte Bildschirm. Bewusst getrennt von der
-    // Kamera - sonst verschwindet man selbst aus der Runde, sobald man
-    // etwas zeigt, und die Gegenseite kann nicht "Bildschirm gross,
-    // Kamera klein" anordnen.
+    // Third track: the shared screen. Deliberately separate from the
+    // camera - otherwise you disappear from the round yourself as soon as you show
+    // something, and the other side cannot arrange "screen large,
+    // camera small".
     let vid2 = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
     let (angebot, offen) = api
         .apply()
@@ -283,9 +283,9 @@ pub fn starten_mit(e2e: Option<crate::meete2e::Schluessel>) -> Result<Ton> {
     })
 }
 
-/// Alle eigenen IP-Adressen ausser Loopback. Ohne Fremdcode: wir fragen das
-/// Betriebssystem, indem wir eine Verbindung "ins Blaue" oeffnen (es fliesst
-/// dabei kein Paket) und schauen, welche Adresse es dafuer waehlt.
+/// All own IP addresses except loopback. Without third-party code: we ask the
+/// operating system by opening a connection "into the blue" (no packet
+/// flows) and looking at which address it chooses for it.
 fn eigene_adressen() -> Vec<std::net::IpAddr> {
     let mut aus = Vec::new();
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
@@ -319,7 +319,7 @@ fn lauf(
     spuren: &Arc<Mutex<HashMap<String, (u64, bool)>>>,
     e2e: Option<crate::meete2e::Schluessel>,
 ) -> Result<()> {
-    // Auf die Antwort warten (kommt ueber die Signalisierung herein).
+    // Wait for the answer (comes in via the signalling).
     let mut offen = Some(offen);
     let start = Instant::now();
     let mut kodierer = audiopus::coder::Encoder::new(
@@ -337,12 +337,12 @@ fn lauf(
     let mut e2e_schirm = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Bild));
     // Audio mids from which we already saw old-format (v1) frames.
     let mut e2e_old_format_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Und je eingehender Spur eine Wache gegen Wiedereinspielen.
+    // And per incoming track a guard against replay.
     let mut e2e_wachen: HashMap<String, crate::meete2e::Wache> = HashMap::new();
     let mut puffer = vec![0u8; 4000];
     let mut aus_puffer = vec![0u8; 2000];
-    // Welche m-line gehoert zu wem? Das sagt uns der Server ueber die
-    // Signalisierung ("track"), es wird von aussen hereingereicht.
+    // Which m-line belongs to whom? The server tells us via the
+    // signalling ("track"), it is passed in from outside.
     let mut mid_zu_peer: HashMap<String, u64> = HashMap::new();
     let mut naechster_rahmen = Instant::now();
     let mut rtp_zeit: u64 = 0;
@@ -352,17 +352,17 @@ fn lauf(
     let mut bild_zeit: u64 = 0;
     let mut spt: Option<str0m::media::Pt> = None;
     let mut schirm_zeit: u64 = 0;
-    // Wer mitten in einen laufenden Strom einsteigt, bekommt nur P-Bilder -
-    // ohne Schluesselbild dekodiert kein Decoder der Welt etwas. Also aktiv
-    // eines anfordern (das macht der Browser genauso), bis eines kommt.
+    // Whoever joins in the middle of a running stream only gets P frames -
+    // without a key frame no decoder in the world decodes anything. So actively
+    // request one (the browser does the same) until one arrives.
     let mut hat_schluessel: HashMap<String, bool> = HashMap::new();
-    // Tonrahmen, die auf ihren 20-ms-Schlitz warten. Begrenzt - siehe
+    // Audio frames waiting for their 20 ms slot. Bounded - see
     // stau_abbauen().
     let mut ton_warte: std::collections::VecDeque<Vec<i16>> =
         std::collections::VecDeque::new();
-    // Nur fuer den Kontrollversuch: mit FV_TON_STAU=999999 verhaelt sich
-    // der Client wie der alte Stand (kein Abbau). So laesst sich messen,
-    // dass der Abbau wirklich die Ursache trifft und nicht der Test luegt.
+    // Only for the control experiment: with FV_TON_STAU=999999 the
+    // client behaves like the old version (no draining). This way one can measure
+    // that the draining really hits the cause and the test is not lying.
     let ton_stau_max: usize = std::env::var("FV_TON_STAU")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -374,7 +374,7 @@ fn lauf(
             return Ok(());
         }
 
-        // ---- SDP von der Signalisierung -----------------------------------
+        // ---- SDP from the signalling --------------------------------------
         while let Ok(s) = sdp.try_recv() {
             match s {
                 Sdp::Antwort(text) => {
@@ -403,11 +403,11 @@ fn lauf(
             }
         }
 
-        // ---- Nutzlastkennung fuer Opus bestimmen ---------------------------
-        // Sobald die Antwort des Servers eingespielt ist, steht in der
-        // m-line, welche Kennung (PT) fuer Opus ausgehandelt wurde. Frueher
-        // haben wir auf ein Ereignis gewartet - das kommt aber nur fuer
-        // FREMDE Spuren, deshalb wurde nie etwas gesendet.
+        // ---- determine payload type for Opus -------------------------------
+        // Once the answer of the server is applied, the m-line says
+        // which identifier (PT) was negotiated for Opus. Previously
+        // we waited for an event - but that only comes for
+        // FOREIGN tracks, so nothing was ever sent.
         if pt.is_none() {
             let pts: Vec<str0m::media::Pt> = rtc
                 .media(mid)
@@ -428,15 +428,15 @@ fn lauf(
         // ---- eigenen Ton verschicken ---------------------------------------
         if rtc.is_alive() && Instant::now() >= naechster_rahmen {
             naechster_rahmen += Duration::from_millis(20);
-            // Hat der Faden laenger gestockt, liegt der Schlitz weit in der
-            // Vergangenheit - dann nicht in Eile hinterhersenden, sondern
-            // neu ansetzen. Sonst kommt ein Schwall statt eines Stroms.
+            // If the thread stalled for longer, the slot lies far in the
+            // past - then do not rush to catch up, but
+            // start anew. Otherwise a flood comes instead of a stream.
             let jetzt_t = Instant::now();
             if naechster_rahmen + Duration::from_millis(100) < jetzt_t {
                 naechster_rahmen = jetzt_t;
             }
-            // Alles einsammeln, was die Oberflaeche seit dem letzten Mal
-            // abgeliefert hat, und den Rueckstau kappen.
+            // Collect everything the UI has delivered since the last time,
+            // and cap the backlog.
             while let Ok(p) = raus.try_recv() {
                 ton_warte.push_back(p);
             }
@@ -498,9 +498,9 @@ fn lauf(
                 if let (Some(p), Some(mut w)) = (vpt, rtc.writer(vid)) {
                     let wanduhr = start + start.elapsed();
                     let zeit = MediaTime::new(bild_zeit, str0m::media::Frequency::NINETY_KHZ);
-                    // Bild: nur die INHALTE der NAL-Einheiten werden geheim,
-                    // die Struktur bleibt lesbar - sonst kann der Server die
-                    // Pakete nicht packen.
+                    // Video: only the CONTENTS of the NAL units become secret,
+                    // the structure stays readable - otherwise the server cannot
+                    // packetise.
                     let daten = match e2e_video.as_mut() {
                         Some(s) => s.schuetzen_h264(&daten),
                         None => daten,
@@ -512,7 +512,7 @@ fn lauf(
                         z.bild_gesendet += 1;
                         z.bytes_raus += laenge;
                     }
-                    // 90 kHz: ein Rahmen bei 30 Bildern/s sind 3000 Schritte.
+                    // 90 kHz: one frame at 30 frames/s is 3000 steps.
                     bild_zeit += 3000;
                 }
             }
@@ -575,10 +575,10 @@ fn lauf(
                     }
                     Event::MediaAdded(_) => {}
                     Event::EgressBitrateEstimate(k) => {
-                        // Nur messen und sichtbar machen. Die Bitrate
-                        // danach automatisch nachzufuehren ist der
-                        // naechste Schritt - erst will ich sehen, ob
-                        // der Server ueberhaupt Rueckmeldung gibt.
+                        // Only measure and make visible. Adjusting the bitrate
+                        // automatically afterwards is the
+                        // next step - first I want to see whether
+                        // the server gives feedback at all.
                         let bps = match k {
                             str0m::bwe::BweKind::Twcc(b) => b.as_u64(),
                             str0m::bwe::BweKind::Remb(_, b) => b.as_u64(),
@@ -599,11 +599,11 @@ fn lauf(
                             z.bild_empfangen += 1;
                             z.bytes_rein += d.data.len() as u64;
                         }
-                        // Ende-zu-Ende: aufmachen, BEVOR irgendetwas mit dem
-                        // Inhalt passiert. Der Schluesselbild-Merker liest
-                        // sich auch am verschluesselten Rahmen (NAL-Typ 5
-                        // bleibt lesbar) - dafuer braucht es den Schluessel
-                        // also nicht.
+                        // End-to-end: open up BEFORE anything happens with the
+                        // content. The key-frame marker can also be read
+                        // on the encrypted frame (NAL type 5
+                        // stays readable) - so the key
+                        // is not needed for that.
                         let schluessel = ist_schluesselbild(&d.data);
                         let inhalt: Vec<u8> = match &e2e {
                             Some(k) => match k.oeffnen_h264_wache(
@@ -620,8 +620,8 @@ fn lauf(
                             },
                             None => d.data.to_vec(),
                         };
-                        // Solange kein Schluesselbild kam: hoeflich, aber
-                        // beharrlich eines anfordern (hoechstens jede Sekunde).
+                        // As long as no key frame has come: politely but
+                        // persistently request one (at most every second).
                         let mid_txt = d.mid.to_string();
                         let gesehen = *hat_schluessel.get(&mid_txt).unwrap_or(&false);
                         if schluessel {
@@ -668,9 +668,9 @@ fn lauf(
                             )
                             .expect("Opus-Dekodierer")
                         });
-                        // Ende-zu-Ende: erst aufmachen, dann dekodieren.
-                        // Wiedereinspielen wird je Spur abgewehrt - sonst
-                        // koennte jemand alte Tonschnipsel erneut einspeisen.
+                        // End-to-end: first open up, then decode.
+                        // Replay is fended off per track - otherwise
+                        // someone could feed old audio snippets in again.
                         let ton_inhalt: Vec<u8> = match &e2e {
                             Some(k) => {
                                 let kopf = crate::meete2e::salz_von(&d.data)
@@ -724,7 +724,7 @@ fn lauf(
             Err(e) => return Err(anyhow!("str0m: {}", e)),
         };
 
-        // ---- warten und empfangen -------------------------------------------
+        // ---- wait and receive -------------------------------------------
         let jetzt = Instant::now();
         let warte = bis.saturating_duration_since(jetzt).min(Duration::from_millis(10));
         socket.set_read_timeout(Some(warte.max(Duration::from_millis(1))))?;
@@ -757,24 +757,24 @@ fn lauf(
     }
 }
 
-/// Hoechstens so viele 20-ms-Tonrahmen duerfen auf ihren Sendeschlitz
-/// warten. 3 Rahmen = 60 ms. Mehr bringt nichts: gesendet wird streng im
-/// 20-ms-Takt, also wuerde jeder darueber liegende Rahmen die Verzoegerung
-/// dauerhaft erhoehen, statt sie abzubauen.
+/// At most this many 20 ms audio frames may wait for their send slot.
+/// 3 frames = 60 ms. More brings nothing: sending is strictly in
+/// 20 ms steps, so every frame above that would raise the delay
+/// permanently instead of draining it.
 pub const TON_STAU_MAX: usize = 3;
 
-/// Rueckstau im Ton-Sendepuffer abbauen: die AELTESTEN Rahmen fliegen raus.
+/// Drain the backlog in the audio send buffer: the OLDEST frames are dropped.
 ///
-/// WARUM UEBERHAUPT: Das Mikrofon liefert 20-ms-Rahmen in Echtzeit, die
-/// Oberflaeche holt sie aber nur im Zeichentakt ab - stockt sie einmal
-/// (Fenster ziehen, Bildschirm teilen, Kamera oeffnen), kommen mehrere
-/// Rahmen auf einmal. Gesendet wird trotzdem nur einer je 20 ms. Ohne
-/// Abbau bleibt dieser Vorsprung fuer den Rest des Gespraechs als
-/// Verzoegerung stehen und summiert sich bei jedem weiteren Stocken -
-/// genau so entstehen die 5 bis 10 Sekunden.
+/// WHY AT ALL: The microphone delivers 20 ms frames in real time, the
+/// UI however only collects them at the drawing rate - if it stalls once
+/// (dragging a window, sharing the screen, opening the camera), several
+/// frames arrive at once. Still only one is sent per 20 ms. Without
+/// draining this lead stays as delay for the rest of the
+/// conversation and adds up with every further stall -
+/// that is exactly how the 5 to 10 seconds arise.
 ///
-/// Verworfen wird VORNE, nicht hinten: der Zuhoerer soll das AKTUELLE
-/// Wort hoeren, nicht ein altes. Gibt zurueck, wie viele Rahmen wegfielen.
+/// Dropping happens at the FRONT, not at the back: the listener should hear the CURRENT
+/// word, not an old one. Returns how many frames were dropped.
 pub fn stau_abbauen(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize) -> usize {
     let mut weg = 0usize;
     while warte.len() > max {
@@ -784,9 +784,9 @@ pub fn stau_abbauen(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize
     weg
 }
 
-/// Gehoert diese m-line zum Bild?
-/// Steckt in diesem Zugriffspunkt ein Schluesselbild (IDR) oder wenigstens
-/// ein Parametersatz (SPS)? Annex-B: Startcode, dann NAL-Kopf.
+/// Does this m-line belong to video?
+/// Does this access point contain a key frame (IDR) or at least
+/// a parameter set (SPS)? Annex-B: start code, then NAL header.
 pub fn ist_schluesselbild(daten: &[u8]) -> bool {
     let mut i = 0usize;
     while i + 4 < daten.len() {
@@ -821,7 +821,7 @@ fn ist_video(rtc: &Rtc, mid: Mid) -> bool {
         .unwrap_or(false)
 }
 
-/// Ein Testton (Sinus) - fuer Messungen ohne Mikrofon.
+/// A test tone (sine) - for measurements without a microphone.
 pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
     let mut v = Vec::with_capacity(RAHMEN);
     let schritt = 2.0 * std::f32::consts::PI * hz / RATE as f32;
@@ -839,12 +839,12 @@ pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
 mod tests {
     use super::*;
 
-    /// Die eigentliche Messung: wie viele Millisekunden Ton haengen nach
-    /// einem Stocken der Oberflaeche noch im Sendepuffer?
+    /// The actual measurement: how many milliseconds of audio are still in the send buffer
+    /// after a stall of the UI?
     ///
-    /// Aufbau: das Mikrofon liefert 500 Rahmen (10 Sekunden Ton) am
-    /// Stueck - so, wie es nach einem Haenger passiert. Gesendet wird
-    /// danach wie im Betrieb ein Rahmen je 20-ms-Schlitz.
+    /// Setup: the microphone delivers 500 frames (10 seconds of audio) at
+    /// once - the way it happens after a hang. Afterwards sending is
+    /// done as in operation, one frame per 20 ms slot.
     fn rueckstau_in_ms(max: usize, geliefert: usize) -> usize {
         let mut w: std::collections::VecDeque<Vec<i16>> = std::collections::VecDeque::new();
         for _ in 0..geliefert {
@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn verzoegerung_waechst_nicht_mehr_ueber_die_schranke() {
-        // 500 Rahmen auf einmal = 10 Sekunden Ton im Puffer.
+        // 500 frames at once = 10 seconds of audio in the buffer.
         let bleibt = rueckstau_in_ms(TON_STAU_MAX, 500);
         assert!(
             bleibt <= 60,
@@ -868,9 +868,9 @@ mod tests {
 
     #[test]
     fn gegenprobe_ohne_abbau_bleiben_sekunden_stehen() {
-        // Derselbe Aufbau, aber mit einer Schranke, die nie greift - so
-        // rechnete der alte Stand. Wenn DIESER Test nicht scheitert,
-        // misst der obere nichts.
+        // The same setup, but with a limit that never takes effect - this is how
+        // the old version computed. If THIS test does not fail,
+        // the upper one measures nothing.
         let bleibt = rueckstau_in_ms(usize::MAX, 500);
         assert_eq!(
             bleibt, 10_000,
@@ -891,15 +891,15 @@ mod tests {
         let weg = super::stau_abbauen(&mut w, 3);
         assert_eq!(weg, 7);
         assert_eq!(w.len(), 3);
-        // Der juengste Rahmen (9) muss erhalten bleiben, der aelteste weg.
+        // The youngest frame (9) must be kept, the oldest gone.
         assert_eq!(w.back().unwrap()[0], 9, "der neueste Ton wurde weggeworfen");
         assert_eq!(w.front().unwrap()[0], 7, "es wurde vom falschen Ende geworfen");
     }
 
     #[test]
     fn schluesselbild_wird_im_ganzen_zugriffspunkt_gefunden() {
-        // SPS(7) + PPS(8) + IDR(5), jeweils mit Startcode - so kommt es aus
-        // der Entpackung von str0m.
+        // SPS(7) + PPS(8) + IDR(5), each with start code - this is how it comes out of
+        // the unpacking of str0m.
         let mut au = vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e];
         au.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce]);
         au.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84]);
@@ -907,7 +907,7 @@ mod tests {
         // Reines P-Bild (Typ 1) - kein Schluesselbild.
         let p = vec![0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x6c, 0x45, 0xff];
         assert!(!ist_schluesselbild(&p));
-        // Das IDR steht WEIT hinten - die alte Pruefung sah nur 8 Bytes.
+        // The IDR is FAR back - the old check only looked at 8 bytes.
         let mut spaet = vec![0, 0, 0, 1, 0x41];
         spaet.extend(std::iter::repeat(0x33).take(60));
         spaet.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x11]);
@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(a.len(), RAHMEN);
         let spitze = a.iter().map(|s| s.abs()).max().unwrap();
         assert!(spitze > 8000, "Testton zu leise: {}", spitze);
-        // zweiter Rahmen setzt die Schwingung fort, faengt also nicht bei 0 an
+        // second frame continues the oscillation, so does not start at 0
         let b = testton(&mut p, 440.0);
         assert_eq!(b.len(), RAHMEN);
     }
