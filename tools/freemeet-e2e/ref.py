@@ -22,6 +22,12 @@ KDF_SALT = b"freemeet-e2e-v2"
 SPUR = {"ton": 1, "bild": 2}
 AUDIO_HEAD = 14         # ver(1) flags(1) salt(8) counter(4)
 NAL_HEAD = 15           # ver(1) salt(8) counter(4) nal index(2)
+# Video blob byte 0 for slice NAL units (type 1/5) carries the slice's pps_id (r82): a receiving WebRTC stack
+# parses first_mb_in_slice / slice_type / pic_parameter_set_id as Exp-Golomb from the first slice bytes and drops
+# frames whose pps_id has no PPS. Byte 0 is therefore chosen so that those three fields read 0, 0, pps_id:
+# bits '1' '1' ue(pps_id) then padding. pps_id 0 is the old 0xE3. pps_id > 6 does not fit one byte -> 0xE3.
+VIDEO_VERSION = {0: 0xE3, 1: 0xD3, 2: 0xDB, 3: 0xC9, 4: 0xCB, 5: 0xCD, 6: 0xCF}
+VIDEO_VERSIONS = set(VIDEO_VERSION.values())
 
 
 def derive_key(root: bytes, spur: str, salt: bytes) -> bytes:
@@ -112,6 +118,48 @@ def epb_out(d: bytes) -> bytes:
     return bytes(out)
 
 
+def _read_ue(data: bytes, bit: int):
+    """Exp-Golomb ue(v) at bit offset. Returns (value, next bit) or None."""
+    zeros = 0
+    while True:
+        if bit >= len(data) * 8 or zeros > 16:
+            return None
+        if (data[bit >> 3] >> (7 - (bit & 7))) & 1:
+            break
+        zeros += 1
+        bit += 1
+    bit += 1
+    value = 1
+    for _ in range(zeros):
+        if bit >= len(data) * 8:
+            return None
+        value = (value << 1) | ((data[bit >> 3] >> (7 - (bit & 7))) & 1)
+        bit += 1
+    return value - 1, bit
+
+
+def slice_pps_id(body: bytes):
+    """pic_parameter_set_id of a slice NAL payload (after the NAL header byte), or None."""
+    head = body[:8]
+    first = _read_ue(head, 0)
+    if first is None:
+        return None
+    second = _read_ue(head, first[1])
+    if second is None:
+        return None
+    third = _read_ue(head, second[1])
+    return None if third is None else third[0]
+
+
+def video_version(nal_type: int, body: bytes) -> int:
+    """Blob byte 0 for one encrypted NAL unit."""
+    if nal_type in (1, 5):
+        pps = slice_pps_id(body)
+        if pps is not None and pps in VIDEO_VERSION:
+            return VIDEO_VERSION[pps]
+    return VERSION
+
+
 def seal_h264(root, salt, counter, frame: bytes) -> bytes:
     units = nal_units(frame)
     if not units:
@@ -125,7 +173,7 @@ def seal_h264(root, salt, counter, frame: bytes) -> bytes:
         if (hdr_byte & 0x1F) in (7, 8, 9) or not body:
             out += body
             continue
-        blob_head = bytes([VERSION]) + salt + counter.to_bytes(4, "big") + nr.to_bytes(2, "big")
+        blob_head = bytes([video_version(hdr_byte & 0x1F, body)]) + salt + counter.to_bytes(4, "big") + nr.to_bytes(2, "big")
         aad = bytes([hdr_byte]) + blob_head
         ct = AESGCM(key).encrypt(make_nonce("bild", nr, salt, counter), body, aad)
         out += epb_in(blob_head + ct)
@@ -145,7 +193,7 @@ def open_h264(root, frame: bytes):
             out += body
             continue
         raw = epb_out(body)
-        if len(raw) < NAL_HEAD + 16 or raw[0] != VERSION:
+        if len(raw) < NAL_HEAD + 16 or raw[0] not in VIDEO_VERSIONS:
             return None
         salt = raw[1:9]
         counter = int.from_bytes(raw[9:13], "big")
@@ -177,7 +225,7 @@ def open_h264_checked(root, frame: bytes):
         if (hdr_byte & 0x1F) in (7, 8, 9) or not body:
             continue
         raw = epb_out(body)
-        if len(raw) < NAL_HEAD + 16 or raw[0] != VERSION:
+        if len(raw) < NAL_HEAD + 16 or raw[0] not in VIDEO_VERSIONS:
             return None
         this = (raw[1:9], int.from_bytes(raw[9:13], "big"))
         nr = int.from_bytes(raw[13:15], "big")
@@ -305,6 +353,22 @@ def sample_frame() -> bytes:
     return bytes(f)
 
 
+def pps_frame(pps: int) -> bytes:
+    """SPS + PPS + IDR + non-IDR whose slice headers name `pps` (first_mb 0, slice_type 7, pps_id)."""
+    def header_bits(p, slice_type):
+        bits = "1"                                   # first_mb_in_slice = 0
+        bits += format(slice_type + 1, "b").zfill(2 * len(format(slice_type + 1, "b")) - 1)
+        bits += format(p + 1, "b").zfill(2 * len(format(p + 1, "b")) - 1)
+        bits += "1" * ((-len(bits)) % 8)
+        return int(bits, 2).to_bytes(len(bits) // 8, "big")
+    f = bytearray()
+    f += bytes([0, 0, 0, 1, 0x67, 0x42, 0xC0, 0x0C, 0x43, 0x1A])
+    f += bytes([0, 0, 0, 1, 0x68, 0x48, 0xE3, 0xC8])
+    f += bytes([0, 0, 0, 1, 0x65]) + header_bits(pps, 7) + bytes((i * 7 + 3) % 256 for i in range(120))
+    f += bytes([0, 0, 0, 1, 0x41]) + header_bits(pps, 5) + bytes((i * 11 + 5) % 256 for i in range(90))
+    return bytes(f)
+
+
 def build() -> dict:
     root = bytes(range(32))
     salt_a = bytes.fromhex("a1a2a3a4a5a6a7a8")
@@ -317,6 +381,7 @@ def build() -> dict:
         "nonces": [],
         "audio": [],
         "h264": [],
+        "h264_pps": [],
         "guard": [],
         "replay_video": {},
     }
@@ -344,6 +409,14 @@ def build() -> dict:
         assert open_h264(root, fr) == sample
         v["h264"].append({"salt": salt.hex(), "counter": counter, "plain": sample.hex(),
                           "frame": fr.hex()})
+    # r82: slice NAL blobs name the slice's pps_id in byte 0 (pps 1, 3, 6 and 9 = out of range -> 0xE3)
+    v["h264_pps"] = []
+    for pps in (0, 1, 3, 6, 9):
+        plain = pps_frame(pps)
+        fr = seal_h264(root, salt_a, 5 + pps, plain)
+        assert open_h264(root, fr) == plain
+        v["h264_pps"].append({"pps": pps, "salt": salt_a.hex(), "counter": 5 + pps, "plain": plain.hex(),
+                              "frame": fr.hex(), "blob_version": video_version(5, plain[23:])})
     v["guard"] = guard_cases()
     v["replay_video"] = replay_video_cases(root)
     return v

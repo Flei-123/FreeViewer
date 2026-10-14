@@ -45,6 +45,64 @@ use std::sync::{Arc, Mutex};
 /// drops the frame instead of showing garbage.
 pub const KENNUNG: u8 = 0xE3;
 
+/// Blob byte 0 of an encrypted slice NAL unit (type 1/5) by the slice's
+/// pic_parameter_set_id (r82). A receiving WebRTC stack parses
+/// first_mb_in_slice, slice_type and pps_id (Exp-Golomb) from the first bytes
+/// of each slice and drops frames whose pps_id has no PPS. The byte is built
+/// to read 0, 0, pps_id: bits '1' '1' ue(pps_id) + padding. Index = pps_id;
+/// 0 is the classic `KENNUNG`. Other pps_ids (> 6) keep `KENNUNG`.
+const VIDEO_KENNUNG: [u8; 7] = [0xE3, 0xD3, 0xDB, 0xC9, 0xCB, 0xCD, 0xCF];
+
+/// Does this blob byte 0 belong to a v2 video blob?
+fn ist_video_kennung(b: u8) -> bool {
+    VIDEO_KENNUNG.contains(&b)
+}
+
+/// Exp-Golomb ue(v) at a bit offset: (value, next bit).
+fn lese_ue(d: &[u8], mut bit: usize) -> Option<(u32, usize)> {
+    let mut nullen = 0u32;
+    loop {
+        if bit >= d.len() * 8 || nullen > 16 {
+            return None;
+        }
+        if (d[bit >> 3] >> (7 - (bit & 7))) & 1 == 1 {
+            break;
+        }
+        nullen += 1;
+        bit += 1;
+    }
+    bit += 1;
+    let mut wert = 1u32;
+    for _ in 0..nullen {
+        if bit >= d.len() * 8 {
+            return None;
+        }
+        wert = (wert << 1) | ((d[bit >> 3] >> (7 - (bit & 7))) & 1) as u32;
+        bit += 1;
+    }
+    Some((wert - 1, bit))
+}
+
+/// pic_parameter_set_id of a slice NAL payload (after the NAL header byte).
+fn slice_pps_id(inhalt: &[u8]) -> Option<u32> {
+    let kopf = &inhalt[..inhalt.len().min(8)];
+    let (_, b) = lese_ue(kopf, 0)?;
+    let (_, b) = lese_ue(kopf, b)?;
+    lese_ue(kopf, b).map(|(pps, _)| pps)
+}
+
+/// Blob byte 0 of one encrypted NAL unit.
+fn video_kennung(nal_typ: u8, inhalt: &[u8]) -> u8 {
+    if nal_typ == 1 || nal_typ == 5 {
+        if let Some(pps) = slice_pps_id(inhalt) {
+            if let Some(b) = VIDEO_KENNUNG.get(pps as usize) {
+                return *b;
+            }
+        }
+    }
+    KENNUNG
+}
+
 /// Frame format version announced to the server in the join (`caps.e2e_ver`).
 pub const FORMAT_VERSION: u8 = 2;
 /// First byte of v1 audio frames (the vulnerable format). Never accepted.
@@ -433,7 +491,8 @@ fn epb_raus(daten: &[u8]) -> Vec<u8> {
 }
 
 // Per-NAL blob (inside the emulation-prevention escaping), format v2:
-//   byte 0       0xE3 version
+//   byte 0       version: 0xE3, or for slice NAL units the pps_id byte of
+//                VIDEO_KENNUNG (so a receiving WebRTC stack finds a PPS)
 //   byte 1..9    sender salt
 //   byte 9..13   counter (32 bit, big endian)
 //   byte 13..15  NAL index inside the frame (16 bit, big endian)
@@ -467,7 +526,7 @@ impl Schluessel {
             }
             let nr16 = nr as u16;
             let mut blob = Vec::with_capacity(NAL_HEAD + inhalt.len() + 16);
-            blob.push(KENNUNG);
+            blob.push(video_kennung(typ, inhalt));
             blob.extend_from_slice(salt);
             blob.extend_from_slice(&counter.to_be_bytes());
             blob.extend_from_slice(&nr16.to_be_bytes());
@@ -534,7 +593,7 @@ impl Schluessel {
                 continue;
             }
             let roh = epb_raus(inhalt);
-            if roh.len() < NAL_HEAD + 16 || roh[0] != KENNUNG {
+            if roh.len() < NAL_HEAD + 16 || !ist_video_kennung(roh[0]) {
                 return None;
             }
             let mut salt = [0u8; SALT_LEN];
@@ -1274,6 +1333,45 @@ mod tests {
             let rx = vector_key(&v);
             assert_eq!(rx.oeffnen_h264(&frame), Some(plain));
         }
+    }
+
+    /// r82: slice blobs name the slice's pps_id in byte 0.
+    #[test]
+    fn vectors_pps_id_in_slice_blobs() {
+        let v = vektoren();
+        let k = vector_key(&v);
+        for e in v["h264_pps"].as_array().unwrap() {
+            let plain = hex::decode(e["plain"].as_str().unwrap()).unwrap();
+            let frame = hex::decode(e["frame"].as_str().unwrap()).unwrap();
+            let pps = e["pps"].as_u64().unwrap();
+            let got = k.seal_h264_at(
+                &salz_hex(e["salt"].as_str().unwrap()),
+                e["counter"].as_u64().unwrap() as u32,
+                &plain,
+            );
+            assert_eq!(got, frame, "pps vector {pps}");
+            let rx = vector_key(&v);
+            assert_eq!(rx.oeffnen_h264(&frame), Some(plain));
+            // The receiver-side view of each encrypted slice: pps_id as read from the blob.
+            for (_, db, ende) in nal_einheiten(&frame) {
+                let typ = frame[db] & 0x1f;
+                if typ == 1 || typ == 5 {
+                    let roh = epb_raus(&frame[db + 1..ende]);
+                    assert_eq!(slice_pps_id(&roh), Some(if pps <= 6 { pps as u32 } else { 0 }));
+                }
+            }
+        }
+        // Table sanity: one byte, reads (0, 0, pps), all distinct.
+        for (p, b) in VIDEO_KENNUNG.iter().enumerate() {
+            assert_eq!(slice_pps_id(&[*b, 0, 0, 0, 0, 0, 0, 0]), Some(p as u32));
+            assert_eq!(b >> 6, 3);
+        }
+        // A byte 0 outside the table is refused.
+        let e = &v["h264_pps"][1];
+        let mut bad = hex::decode(e["frame"].as_str().unwrap()).unwrap();
+        let (_, db, _) = nal_einheiten(&bad)[2];
+        bad[db + 1] = 0xC0;
+        assert_eq!(vector_key(&v).oeffnen_h264(&bad), None);
     }
 
     #[test]

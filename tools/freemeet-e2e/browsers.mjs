@@ -4,6 +4,10 @@
 //   PW=/root/jarvis/node_modules/playwright/index.mjs \
 //   node tools/freemeet-e2e/browsers.mjs inpage <webdir> [chromium|firefox|webkit ...]
 //   node tools/freemeet-e2e/browsers.mjs sfu <baseUrl> <chromium|firefox> [<chromium|firefox>]
+//     (SFU binaries embed an older web copy: put the LIVE web files + the patched ones in a dir and run
+//      `node tools/freemeet-e2e/webproxy.mjs <port> <sfuHttpPort> <webdir>`, then use http://127.0.0.1:<port> as <baseUrl>;
+//      a PulseAudio null sink must run for Firefox (XDG_RUNTIME_DIR), the SFU needs --public-ip <LAN IP>, not 127.0.0.1;
+//      EXPECT_VIDEO=1 turns "every client decoded remote video" into a hard check, DUMPDIR=<dir> writes per-client JSON)
 //
 // inpage: no SFU needed. Serves <webdir> (e2e.js, e2e-worker.js) on 127.0.0.1 and runs in each browser:
 //   * feature probe + FreeMeetE2E.moeglich()
@@ -265,7 +269,7 @@ async function sfu(base, names) {
         const stats = { video: 0, audio: 0, vpk: 0, apk: 0 };
         if (typeof state !== 'undefined' && state.pc) {
           (await state.pc.getStats()).forEach((r) => {
-            if (r.type === 'inbound-rtp' && r.kind === 'video') { stats.video += r.framesDecoded || 0; stats.vpk += r.packetsReceived || 0; }
+            if (r.type === 'inbound-rtp' && r.kind === 'video') { stats.video += r.framesDecoded || 0; stats.vpk += r.packetsReceived || 0; stats.vrecv = (stats.vrecv || 0) + (r.framesReceived || 0); stats.vkey = (stats.vkey || 0) + (r.keyFramesDecoded || 0); stats.vpli = (stats.vpli || 0) + (r.pliCount || 0); stats.vnack = (stats.vnack || 0) + (r.nackCount || 0); stats.vlost = (stats.vlost || 0) + (r.packetsLost || 0); stats.vdrop = (stats.vdrop || 0) + (r.framesDropped || 0); }
             if (r.type === 'inbound-rtp' && r.kind === 'audio') stats.apk += r.packetsReceived || 0;
           });
         }
@@ -275,12 +279,18 @@ async function sfu(base, names) {
           state.e2eWorker.postMessage({ ping: 1 });
           setTimeout(() => res('timeout'), 2000);
         });
-        return { tag: tag ? tag.textContent.trim() : null, stats, wstats, meet: !document.getElementById('meet').classList.contains('hidden'), log: (document.getElementById('log') || {}).textContent };
+        return { tag: tag ? tag.textContent.trim() : null, stats, wstats, mainDbg: window.__e2edbg || null, meet: !document.getElementById('meet').classList.contains('hidden'), log: (document.getElementById('log') || {}).textContent };
       }).catch((e) => ({ err: String(e) }));
-      console.log(`  client ${i} (${names[i]}):`, JSON.stringify(info).slice(0, process.env.WSTATS ? 2500 : 600));
+      if (process.env.DUMPDIR) fs.writeFileSync(path.join(process.env.DUMPDIR, `client${i}-${names[i]}.json`), JSON.stringify(info));
+      const brief = { ...info, mainDbg: info.mainDbg ? info.mainDbg.length : null, wstats: info.wstats && info.wstats.dbg ? `dbg[${info.wstats.dbg.length}]` : info.wstats };
+      console.log(`  client ${i} (${names[i]}):`, JSON.stringify(brief).slice(0, 600));
       console.log('   ws:', p.ws.join(' | '));
       console.log('   console tail:', p.logs.filter((l) => /E2E|Ende|ICE|abgewiesen|rror/i.test(l)).slice(-6).join(' | ').slice(0, 500));
       pages[i].info = info;
+    }
+    if (process.env.EXPECT_VIDEO) {
+      pages.forEach((p, i) => check(`client ${i} (${names[i]}) E2E on and decoded remote video`,
+        !!p.info && /E2E: an/.test(p.info.tag || '') && p.info.stats.video > 0, `frames=${p.info && p.info.stats.video}`));
     }
     return pages.map((p) => p.info);
   } finally {

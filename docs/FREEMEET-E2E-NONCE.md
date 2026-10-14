@@ -26,14 +26,15 @@ Root secret (32 byte, from the link `#k=`) is unchanged, so links stay valid.
 | stream key | `HKDF-SHA256(ikm=root, salt="freemeet-e2e-v2", info=kind ‖ 0x00 ‖ salt)`, kind = `ton` / `bild`, 32 byte |
 | nonce (12 byte) | `kind(1: ton=1, bild=2) ‖ nal index(2, BE) ‖ salt[0..5] ‖ counter(4, BE)` |
 | audio frame | `0xE3 ‖ flags(1, bit0 = key frame) ‖ salt(8) ‖ counter(4, BE) ‖ AES-GCM(ct ‖ tag16)`; AAD = the 14 header bytes |
-| video, per encrypted NAL | blob = `0xE3 ‖ salt(8) ‖ counter(4) ‖ nal index(2) ‖ ct ‖ tag16`, then emulation-prevention escaping; AAD = NAL header byte ‖ first 15 blob bytes |
+| video, per encrypted NAL | blob = `ver ‖ salt(8) ‖ counter(4) ‖ nal index(2) ‖ ct ‖ tag16`, then emulation-prevention escaping; AAD = NAL header byte ‖ first 15 blob bytes |
+| video blob `ver` (r82) | `0xE3`, except slice NAL units (type 1/5) with slice `pps_id` 1..6: `0xD3 0xDB 0xC9 0xCB 0xCD 0xCF` (index = pps_id, table `VIDEO_KENNUNG`). Why: a WebRTC receiver reads `first_mb_in_slice, slice_type, pps_id` (Exp-Golomb) from the first bits of every slice and drops frames whose pps_id has no PPS; the byte is built to read `0, 0, pps_id`. Firefox gives simulcast layers different SPS/PPS ids, so with a constant `0xE3` (reads pps_id 0) a late joiner never got a key frame. pps_id > 6 keeps `0xE3`. Receivers accept exactly these 7 values; AAD still covers the byte |
 | unchanged | start codes, NAL header byte, SPS/PPS/AUD stay clear (server repacks RTP) |
 | replay guard | per sender salt: 64-number window (audio AND, since r60, video) - receiver-side only, **no change of the wire format** |
 
 Differences to v1 that matter:
 
 * v1 audio started with `0xE2` and had a 6 byte header; v1 video blobs started
-  with the NAL index byte. v2 starts with `0xE3` in both. Old and new clients
+  with the NAL index byte. v2 starts with `0xE3` in both (video blobs of slices with pps_id 1..6: see `ver` above; a receiver before r82 drops those, Chromium senders always use pps_id 0). Old and new clients
   therefore **detect and drop** each other's frames (no garbage picture, no
   decryption with a wrong nonce). Native shows once per stream: "A participant
   uses an outdated end-to-end format".

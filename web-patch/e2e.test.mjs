@@ -80,6 +80,44 @@ test('h264: sealing reproduces the reference frames, opening returns the plainte
   }
 });
 
+test('h264: slice blobs name the slice pps_id in byte 0 (r82, shared vectors)', async () => {
+  for (const e of V.h264_pps) {
+    const h = await handle();
+    const got = await E2E.schuetzenH264(h, hex(e.salt), e.counter, hex(e.plain));
+    assert.equal(toHex(got), e.frame, 'pps ' + e.pps);
+    const fresh = await handle();
+    assert.equal(toHex(await E2E.oeffnenH264(fresh, hex(e.frame))), e.plain);
+    // What a receiving WebRTC stack does with the ENCRYPTED slice: read first_mb, slice_type, pps_id.
+    const units = E2E.nalEinheiten(got);
+    for (const [sc, db, end] of units) {
+      const typ = got[db] & 0x1f;
+      if (typ !== 1 && typ !== 5) continue;
+      const seen = E2E.slicePpsId(E2E.epbRaus(got.subarray(db + 1, end)));
+      assert.equal(seen, e.pps <= 6 ? e.pps : 0, 'receiver-visible pps_id of ' + e.pps);
+    }
+    assert.equal(E2E.epbRaus(got.subarray(units[2][1] + 1))[0], e.blob_version);
+  }
+});
+
+test('h264: pps_id table fits one byte, reads 0,0,pps and nothing but the table is accepted', async () => {
+  for (let p = 0; p <= 6; p++) {
+    const b = E2E.VIDEO_KENNUNG[p];
+    assert.equal(E2E.slicePpsId(Uint8Array.from([b, 0, 0, 0, 0, 0, 0, 0])), p);
+    // first_mb_in_slice = 0 and slice_type = 0 are the first two bits '1','1'
+    assert.equal(b >> 6, 3);
+  }
+  assert.equal(new Set(Object.values(E2E.VIDEO_KENNUNG)).size, 7);
+  // slice header with pps_id 9 (out of range) keeps 0xE3; non-slice NAL units always do
+  assert.equal(E2E.videoKennung(5, Uint8Array.from([0xb1, 0x40, 0])), 0xe3);
+  assert.equal(E2E.videoKennung(6, Uint8Array.from([0x34, 0x80, 0])), 0xe3);
+  // a blob byte 0 outside the table is refused even with a valid-looking rest
+  const e = V.h264_pps[1];
+  const bad = hex(e.frame);
+  const at = E2E.nalEinheiten(bad)[2][1] + 1;
+  bad[at] = 0xc0;
+  assert.equal(await E2E.oeffnenH264(await handle(), bad), null);
+});
+
 test('tampering with the clear header or ciphertext is detected', async () => {
   const e = V.audio[1];
   const h = await handle();

@@ -1,6 +1,6 @@
 --- .scratch/live_e2e.js
 +++ web-patch/e2e.js
-@@ -1,22 +1,42 @@
+@@ -1,22 +1,52 @@
 -// Ende-zu-Ende-Verschluesselung im Browser.
 +// End-to-end encryption in the browser - frame format v2.
  //
@@ -41,14 +41,24 @@
 +// flag (it needs it to switch quality layers) but cannot forge it.
 +//
 +// Video: per NAL unit blob (inside the emulation-prevention escaping):
-+//   byte 0 version 0xE3 | 1..9 salt | 9..13 counter | 13..15 NAL index | tag...
++//   byte 0 version | 1..9 salt | 9..13 counter | 13..15 NAL index | tag...
 +//   associated data = NAL header byte + the 15 byte blob header.
++// Byte 0 is 0xE3 for everything except slice NAL units (type 1/5) whose slice
++// header names a pps_id 1..6: there it is one of VIDEO_KENNUNG (r82). A
++// receiving WebRTC stack reads first_mb_in_slice, slice_type and pps_id as
++// Exp-Golomb codes from the first bytes of every slice and DROPS the frame when
++// no PPS with that id was seen. Firefox gives its simulcast layers different
++// SPS/PPS ids (layer 2 uses 1), so with a constant 0xE3 (reads 0, 0, 0) a late
++// joiner never assembled a key frame. Byte 0 is built to read 0, 0, pps_id.
 +
 +const E2E_KENNUNG = 0xE3;
 +const E2E_KENNUNG_V1 = 0xE2;
 +const E2E_KOPF = 14;
 +const E2E_SALZ = 8;
 +const E2E_NAL_KOPF = 1 + E2E_SALZ + 4 + 2;
++// pps_id -> blob byte 0: bits '1' '1' ue(pps_id) + padding. 0 = the old 0xE3.
++const VIDEO_KENNUNG = { 0: 0xE3, 1: 0xD3, 2: 0xDB, 3: 0xC9, 4: 0xCB, 5: 0xCD, 6: 0xCF };
++const VIDEO_KENNUNGEN = new Set(Object.values(VIDEO_KENNUNG));
 +const E2E_KDF_SALZ = 'freemeet-e2e-v2';
 +const E2E_KEY_CACHE_MAX = 64;
 +const E2E_WACHE_SALZE_MAX = 16;
@@ -58,7 +68,7 @@
  function schluesselBytes(text) {
    const abc = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
    const roh = String(text || '').trim().replace(/=+$/, '');
-@@ -35,34 +55,128 @@
+@@ -35,34 +65,128 @@
    return aus.length === 32 ? new Uint8Array(aus) : null;
  }
  
@@ -204,7 +214,7 @@
  
  function naechsterStartcode(d, ab) {
    let i = ab;
-@@ -90,10 +204,10 @@
+@@ -90,10 +214,10 @@
    return aus;
  }
  
@@ -217,7 +227,7 @@
  function epbEin(d) {
    const aus = [];
    let nullen = 0;
-@@ -117,17 +231,20 @@
+@@ -117,17 +241,56 @@
    return Uint8Array.from(aus);
  }
  
@@ -232,6 +242,42 @@
 +  const aus = new Uint8Array(n);
 +  let o = 0; for (const s of stuecke) { aus.set(s, o); o += s.length; }
 +  return aus;
++}
++
++/** Exp-Golomb ue(v) at a bit offset: [value, next bit] or null. */
++function leseUe(d, bit) {
++  let nullen = 0;
++  for (;;) {
++    if (bit >= d.length * 8 || nullen > 16) return null;
++    if ((d[bit >> 3] >> (7 - (bit & 7))) & 1) break;
++    nullen++; bit++;
++  }
++  bit++;
++  let wert = 1;
++  for (let i = 0; i < nullen; i++) {
++    if (bit >= d.length * 8) return null;
++    wert = (wert * 2) + ((d[bit >> 3] >> (7 - (bit & 7))) & 1);
++    bit++;
++  }
++  return [wert - 1, bit];
++}
++
++/** pic_parameter_set_id of a slice NAL payload (after the NAL header byte) or null. */
++function slicePpsId(inhalt) {
++  const kopf = inhalt.subarray(0, 8);
++  const a = leseUe(kopf, 0);
++  const b = a && leseUe(kopf, a[1]);
++  const c = b && leseUe(kopf, b[1]);
++  return c ? c[0] : null;
++}
++
++/** Blob byte 0 of one encrypted NAL unit (see the video format comment). */
++function videoKennung(nalTyp, inhalt) {
++  if (nalTyp === 1 || nalTyp === 5) {
++    const pps = slicePpsId(inhalt);
++    if (pps !== null && Object.prototype.hasOwnProperty.call(VIDEO_KENNUNG, pps)) return VIDEO_KENNUNG[pps];
++  }
++  return E2E_KENNUNG;
  }
  
 -async function schuetzenH264(key, zaehler, rahmen) {
@@ -245,7 +291,7 @@
    const stuecke = [];
    for (let nr = 0; nr < teile.length; nr++) {
      const [sc, db, ende] = teile[nr];
-@@ -135,147 +252,212 @@
+@@ -135,147 +298,212 @@
      stuecke.push(rahmen.slice(sc, db + 1));
      const inhalt = rahmen.slice(db + 1, ende);
      if (nalBleibtKlar(kopf & 0x1f) || inhalt.length === 0) { stuecke.push(inhalt); continue; }
@@ -253,7 +299,7 @@
 -    const aad = new Uint8Array([kopf, nr8, (zaehler >>> 24) & 0xff, (zaehler >>> 16) & 0xff,
 -                                (zaehler >>> 8) & 0xff, zaehler & 0xff]);
 +    const blobKopf = new Uint8Array(E2E_NAL_KOPF);
-+    blobKopf[0] = E2E_KENNUNG;
++    blobKopf[0] = videoKennung(kopf & 0x1f, inhalt);
 +    blobKopf.set(salz, 1);
 +    const dv = new DataView(blobKopf.buffer);
 +    dv.setUint32(1 + E2E_SALZ, zaehler >>> 0, false);
@@ -312,7 +358,7 @@
 -    const klar = new Uint8Array(await crypto.subtle.decrypt(
 -      { name: 'AES-GCM', iv: bildNonce(zaehler, nr8), additionalData: aad }, key, roh.slice(5)));
 +    // An old (v1) blob starts with the NAL index, not with the version byte.
-+    if (roh.length < E2E_NAL_KOPF + 16 || roh[0] !== E2E_KENNUNG) return null;
++    if (roh.length < E2E_NAL_KOPF + 16 || !VIDEO_KENNUNGEN.has(roh[0])) return null;
 +    const salz = roh.slice(1, 1 + E2E_SALZ);
 +    const dv = new DataView(roh.buffer, roh.byteOffset);
 +    const zaehler = dv.getUint32(1 + E2E_SALZ, false);
@@ -380,8 +426,9 @@
 +    if (!f) {
 +      if (fenster.size >= E2E_WACHE_SALZE_MAX) fenster.delete(fenster.keys().next().value);
 +      fenster.set(id, { hoechste: z, bits: 0n });
-+      return true;
-+    }
+       return true;
+     }
+-    const zurueck = hoechste - z;
 +    if (z > f.hoechste) {
 +      const schritt = z - f.hoechste;
 +      // The old highest becomes bit (schritt - 1); a step of exactly 64 keeps
@@ -389,9 +436,8 @@
 +      // bits so the number cannot grow over a long meeting.
 +      f.bits = schritt > 64 ? 0n : (((f.bits << BigInt(schritt)) | (1n << BigInt(schritt - 1))) & MASKE64);
 +      f.hoechste = z;
-       return true;
-     }
--    const zurueck = hoechste - z;
++      return true;
++    }
 +    const zurueck = f.hoechste - z;
      if (zurueck === 0 || zurueck > 64) return false;
      const bit = 1n << BigInt(zurueck - 1);
@@ -544,7 +590,7 @@
   */
  function schluesselAusLink() {
    const frag = (location.hash || '').replace(/^#/, '');
-@@ -288,23 +470,32 @@
+@@ -288,23 +516,32 @@
    return null;
  }
  
@@ -584,5 +630,5 @@
 +  schluesselBytes, E2E_KENNUNG, E2E_KENNUNG_V1, E2E_KOPF,
 +  // for the check against the shared test vectors (tests/freemeet-e2e-vectors.json)
 +  schuetzenTon, oeffnenTon, schuetzenH264, oeffnenH264, oeffnenH264Kopf, nalEinheiten, epbEin, epbRaus,
-+  neuerSender, neueWache, neuesSalz, streamKey, nonce,
++  neuerSender, neueWache, neuesSalz, streamKey, nonce, slicePpsId, videoKennung, VIDEO_KENNUNG,
  };
