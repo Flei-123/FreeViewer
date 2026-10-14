@@ -60,7 +60,7 @@ HOME="$D/home" FV_TESTHOST=1 FV_AUTOCONFIRM=1 FV_PASSWORD="$PW" "$BIN" --headles
 PIDS+=($!)
 ID=""
 for _ in $(seq 1 100); do
-  ID="$(grep -oE '^ID [0-9]{9}' "$D/host.log" | head -1 | cut -d' ' -f2 || true)"
+  ID="$(grep -oE '^ID [0-9]{9,10}' "$D/host.log" | head -1 | cut -d' ' -f2 || true)"
   [ -n "$ID" ] && break
   sleep 0.2
 done
@@ -101,7 +101,7 @@ HOME="$D/home2" FV_TESTHOST=1 FV_AUTOCONFIRM=1 FV_PASSWORD="$PW" "$BIN" --headle
 PIDS+=($!)
 ID2=""
 for _ in $(seq 1 100); do
-  ID2="$(grep -oE '^ID [0-9]{9}' "$D/host2.log" | head -1 | cut -d' ' -f2 || true)"
+  ID2="$(grep -oE '^ID [0-9]{9,10}' "$D/host2.log" | head -1 | cut -d' ' -f2 || true)"
   [ -n "$ID2" ] && break
   sleep 0.2
 done
