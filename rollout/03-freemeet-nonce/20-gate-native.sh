@@ -25,7 +25,7 @@ step "feed"
 cur=$(rx relay "python3 -c \"import json;print(json.load(open('$RELAY_DIR/dist/version.json'))['version'])\"")
 if [ "$(printf '%s\n%s\n' "$cur" "$minv" | sort -V | head -n1)" = "$minv" ]; then ok "Windows feed version $cur >= $minv"; else bad "Windows feed is at $cur, needs $minv - publish the native release first (02-relay/50-publish-release.sh)"; fi
 mver=$(rx relay "python3 -c \"import json;d=json.load(open('$RELAY_DIR/dist/version.json'));print(d.get('mac_version',''))\"")
-note "Mac package version in the feed: ${mver:-none} (Mac clients compare with 'version' but fetch mac_url, see roadmap r28) - make sure the Mac zip is the build with v2"
+note "Mac package version in the feed: ${mver:-none} (r28: new Mac clients compare with mac_version; old ones still compare with 'version') - publish a fresh Mac zip with v2 via 02-relay/55-mac-pull.sh"
 gate
 
 step "adoption (human check)"

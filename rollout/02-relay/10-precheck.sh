@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Block 2 / step 10 - READ-ONLY precheck for the relay patch (r2).
-#  * the new relay.js in the repo = live snapshot + patch 0001 + patch 0002 (real client IP) and nothing else;
+#  * the new relay.js in the repo = live snapshot + patches 0001 + 0002 (real client IP) + 0003 (Mac publish) and nothing else;
 #    relay/clientip.js = what patch 0002 creates; its unit test passes
 #  * live relay.js on CT110 is byte-identical to the snapshot (else STOP: drift)
 #  * relay healthy, nobody connected, node syntax of the new file ok
@@ -29,7 +29,12 @@ if git -C "$REPO_ROOT" cat-file -e "$RELAY_BASE_COMMIT:relay/relay.js" 2>/dev/nu
   else
     bad "missing $RELAY_PATCH2 (r63 not on this branch)"
   fi
-  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
+  if [ -f "$RELAY_PATCH3" ]; then
+    (cd "$tmp" && patch -s -p1 <"$RELAY_PATCH3") && ok "patch 0003 (Mac publish, r28) applies on top" || bad "patch 0003 does not apply"
+  else
+    bad "missing $RELAY_PATCH3 (r28 not on this branch)"
+  fi
+  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
   if [ -f "$tmp/relay/clientip.js" ] && [ -f "$RELAY_LOCAL_CLIENTIP" ]; then
     [ "$(sha_of "$tmp/relay/clientip.js")" = "$(sha_of "$RELAY_LOCAL_CLIENTIP")" ] && ok "repo clientip.js == what patch 0002 creates" || bad "repo clientip.js differs from patch 0002"
   else
@@ -67,7 +72,7 @@ rx relay "node --version" | grep -q '^v' && note "CT110 node: $(rx relay 'node -
 rx relay "ls $RELAY_DROPIN 2>/dev/null" | grep -q . && note "drop-in already exists (re-run / switch mode)" || note "no r2 drop-in yet (fresh)"
 
 step "who publishes today? (these break when publishing becomes LAN-only/header-only)"
-note "GitHub Actions mac.yml uploads X-Remote-macOS.zip to the PUBLIC url with ?token=  -> blocked in strict mode (see 02-relay/mac-ci-publish.md)"
+note "mac.yml no longer uploads to the relay (CI uploads an artifact only); Mac packages are pulled over the LAN by 55-mac-pull.sh (see 02-relay/mac-ci-publish.md). Old workflow runs on the previous mac.yml would still hit the public URL - blocked in strict mode"
 note "the Windows publish script is not in the repo - find it BEFORE 'strict'. compat mode keeps it working."
 rx relay "grep -c 'published ' $RELAY_DIR/relay.log" | sed 's/^/  [INFO] publishes ever logged: /' || true
 rx relay "grep 'published ' $RELAY_DIR/relay.log | tail -n3" || true

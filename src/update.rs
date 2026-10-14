@@ -148,6 +148,26 @@ pub fn check() -> Result<Release> {
     parse_feed(&body)
 }
 
+/// Version of the package for `platform`. The Mac package has its own
+/// `mac_version` (r28): a Windows-only publish moves `version` but must neither
+/// offer an old Mac zip as "new" nor invalidate `mac_sig`, which signs
+/// `mac_version`. Feeds without `mac_version` (legacy) fall back to `version`.
+pub fn feed_version(v: &serde_json::Value, platform: &str) -> String {
+    let get = |k: &str| -> String {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    if platform == "mac" {
+        let mv = get("mac_version");
+        if !mv.is_empty() {
+            return mv;
+        }
+    }
+    get("version")
+}
+
 /// Parses + verifies a feed document (split from `check` so tests can feed it).
 pub fn parse_feed(body: &[u8]) -> Result<Release> {
     let v: serde_json::Value = serde_json::from_slice(body)?;
@@ -175,7 +195,7 @@ pub fn parse_feed(body: &[u8]) -> Result<Release> {
         s("sig").to_lowercase(),
     );
     let rel = Release {
-        version: s("version"),
+        version: feed_version(&v, PLATFORM),
         sha256: hash,
         url,
         notes: s("notes"),
@@ -878,6 +898,37 @@ mod tests {
     fn built_in_key_is_a_valid_ed25519_key() {
         let raw: [u8; 32] = hex::decode(UPDATE_PUBKEY).unwrap().try_into().unwrap();
         VerifyingKey::from_bytes(&raw).unwrap();
+    }
+
+    #[test]
+    fn feed_version_uses_mac_version_only_for_mac() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"version":"0.29.4","mac_version":"0.26.10"}"#,
+        )
+        .unwrap();
+        assert_eq!(feed_version(&v, "win"), "0.29.4");
+        assert_eq!(feed_version(&v, "mac"), "0.26.10");
+        // legacy feed without mac_version: both platforms use "version"
+        let legacy: serde_json::Value = serde_json::from_str(r#"{"version":"0.29.4"}"#).unwrap();
+        assert_eq!(feed_version(&legacy, "mac"), "0.29.4");
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"version":"0.29.4","mac_version":""}"#).unwrap();
+        assert_eq!(feed_version(&empty, "mac"), "0.29.4");
+    }
+
+    #[test]
+    fn mac_signature_binds_mac_version_not_windows_version() {
+        // A Windows publish changes "version" only: the Mac signature over
+        // mac_version must stay valid, one over the Windows version must not.
+        let m_old = signed_message("mac", "0.26.10", ABC, 3);
+        let m_win = signed_message("mac", "0.29.4", ABC, 3);
+        assert_ne!(m_old, m_win);
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"version":"0.29.5","mac_version":"0.26.10"}"#,
+        )
+        .unwrap();
+        let signed_for = signed_message("mac", &feed_version(&v, "mac"), ABC, 3);
+        assert_eq!(signed_for, m_old);
     }
 
     #[test]

@@ -1,0 +1,110 @@
+diff --git a/relay/relay.js b/relay/relay.js
+index 196fe89..e6dec6d 100644
+--- a/relay/relay.js
++++ b/relay/relay.js
+@@ -96,6 +96,29 @@ function verifyUpdateSig(pubHex, msg, sigHex) {
+     return crypto.verify(null, msg, key, Buffer.from(sigHex, 'hex'));
+   } catch (_) { return false; }
+ }
++// Version compare ("0.29.10" > "0.29.9"); only digits and dots are expected.
++function cmpVersion(a, b) {
++  const pa = String(a || '').split('.').map((x) => parseInt(x, 10) || 0);
++  const pb = String(b || '').split('.').map((x) => parseInt(x, 10) || 0);
++  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
++    const d = (pa[i] || 0) - (pb[i] || 0);
++    if (d) return d < 0 ? -1 : 1;
++  }
++  return 0;
++}
++// Atomic feed write: a reader never sees a half-written JSON file.
++function writeFeed(feed, obj) {
++  const file = path.join(DIST, feed);
++  const tmp = file + '.tmp';
++  fs.writeFileSync(tmp, JSON.stringify(obj, null, 1));
++  fs.renameSync(tmp, file);
++}
++function readFeed(feed) {
++  try { return JSON.parse(fs.readFileSync(path.join(DIST, feed), 'utf8')); } catch (_) { return {}; }
++}
++// Mac packages (r28): the only names a `platform=mac` publish may write.
++const MAC_ZIP_RE = /^(FreeViewer|X-Remote)-macOS\.zip$/i;
++
+ function safeName(n) {
+   n = String(n || '').split(/[\\/]/).pop();
+   return /^[A-Za-z0-9._-]{1,64}$/.test(n) ? n : null;
+@@ -771,6 +794,12 @@ const server = http.createServer((req, res) => {
+     const version = String(u.searchParams.get('version') || '').slice(0, 32);
+     const notes = String(u.searchParams.get('notes') || '').slice(0, 500);
+     if (!name || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) { res.writeHead(400); return res.end('bad name/version'); }
++    // platform=mac (r28): store the Mac zip and write ONLY the mac_* fields of the feed.
++    // The win fields (version/sha256/size/sig) are never touched, so a Mac publish
++    // cannot break the Windows signature - and a Windows publish cannot break mac_sig,
++    // because the Mac signature binds mac_version, not the Windows version.
++    const isMac = u.searchParams.get('platform') === 'mac';
++    if (isMac && !MAC_ZIP_RE.test(name)) { res.writeHead(400); return res.end('bad mac package name'); }
+     // Signature of the package (hex Ed25519 over signedMessage), made offline
+     // with tools/sign-release; the relay only checks it and passes it through.
+     const sigHex = String(req.headers['x-fv-sig'] || '').trim().toLowerCase();
+@@ -781,7 +810,9 @@ const server = http.createServer((req, res) => {
+     const out = fs.createWriteStream(tmp);
+     const hash = crypto.createHash('sha256');
+     let size = 0, bad = false;
++    let head = Buffer.alloc(0);
+     req.on('data', (c) => {
++      if (head.length < 4) head = Buffer.concat([head, c.subarray(0, 4 - head.length)]);
+       size += c.length;
+       if (size > MAX_UPLOAD) { bad = true; req.destroy(); return; }
+       hash.update(c);
+@@ -791,7 +822,21 @@ const server = http.createServer((req, res) => {
+       out.end(() => {
+         if (bad) { try { fs.unlinkSync(tmp); } catch (_) {} res.writeHead(413); return res.end('too big'); }
+         const sha = hash.digest('hex');
+-        if (sigHex && UPDATE_PUBKEY && !verifyUpdateSig(UPDATE_PUBKEY, signedMessage('win', version, sha, size), sigHex)) {
++        if (isMac && head.toString('latin1') !== 'PK\x03\x04') {
++          try { fs.unlinkSync(tmp); } catch (_) {}
++          log('publish refused: mac package is not a zip', name);
++          res.writeHead(400); return res.end('not a zip');
++        }
++        if (isMac) {
++          // never move the Mac package backwards (same version = re-upload is fine)
++          const cur = readFeed(/^x-remote/i.test(name) ? 'version-xoffi.json' : 'version.json').mac_version;
++          if (cur && cmpVersion(version, cur) < 0) {
++            try { fs.unlinkSync(tmp); } catch (_) {}
++            log('publish refused: mac version older than the feed', version, cur);
++            res.writeHead(409); return res.end('older than mac_version ' + cur);
++          }
++        }
++        if (sigHex && UPDATE_PUBKEY && !verifyUpdateSig(UPDATE_PUBKEY, signedMessage(isMac ? 'mac' : 'win', version, sha, size), sigHex)) {
+           try { fs.unlinkSync(tmp); } catch (_) {}
+           log('publish refused: signature does not verify', version, name);
+           res.writeHead(400); return res.end('signature invalid');
+@@ -805,6 +850,20 @@ const server = http.createServer((req, res) => {
+                                         : 'https://freeviewer.fleitec.com/fv/dist/') + name,
+           published: new Date().toISOString(),
+         };
++        if (isMac) {
++          const feed = /^x-remote/i.test(name) ? 'version-xoffi.json' : 'version.json';
++          const cur = readFeed(feed);
++          cur.mac_version = version;
++          cur.mac_url = meta.url;
++          cur.mac_sha256 = sha;
++          cur.mac_size = size;
++          cur.mac_published = meta.published;
++          if (sigHex) cur.mac_sig = sigHex; else delete cur.mac_sig; // no stale signature of an older zip
++          writeFeed(feed, cur);
++          log('published mac', version, name, size + ' bytes', sha.slice(0, 12));
++          res.writeHead(200, { 'content-type': 'application/json' });
++          return res.end(JSON.stringify({ platform: 'mac', mac_version: version, mac_sha256: sha, mac_size: size, mac_url: meta.url, mac_sig: sigHex || undefined }));
++        }
+         if (sigHex) meta.sig = sigHex;
+         // noversion=1: nur die Datei ablegen (z. B. Mac-Zip aus der CI) -
+         // version.json bleibt dem Haupt-Build vorbehalten.
+@@ -818,7 +877,7 @@ const server = http.createServer((req, res) => {
+             const old = JSON.parse(fs.readFileSync(path.join(DIST, feed), 'utf8'));
+             for (const k of Object.keys(old)) { if (k.startsWith('mac_')) outmeta[k] = old[k]; }
+           } catch (_) {}
+-          fs.writeFileSync(path.join(DIST, feed), JSON.stringify(outmeta, null, 1));
++          writeFeed(feed, outmeta);
+         }
+         log('published', version, name, size + ' bytes', sha.slice(0, 12));
+         res.writeHead(200, { 'content-type': 'application/json' });

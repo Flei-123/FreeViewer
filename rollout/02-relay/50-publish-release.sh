@@ -4,23 +4,25 @@
 # Runs where the update private key is (or pass --sig), uploads over ssh to CT110
 # and talks to the relay on 127.0.0.1 (= "from the LAN", works in strict mode).
 #
-#   win : uploads the exe with header X-Fv-Sig (the relay verifies it and writes "sig" into the feed),
-#         then RE-SIGNS the Mac fields of the same feed (see "why" below).
-#   mac : uploads the zip with noversion=1 (the feed stays), then writes mac_version/mac_sha256/
-#         mac_size/mac_sig into the feed itself - the relay has no code path for Mac fields.
+#   win : uploads the exe with header X-Fv-Sig (the relay verifies it and writes "sig" into the feed).
+#         The Mac fields (mac_*) stay exactly as they are - they have their own version and signature.
+#   mac : uploads the zip with platform=mac + X-Fv-Sig (signature over platform "mac" + the Mac version);
+#         the relay (patch 0003) checks it and writes mac_version/mac_url/mac_sha256/mac_size/mac_sig itself.
+#         Before the upload the zip is checked: it is a zip, its Info.plist version == --version,
+#         the app binary keeps its executable bit.
 #
-# WHY the Mac re-sign: the client signs/verifies with the feed field "version" for BOTH
-# platforms (src/update.rs). A new Windows version therefore invalidates the old mac_sig.
-# Without the re-sign, signed Mac clients would refuse every update after a Windows publish.
-# KNOWN QUIRK (roadmap r28): the feed carries mac_version 0.26.10 but version 0.29.4 - a Mac
-# client compares against "version" and fetches mac_url. Publish Windows and Mac together.
+# WHY the two platforms are independent (roadmap r28): the Mac client verifies "mac_sig" over the feed field
+# "mac_version" (src/update.rs feed_version), the Windows client over "version". A Windows publish therefore
+# cannot invalidate mac_sig, and a Mac publish cannot touch the Windows fields. Feeds that carry no mac_version
+# (very old) fall back to "version" in the client - for those, publish Windows and Mac with the same version.
+# Mac packages come from CI: fetch + check them with 55-mac-pull.sh, which calls this script.
 #
 # Usage: 50-publish-release.sh --platform win|mac --file PATH --version X.Y.Z
-#          [--brand freeviewer|x-remote] [--notes TEXT] [--sig HEX] [--no-mac-resign] [--apply]
+#          [--brand freeviewer|x-remote] [--notes TEXT] [--sig HEX] [--apply]
 # Env:   FV_SIGN_KEY (default /root/fvwork/keys/update-ed25519.key)
 . "$(dirname "$0")/../lib/common.sh"
 . "$(dirname "$0")/lib-relay.sh"
-usage() { sed -n '2,22p' "$0"; }
+usage() { sed -n '2,24p' "$0"; }
 fv_parse_args "$@"
 banner "relay: publish a signed release"
 need_cmd python3
@@ -57,6 +59,15 @@ sign_fields() {
 step "checks"
 ok "file $name: sha ${sha:0:16}... size $size"
 cur=$(rx relay "python3 -c \"import json;print(json.load(open('$RELAY_DIR/dist/$feed'))['version'])\"" || true)
+if [ "$platform" = mac ]; then
+  command -v unzip >/dev/null 2>&1 || bad "unzip missing (needed to check the Mac zip)"
+  if [ "$(head -c4 "$file" | od -An -tx1 | tr -d ' \n')" = 504b0304 ]; then ok "file is a zip"; else bad "file is not a zip (no PK header)"; fi
+  plist_ver=$(unzip -p "$file" '*.app/Contents/Info.plist' 2>/dev/null | tr -d '\n' | sed -n 's/.*CFBundleShortVersionString<\/key> *<string>\([^<]*\)<.*/\1/p' | head -n1)
+  if [ "$plist_ver" = "$version" ]; then ok "Info.plist version == $version"; else bad "Info.plist version is '${plist_ver:-none}', --version says $version (wrong build?)"; fi
+  if zipinfo "$file" 2>/dev/null | grep -Eq '^-rwx.*\.app/Contents/MacOS/'; then ok "app binary keeps its executable bit"; else bad "no executable file in .app/Contents/MacOS (zip re-packed on Windows? use ditto)"; fi
+  curmac=$(rx relay "python3 -c \"import json;print(json.load(open('$RELAY_DIR/dist/$feed')).get('mac_version',''))\"" || true)
+  if [ -n "$curmac" ] && [ "$(printf '%s\n%s\n' "$curmac" "$version" | sort -V | tail -n1)" != "$version" ]; then bad "version $version is older than mac_version $curmac in the feed (relay would answer 409)"; else ok "version $version >= mac_version ${curmac:-none}"; fi
+fi
 if [ "$platform" = win ]; then
   if [ -n "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$version" | sort -V | tail -n1)" = "$version" ] && [ "$cur" != "$version" ]; then ok "version $version > current $cur"; else bad "version $version is not newer than the feed ($cur)"; fi
 fi
@@ -83,51 +94,28 @@ if [ "$platform" = win ]; then
   put relay "$file" "$RELAY_DIR/staging-$name"
   mx relay "feed backup + signed publish" "cd $RELAY_DIR && cp -p dist/$feed dist/$feed.pre-$version && TOK=\$(cat upload.token) && curl -fsS -m600 -X POST -H \"Authorization: Bearer \$TOK\" -H 'X-Fv-Sig: $sig' --data-binary @staging-$name 'http://127.0.0.1:7180/fv/publish?version=$version&name=$name&notes=$enc_notes'; rc=\$?; rm -f staging-$name; echo; exit \$rc"
 else
-  step "upload the Mac zip (noversion=1) and write the Mac fields"
-  confirm "Publishing $name $version for macOS clients. Continue?"
+  [ -n "$sig" ] || sig=$(sign_fields mac "$version" "$sha" "$size")
+  ok "signature (mac, $version): ${sig:0:16}..."
+  step "upload the Mac zip (platform=mac) - the relay writes the mac_* fields"
+  confirm "Publishing $name $version (sha ${sha:0:16}...) for macOS clients of the $brand brand. Continue?"
   put relay "$file" "$RELAY_DIR/staging-$name"
-  mx relay "signed-less zip upload (noversion), feed untouched" "cd $RELAY_DIR && TOK=\$(cat upload.token) && curl -fsS -m600 -X POST -H \"Authorization: Bearer \$TOK\" --data-binary @staging-$name 'http://127.0.0.1:7180/fv/publish?version=$version&name=$name&noversion=1&notes=macOS'; rc=\$?; rm -f staging-$name; echo; exit \$rc"
+  mx relay "feed backup + signed mac publish (win fields untouched)" "cd $RELAY_DIR && cp -p dist/$feed dist/$feed.pre-mac-$version && TOK=\$(cat upload.token) && curl -fsS -m600 -X POST -H \"Authorization: Bearer \$TOK\" -H 'X-Fv-Sig: $sig' --data-binary @staging-$name 'http://127.0.0.1:7180/fv/publish?platform=mac&version=$version&name=$name&notes=macOS'; rc=\$?; rm -f staging-$name; echo; exit \$rc"
 fi
 
-# ---- (re-)sign the Mac fields of the feed with the feed's CURRENT version ----
-resign_mac() {
-  local fj fver msha msize msig mver
-  fj=$(rx relay "cat $RELAY_DIR/dist/$feed")
-  # after a (dry-run) win publish the feed still has the OLD version; use the new one in that case
-  fver=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("version",""))' <<<"$fj")
-  [ "$platform" = win ] && fver="$version"
-  msha=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("mac_sha256",""))' <<<"$fj")
-  msize=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("mac_size",0))' <<<"$fj")
-  mver=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("mac_version",""))' <<<"$fj")
-  if [ "$platform" = mac ]; then msha="$sha"; msize="$size"; mver="$version"; fi
-  re_hex64='^[0-9a-f]{64}$'
-  if ! [[ "$msha" =~ $re_hex64 ]]; then note "no Mac package in $feed - nothing to sign"; return 0; fi
-  if [ -r "$KEY" ]; then
-    msig=$(sign_fields mac "$fver" "$msha" "$msize")
-  elif [ -n "$(fv_opt mac-sig)" ]; then
-    msig=$(fv_opt mac-sig)
-  else
-    warn "no signing key here - give --mac-sig HEX (made with sign-fields --platform mac --version $fver --sha256 $msha --size $msize)"
-    return 0
-  fi
-  ok "mac signature over version $fver, sha ${msha:0:16}...: ${msig:0:16}..."
-  mx relay "write mac fields into $feed (atomic, backup .pre-mac)" "cd $RELAY_DIR/dist && cp -p $feed $feed.pre-mac-$(stamp) && python3 - <<'PYEOF'
-import json, os
-p = '$feed'
-d = json.load(open(p))
-d['mac_version'] = '$mver'
-d['mac_sha256'] = '$msha'
-d['mac_size'] = $msize
-d['mac_sig'] = '$msig'
-json.dump(d, open(p + '.tmp', 'w'), indent=1)
-os.replace(p + '.tmp', p)
-print('mac fields written')
-PYEOF"
-}
-if [ "$platform" = mac ] || { [ "$platform" = win ] && ! fv_flag no-mac-resign; }; then
-  step "Mac fields"
-  resign_mac
-fi
+# ---- state of the other platform (information only; nothing is re-signed any more) ----
+step "Mac state in $feed"
+fj=$(rx relay "cat $RELAY_DIR/dist/$feed" || true)
+mstate=$(python3 -c 'import sys,json
+try:
+    d=json.loads(sys.stdin.read())
+except Exception:
+    d={}
+print((d.get("mac_version") or "none")+" "+("signed" if d.get("mac_sig") else "UNSIGNED"))' <<<"$fj")
+note "feed: version $(python3 -c 'import sys,json;print(json.loads(sys.stdin.read() or "{}").get("version","?"))' <<<"$fj" 2>/dev/null || echo '?'), mac_version/mac_sig: $mstate"
+case "$mstate" in
+  none*) note "no Mac package in the feed yet - publish one with 55-mac-pull.sh" ;;
+  *UNSIGNED) note "Mac package is unsigned: fine while the relay is in compat; publish a signed one (55-mac-pull.sh) BEFORE 60-require-sig / phase 3" ;;
+esac
 
 if ((APPLY)); then
   step "verify the live feed"
@@ -138,5 +126,6 @@ if ((APPLY)); then
   pubfeed=$(curl -fsS -m10 "https://$([ "$brand" = freeviewer ] && echo freeviewer || echo remote).fleitec.com/fv/version" || true)
   [ -n "$pubfeed" ] && ok "public feed reachable" || note "public feed not reachable from here (check by hand)"
 fi
-note "Undo: 90-rollback.sh --feed ($feed.pre-$version). Clients only move forward: to undo for real, publish the old build under a HIGHER version."
+bkver="$version"; [ "$platform" = mac ] && bkver="mac-$version"
+note "Undo: 90-rollback.sh --feed $bkver ($feed.pre-$bkver). Clients only move forward: to undo for real, publish the old build under a HIGHER version."
 finish

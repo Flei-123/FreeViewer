@@ -6,12 +6,13 @@ The private key never lives in the repo. Default location:
 
 Signed message (must match src/update.rs `signed_message`):
     "freeviewer-update-v1\\n<platform>\\n<version>\\n<sha256 hex>\\n<size>"
-platform = "win" (feed fields url/sha256/size/sig) or "mac" (mac_*).
+platform = "win" (feed fields version/url/sha256/size/sig) or "mac" (mac_version/mac_url/mac_sha256/mac_size/mac_sig;
+the Mac signature binds mac_version, fallback version for legacy feeds).
 
 Usage:
     sign_release.py keygen [--key PATH]            create key (refuses to overwrite)
     sign_release.py pubkey [--key PATH]            print public key (hex, 64 chars)
-    sign_release.py sign --feed version.json [--key PATH] [--win FILE] [--mac FILE]
+    sign_release.py sign --feed version.json [--key PATH] [--win FILE] [--mac FILE [--mac-version V]]
                                                    add "sig" / "mac_sig" to the feed (in place)
     sign_release.py sign-fields --platform win --version V --sha256 H --size N [--key PATH]
                                                    print one signature (used by the relay publish step)
@@ -35,8 +36,16 @@ DEFAULT_KEY = "/root/fvwork/keys/update-ed25519.key"
 PREFIX = "freeviewer-update-v1"
 FIELDS = {
     "win": ("version", "sha256", "size", "sig"),
-    "mac": ("version", "mac_sha256", "mac_size", "mac_sig"),
+    "mac": ("mac_version", "mac_sha256", "mac_size", "mac_sig"),
 }
+
+
+def feed_version(feed, plat):
+    """Version a platform signature binds. Mac: mac_version (r28), legacy feeds fall back to version
+    (same rule as update::feed_version in the client)."""
+    if plat == "mac" and feed.get("mac_version"):
+        return feed["mac_version"]
+    return feed["version"]
 
 
 def message(platform, version, sha256, size):
@@ -81,6 +90,8 @@ def cmd_pubkey(a):
 def cmd_sign(a):
     priv = load_key(a.key)
     feed = json.load(open(a.feed))
+    if getattr(a, "mac_version", None):
+        feed["mac_version"] = a.mac_version
     for plat, path in (("win", a.win), ("mac", a.mac)):
         vf, hf, sf, gf = FIELDS[plat]
         if path:
@@ -95,7 +106,7 @@ def cmd_sign(a):
         size = feed.get(sf)
         if size is None:
             sys.exit(f"{plat}: feed has a hash but no size; pass the file")
-        feed[gf] = priv.sign(message(plat, feed[vf], feed[hf], size)).hex()
+        feed[gf] = priv.sign(message(plat, feed_version(feed, plat), feed[hf], size)).hex()
         print(f"signed {plat}: {feed[gf][:16]}...")
     json.dump(feed, open(a.feed, "w"), indent=2)
     open(a.feed, "a").write("\n")
@@ -119,7 +130,7 @@ def cmd_verify(a):
             ok = False
             continue
         try:
-            pub.verify(bytes.fromhex(sig), message(plat, feed[vf], feed[hf], feed.get(sf, 0)))
+            pub.verify(bytes.fromhex(sig), message(plat, feed_version(feed, plat), feed[hf], feed.get(sf, 0)))
             print(f"{plat}: ok")
         except (InvalidSignature, ValueError):
             print(f"{plat}: INVALID")
@@ -137,6 +148,7 @@ def main():
             s.add_argument("--feed", required=True)
             s.add_argument("--win")
             s.add_argument("--mac")
+            s.add_argument("--mac-version", dest="mac_version", help="set feed mac_version (the version of the Mac package; signed instead of 'version')")
         if name == "sign-fields":
             s.add_argument("--platform", choices=["win", "mac"], required=True)
             s.add_argument("--version", required=True)

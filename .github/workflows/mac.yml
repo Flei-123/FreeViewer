@@ -19,6 +19,10 @@ jobs:
   build:
     name: build + test on macOS
     runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write       # build attestation (verified by rollout/02-relay/55-mac-pull.sh)
+      attestations: write
     env:
       # Die Geheimnisse einmal nach env holen - im `if` einer Stufe laesst sich
       # damit sauber pruefen, ob sie ueberhaupt hinterlegt sind.
@@ -28,7 +32,6 @@ jobs:
       AC_APPLE_ID: ${{ secrets.AC_APPLE_ID }}
       AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
       AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
-      FV_UPLOAD_TOKEN: ${{ secrets.FV_UPLOAD_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -114,6 +117,11 @@ jobs:
           unzip -l target/FreeViewer-macOS.zip
           zipinfo target/FreeViewer-macOS.zip | grep MacOS/FreeViewer
 
+      - name: Build attestation (proves the zip came from this repo's CI)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: target/FreeViewer-macOS.zip
+
       - name: Ergebnis einsammeln (Zip - DAS ist die Verteil-Datei)
         uses: actions/upload-artifact@v4
         if: always()
@@ -131,12 +139,18 @@ jobs:
           if-no-files-found: warn
 
   # ----------------------------------------------------------- X-Remote ---
-  # Dasselbe Programm als Marke X-Remote (Lizenz-Merkmal an). Das fertige
-  # Zip wird DIREKT zum Relay hochgeladen - dort liegt es neben der
-  # Windows-Exe unter https://remote.fleitec.com/fv/dist/.
+  # Dasselbe Programm als Marke X-Remote (Lizenz-Merkmal an). Das Zip wird NICHT
+  # mehr von hier zum Relay geschickt (oeffentliche URL + Token waere genau das
+  # Loch, das r2 schliesst; die CI hat auch keinen Signierschluessel). Stattdessen:
+  # Artefakt + Build-Attestation hier, dann holt rollout/02-relay/55-mac-pull.sh
+  # das Zip im LAN, prueft es, signiert es und veroeffentlicht es (platform=mac).
   xremote:
-    name: X-Remote bauen + zum Relay laden
+    name: X-Remote bauen (Artefakt + Attestation)
     runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -144,7 +158,6 @@ jobs:
       AC_APPLE_ID: ${{ secrets.AC_APPLE_ID }}
       AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
       AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
-      FV_UPLOAD_TOKEN: ${{ secrets.FV_UPLOAD_TOKEN }}
       FV_BRAND_NAME: X-Remote
       FV_BRAND_EXE: x-remote.exe
       FV_BRAND_DIR: X-Remote
@@ -237,17 +250,15 @@ jobs:
           unzip -l target/X-Remote-macOS.zip
           zipinfo target/X-Remote-macOS.zip | grep MacOS/X-Remote
 
-      - name: Ergebnis einsammeln (Artefakt zur Diagnose)
+      - name: Build attestation (proves the zip came from this repo's CI)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: target/X-Remote-macOS.zip
+
+      - name: Ergebnis einsammeln (Zip - DAS ist die Verteil-Datei, holt 55-mac-pull.sh)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: x-remote-macos-arm64
           path: target/X-Remote-macOS.zip
           if-no-files-found: warn
-
-      - name: "Zum Relay hochladen (noversion - version.json bleibt unberuehrt)"
-        if: env.FV_UPLOAD_TOKEN != ''
-        run: |
-          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          curl -fsS --data-binary @target/X-Remote-macOS.zip \
-            "https://freeviewer.fleitec.com/fv/publish?token=$FV_UPLOAD_TOKEN&version=$VERSION&name=X-Remote-macOS.zip&noversion=1&notes=X-Remote-macOS"

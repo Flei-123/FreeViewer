@@ -25,7 +25,8 @@ Everything else is `script --apply`.
 **Block 1** (`01-backups`): `10-precheck` -> `20-snapshots --apply` -> `30-vzdump-job --apply` -> `40-app-backups --apply`
 -> `50-offsite --offsite ... --apply` (needs target) -> `60-verify` -> `70-restore-test --apply` -> later `80-cleanup-snapshots`. Undo: `90-rollback`.
 **Block 2**: `10-precheck` -> `20-backup --apply` -> `30-apply --mode compat --apply` -> `40-verify --mode compat` (also proves clientip.js is live and relay.js sends `client_ip`)
--> `50-publish-release --platform win --file ... --version ... --apply` (first signed release; re-signs Mac fields)
+-> `50-publish-release --platform win --file ... --version ... --apply` (first signed release; Mac fields stay as they are)
+-> Mac: `55-mac-pull.sh --brand freeviewer|x-remote [--apply]` (CI artifact -> checked -> signed -> published, `mac-ci-publish.md`)
 -> later: move publishers (`mac-ci-publish.md`), `30-apply --mode strict --only-dropin`, `60-require-sig`, then a client built
 with `FV_REQUIRE_SIG=1` (phase 3), published with `50-publish-release`. Undo: `90-rollback` (`--feed VER`, `--lxc`).
 **Block 3**: `10-precheck` -> `20-gate-native --native-min-version X` -> `30-backup --apply` -> `40-apply --apply` (file, build, restart)
@@ -35,8 +36,8 @@ with `FV_REQUIRE_SIG=1` (phase 3), published with `50-publish-release`. Undo: `9
 ## Findings that change the old docs
 - **Backups already exist** (nightly all-guest vzdump 02:30, 3 daily + 2 weekly, USB disk on the SAME pve). Missing: offsite, longer retention for CT110/111, app-level backup, restore test.
 - **FreeMeet e2e.js is compiled into the binary** (`include_str!`): copying the file is not enough, a rebuild + restart is needed (docs/FREEMEET-E2E-NONCE.md said "no restart" - wrong).
-- **LAN-only publish breaks the Mac CI upload** (public URL + `?token=`). Hence relay `compat` first, `strict` later.
-- The client signs/verifies both platforms with the feed field `version` -> every Windows publish must re-sign `mac_sig` (done by `50-publish-release`).
+- **LAN-only publish broke the Mac CI upload** (public URL + `?token=`): solved - `mac.yml` only builds + attests, `55-mac-pull.sh` publishes over the LAN (`mac-ci-publish.md`). Still: relay `compat` first, `strict` later.
+- The Mac client verifies `mac_sig` over the feed field `mac_version` (not `version`) -> Windows and Mac publishes are independent (r28, relay patch 0003 + `update::feed_version`). Needs the new client build (version bump) and relay patch 0003.
 - Live relay.js == repo snapshot (sha 7c348523...), live e2e.js == patch base (17a4227f...).
 
 ## Not proven
