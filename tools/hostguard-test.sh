@@ -36,6 +36,7 @@ trap cleanup EXIT INT TERM
 PW=guardtest-pw-1
 mkdir -p "$D/home" "$D/vhome"
 cp "$ROOT/relay/relay.js" "$D/relay.cjs"
+cp "$ROOT/relay/clientip.js" "$D/clientip.js"
 
 start_relay() {
   FV_PORT="$PORT" FV_DATA="$D/hosts.json" node "$D/relay.cjs" >>"$D/relay.log" 2>&1 &
