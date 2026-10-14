@@ -1,43 +1,72 @@
-# FreeMeet E2E in Firefox / Safari (roadmap r62) - analysis 14.10.2026
+# FreeMeet E2E in Firefox / Safari (roadmap r62) - measured 14.10.2026
 
-## Findings (measured, not assumed)
-Feature probe with Playwright on the server (`RTCRtpSender`, `createEncodedStreams`, `RTCRtpScriptTransform`):
+Two code paths exist in the browser client:
 
-| browser | createEncodedStreams | RTCRtpScriptTransform |
+| path | browsers | where the frame transform runs |
 |---|---|---|
-| Chromium 149 | yes | yes |
-| Firefox 151 | **no** | yes |
-| WebKit 26.5 (Playwright build) | no | no (real Safari 15.4+ has it; this build is minimal) |
+| `createEncodedStreams()` | Chromium | main thread (`app.js` -> `FreeMeetE2E.spurSchuetzen`) |
+| `RTCRtpScriptTransform` | Firefox, Safari 15.4+ | worker `/e2e-worker.js` (same `spurSchuetzen`, key handle posted once) |
 
-`web/app.js` (live, 3778 lines, sha `714edc88...`) only wires the legacy path:
-`e2eAnhaengen()` uses `RTCRtpScriptTransform` only `if (state.e2eWorker)` - and `state.e2eWorker` is
-**never set** anywhere (grep over the live file). Then it needs `createEncodedStreams`, otherwise it logs
-"Meeting laeuft unverschluesselt".
+`FreeMeetE2E.moeglich()` is true for either path (ScriptTransform also needs `Worker`). Otherwise the page shows
+"E2E: von diesem Browser nicht unterstuetzt", joins with `e2e:false` and the SFU keeps it out of E2E rooms.
 
-## The real bug (fixed in this change)
-`FreeMeetE2E.moeglich()` answered **true** as soon as `RTCRtpScriptTransform` existed. So in Firefox/Safari:
-tag "E2E: an" (green), join announces `e2e: true`, but media goes out **unencrypted** and E2E media from
-others cannot be decoded. A false sense of security. Fix: `moeglich()` is true only with `createEncodedStreams`
-(the path that exists). Now those browsers show "E2E: von diesem Browser nicht unterstuetzt", join with
-`e2e: false` and the SFU keeps them out of E2E rooms with its "mixed room" message. Test: `node --test web-patch/`
-("moeglich(): only browsers with createEncodedStreams count").
+## Files
+* `web-patch/e2e-worker.js` - new worker (SFU serves it: route + `include_str!`, SFU patch `rollout/0017`).
+* `web-patch/e2e.js` - `moeglich()` + fail-closed sender (video frame without H.264 NAL unit is dropped, never sent clear).
+* `web-patch/app-e2e-worker.patch` - against live `web/app.js` sha `714edc88` AFTER `app-join-e2e-ver.patch`
+  (`patch -p1` in this order; checked: result is byte-identical to the tested file).
+* `tools/freemeet-e2e/browsers.mjs` - the Playwright check below (`inpage` and `sfu` modes, header explains usage).
+* Order on CT111: `e2e-worker.js` into `web/` BEFORE the SFU build (include_str!), then `e2e.js`, then the two app.js patches.
 
-## Plan for real Firefox/Safari support (NOT done - not small, not testable here)
-1. New file `web/e2e-worker.js` (served like `e2e.js`: route + `include_str!` in `signal.rs`, so SFU rebuild):
-   ```js
-   self.window = self; importScripts('/e2e.js'); let key; const ready = new Promise(r => self.onmessage = e => { key = e.data.key; r(); });
-   self.onrtctransform = async (e) => { await ready; const { art, richtung } = e.transformer.options;
-     FreeMeetE2E.spurSchuetzen(key, art, e.transformer.readable, e.transformer.writable, richtung); };
-   ```
-   `spurSchuetzen` already works on any readable/writable pair of encoded frames.
-2. `app.js`: `state.e2eWorker = new Worker('/e2e-worker.js'); postMessage({key: state.e2eKey})` (the key handle holds a
-   non-extractable `CryptoKey` + a `Map`; both survive structured clone - to verify), `moeglich()` back to
-   "ScriptTransform OR createEncodedStreams", and `encodedInsertableStreams` stays for Chromium.
-3. Open questions that need REAL devices: (a) in Safari the H.264 frames of `RTCRtpScriptTransform` may not be Annex-B
-   (our NAL parser needs start codes; WebKit has used length-prefixed data in some versions) - must be measured with a
-   real iPhone/Mac; (b) `RTCEncodedVideoFrame.type`/key-frame flag for audio vs video; (c) sender/receiver transform per
-   simulcast layer in Firefox.
-4. Test: Firefox headless can do fake media (`media.navigator.streams.fake`) - a 2-browser loopback test is possible
-   there; Safari only on a real device (see r21).
+## Bugs found and fixed (app.js)
+1. No worker existed: Firefox/Safari could not do E2E at all (r62 gap, see below for the earlier moeglich() fix).
+2. Mic/camera switched on mid-meeting, screen share and system audio created transceivers WITHOUT `e2eSender()`:
+   they went out unencrypted (and E2E receivers drop them -> black/silent). Fixed (4 places).
+3. VP8/VP9: `schuetzenH264` returned frames without NAL units unchanged -> a browser without H.264 sent CLEAR video in an
+   "E2E: an" room. Now: video codec preference H.264 only when E2E is on (`e2eVideoCodecs`) and the sender drops such frames.
+4. NOTE: the SFU repo's `web/` is a STALE snapshot (app.js 2798 lines, sends `join` BEFORE the key is built -> `e2e:false`).
+   Live app.js (3778 lines, public at meet.fleitec.com) has the right order. All tests below ran against the live files.
 
-Effort: ~0.5-1 day incl. real-device tests. Until then: Firefox/Safari users cannot join E2E rooms (clear message).
+## Results (Playwright 1.61.1 builds: Chromium, Firefox, WebKit; server, no real devices)
+`node tools/freemeet-e2e/browsers.mjs inpage <webdir> [chromium firefox webkit]` (no SFU needed):
+
+| check | Chromium | Firefox (+OpenH264) | WebKit |
+|---|---|---|---|
+| createEncodedStreams / RTCRtpScriptTransform | yes / yes | no / yes | no / no |
+| `moeglich()` | true | true | false |
+| audio + H.264 encrypt/decrypt round trip, tamper dropped | ok | ok | ok |
+| replay dropped (r60), audio 40/80 and video 10/20 kept | ok | ok | ok |
+| clear VP8 never leaves sender; clear video from network dropped | ok | ok | ok |
+| worker loopback, both sides (video frames decoded in ~9 s) | 59 | 38 (audio concealed 0 %) | n/a |
+| worker loopback, receiver WITHOUT transform | 0 frames | 0 frames (audio concealed 87.7 %) | n/a |
+
+Stock Playwright Firefox has NO H.264 until the OpenH264 plugin is downloaded (~20 s, internet; profile kept in
+`FF_PROFILE_TPL`). Without it Firefox sends no video in E2E rooms (fail closed, audio works).
+
+SFU testhost (`FM_OFFEN=1`, live web files, 12 s, `framesDecoded` of the remote video):
+
+| clients (first, second) | result |
+|---|---|
+| chromium, chromium | 261 / 265 - ok |
+| chromium, firefox | 398 / 263 - ok (cross-browser E2E works) |
+| firefox, firefox | first 397, second **0** (late joiner) |
+| firefox, chromium | firefox 265, chromium **0** (late joiner) |
+| same firefox pairs WITHOUT key (control) | all decode - not a general Firefox problem |
+| firefox, webkit / webkit, firefox | the second one gets `denied` with the "Verschluesselung passt nicht" text - ok |
+| webkit alone | joins `e2e:false`, tag "E2E: aus" |
+
+Join announces `e2e:true, e2e_ver:2` for Chromium/Firefox, `e2e:false` for WebKit.
+
+## OPEN: Firefox as SENDER, late joiner sees no video (E2E only)
+A client that joins AFTER a Firefox sender receives ~1500 video packets but its receiver transform gets 1 frame (Firefox) /
+decodes 0 frames (Chromium). Firefox answers the SFU's PLI with fresh key frames (seen in the worker: 3 layers every ~0.4 s).
+Experiment: same worker as pure pass-through (transform present, no encryption): late joiner decodes (400 frames). So the
+transform itself and PLI work; the combination "encrypted key frame from Firefox after PLI" is not assembled downstream.
+Not yet isolated (suspects: SFU H.264 repacketizing of the encrypted key frame from Firefox - SPS/PPS/IDR layout or size;
+EPB in the blob; `is_keyframe`). Next: dump the SFU-side frame (`FM_TRACE`) for a Firefox PLI key frame and compare with a
+Chromium one; try `generateKeyFrame()` in the worker.
+
+## Not measurable here
+* Real Safari / iPhone (RTCRtpScriptTransform on WebKit with H.264: Annex-B or length-prefixed frames?) - needs a real device
+  (r21). The Playwright WebKit build has no ScriptTransform and no camera; only the crypto core ran in WebKit.
+* Firefox with real cameras, Android Firefox, simulcast under load.

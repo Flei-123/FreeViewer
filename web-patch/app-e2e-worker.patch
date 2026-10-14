@@ -1,0 +1,133 @@
+--- a/web/app.js	2026-10-14 19:15:53.603581693 +0000
++++ b/web/app.js	2026-10-14 19:15:53.606261684 +0000
+@@ -366,22 +366,44 @@
+ function e2eAnhaengen(objekt, art, richtung) {
+   if (!state.e2eKey || !window.FreeMeetE2E) return;
+   try {
+-    if (typeof RTCRtpScriptTransform !== 'undefined' && state.e2eWorker) {
+-      // Firefox/Safari: die Umwandlung laeuft in einem eigenen Faden.
+-      objekt.transform = new RTCRtpScriptTransform(state.e2eWorker, { art, richtung });
+-      return;
+-    }
++    // Chromium: legacy Insertable Streams on the main thread (unchanged).
+     if (typeof objekt.createEncodedStreams === 'function') {
+       const s = objekt.createEncodedStreams();
+       window.FreeMeetE2E.spurSchuetzen(state.e2eKey, art, s.readable, s.writable, richtung);
+       return;
+     }
++    // Firefox/Safari: RTCRtpScriptTransform, the transform runs in /e2e-worker.js.
++    if (typeof RTCRtpScriptTransform !== 'undefined' && state.e2eWorker) {
++      objekt.transform = new RTCRtpScriptTransform(state.e2eWorker, { art, richtung });
++      return;
++    }
+     log('Ende-zu-Ende: dieser Browser kann es nicht - Meeting laeuft unverschluesselt.');
+   } catch (e) {
+     log('Ende-zu-Ende fehlgeschlagen: ' + e.message);
+   }
+ }
+ 
++/**
++ * With E2E on, only H.264 video can be protected (the frame format keeps the
++ * NAL structure readable for the server). Offer nothing else, so a browser
++ * never negotiates VP8/VP9 and sends clear frames (r62). No H.264 -> the
++ * sender drops its frames (fail closed in e2e.js) and we say so.
++ */
++function e2eVideoCodecs(transceiver) {
++  if (!state.e2eKey) return;
++  try {
++    const caps = RTCRtpSender.getCapabilities('video');
++    const h264 = caps.codecs.filter((c) => /^video\/(h264|rtx)$/i.test(c.mimeType));
++    if (!h264.some((c) => /h264/i.test(c.mimeType))) {
++      log('Ende-zu-Ende: dieser Browser hat kein H.264 - Kamera/Bildschirm werden nicht gesendet.');
++      return;
++    }
++    transceiver.setCodecPreferences(h264);
++  } catch (e) {
++    log('Ende-zu-Ende: Codec-Wahl nicht moeglich: ' + e.message);
++  }
++}
++
+ function e2eSender(sender, art) { e2eAnhaengen(sender, art, 'raus'); }
+ function e2eEmpfaenger(empf, art) { e2eAnhaengen(empf, art, 'rein'); }
+ 
+@@ -398,11 +420,25 @@
+     // Ehrlich bleiben: lieber ohne Verschluesselung UND es sagen, als eine
+     // gruene Marke zu zeigen, hinter der nichts steht.
+     setTag('e2e', 'E2E: von diesem Browser nicht unterstützt', 'warn');
+-    log('Ende-zu-Ende: dieser Browser kann keine Insertable Streams.');
++    log('Ende-zu-Ende: dieser Browser kann weder Insertable Streams noch RTCRtpScriptTransform.');
+     return;
+   }
+   try {
+     state.e2eKey = await e.schluesselAufbauen(roh);
++    if (!(typeof RTCRtpSender !== 'undefined' && typeof RTCRtpSender.prototype.createEncodedStreams === 'function')) {
++      // Worker path (Firefox/Safari). If the worker cannot start, stay honest:
++      // no key -> join announces e2e:false and the page says so.
++      try {
++        state.e2eWorker = new Worker('/e2e-worker.js');
++        state.e2eWorker.postMessage({ key: state.e2eKey });
++      } catch (werr) {
++        state.e2eKey = null;
++        state.e2eWorker = null;
++        setTag('e2e', 'E2E: von diesem Browser nicht unterstützt', 'warn');
++        log('Ende-zu-Ende: Worker startet nicht: ' + werr.message);
++        return;
++      }
++    }
+     setTag('e2e', 'E2E: an', 'ok');
+     log('Ende-zu-Ende-Verschlüsselung aktiv - der Server sieht nur Kauderwelsch.');
+   } catch (err) {
+@@ -449,6 +485,7 @@
+       sendEncodings: camStufen(),
+     });
+     state.camSender = tr.sender;
++    e2eVideoCodecs(tr);
+     e2eSender(tr.sender, 'video');
+   }
+   // Wer ohne Kamera UND ohne Mikrofon beitritt (reiner Zuhoerer), haette ein
+@@ -1614,6 +1651,7 @@
+       } else {
+         const tr = state.pc.addTransceiver(state.micTrack, { direction: 'sendonly' });
+         state.micSender = tr.sender;
++        e2eSender(tr.sender, 'audio');
+         await doOffer();
+       }
+     } catch (e) {
+@@ -1657,6 +1695,8 @@
+           sendEncodings: camStufen(),
+         });
+         state.camSender = tr.sender;
++        e2eVideoCodecs(tr);
++        e2eSender(tr.sender, 'video');
+         await doOffer();
+       }
+       const t = ensureTile(state.me, 'cam');
+@@ -1752,6 +1792,8 @@
+       ],
+     });
+     state.screenSender = tr.sender;
++    e2eVideoCodecs(tr);
++    e2eSender(tr.sender, 'video');
+     // Bei Engpaessen lieber Bilder pro Sekunde opfern als Aufloesung -
+     // sonst wird Text unlesbar. Nicht jeder Browser kann das, daher weich.
+     try {
+@@ -1760,7 +1802,10 @@
+       await tr.sender.setParameters(p);
+     } catch (e) { /* egal */ }
+     const sysAudio = s.getAudioTracks()[0];
+-    if (sysAudio) state.pc.addTransceiver(sysAudio, { direction: 'sendonly' });
++    if (sysAudio) {
++      const sysTr = state.pc.addTransceiver(sysAudio, { direction: 'sendonly' });
++      e2eSender(sysTr.sender, 'audio');
++    }
+     // Eigene Vorschau: sonst sieht man selbst nicht, WAS man gerade teilt.
+     const eigen = ensureTile(state.me, 'screen');
+     eigen.stream.addTrack(state.screenTrack);
+@@ -3052,6 +3097,7 @@
+         // EINMAL neu aushandeln, danach nie wieder.
+         const tr = state.pc.addTransceiver(neu, { direction: 'sendonly', sendEncodings: camStufen() });
+         state.camSender = tr.sender;
++        e2eVideoCodecs(tr);
+         e2eSender(tr.sender, 'video');
+         await doOffer();
+       }

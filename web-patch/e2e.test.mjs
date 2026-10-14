@@ -239,20 +239,65 @@ test('a live video replay and a spliced frame are dropped', async () => {
   assert.equal(got.length, 2, 'replayed video frames must be dropped');
 });
 
-test('moeglich(): only browsers with createEncodedStreams count (r62)', () => {
-  const saved = { s: globalThis.RTCRtpSender, t: globalThis.RTCRtpScriptTransform };
+test('moeglich(): createEncodedStreams, or ScriptTransform + Worker (r62)', () => {
+  const saved = { s: globalThis.RTCRtpSender, t: globalThis.RTCRtpScriptTransform, w: globalThis.Worker };
   try {
-    delete globalThis.RTCRtpSender; delete globalThis.RTCRtpScriptTransform;
+    delete globalThis.RTCRtpSender; delete globalThis.RTCRtpScriptTransform; delete globalThis.Worker;
     assert.equal(E2E.moeglich(), false, 'no WebRTC');
-    // Firefox / Safari: ScriptTransform but no createEncodedStreams -> no E2E (no worker exists)
     globalThis.RTCRtpSender = function RTCRtpSender() {};
+    // neither API: no E2E (page says so, server keeps the browser out of E2E rooms)
+    assert.equal(E2E.moeglich(), false, 'no insertable streams at all');
+    // Firefox / Safari: ScriptTransform + Worker (web/e2e-worker.js does the work)
     globalThis.RTCRtpScriptTransform = function RTCRtpScriptTransform() {};
-    assert.equal(E2E.moeglich(), false, 'ScriptTransform alone must not claim E2E');
+    assert.equal(E2E.moeglich(), false, 'ScriptTransform without Worker must not claim E2E');
+    globalThis.Worker = function Worker() {};
+    assert.equal(E2E.moeglich(), true, 'ScriptTransform + Worker');
     // Chromium
+    delete globalThis.RTCRtpScriptTransform; delete globalThis.Worker;
     globalThis.RTCRtpSender.prototype.createEncodedStreams = function () {};
     assert.equal(E2E.moeglich(), true);
   } finally {
-    if (saved.s === undefined) delete globalThis.RTCRtpSender; else globalThis.RTCRtpSender = saved.s;
-    if (saved.t === undefined) delete globalThis.RTCRtpScriptTransform; else globalThis.RTCRtpScriptTransform = saved.t;
+    for (const [k, v] of [['RTCRtpSender', saved.s], ['RTCRtpScriptTransform', saved.t], ['Worker', saved.w]]) {
+      if (v === undefined) delete globalThis[k]; else globalThis[k] = v;
+    }
   }
+});
+
+test('outgoing video without any NAL unit (VP8/VP9) is dropped, never sent in the clear', async () => {
+  const key = await E2E.schluesselAufbauen(root);
+  const clear = new Uint8Array(64).map((_, i) => (i * 5 + 3) & 0xff);   // no start code
+  const out = [];
+  const rs = new ReadableStream({ start(c) { c.enqueue({ data: clear.buffer.slice(0), type: 'key' }); c.close(); } });
+  await E2E.spurSchuetzen(key, 'video', rs, new WritableStream({ write(f) { out.push(f); } }), 'raus');
+  assert.equal(out.length, 0, 'clear frame must not leave the sender');
+});
+
+test('web/e2e-worker.js: shares the key handle, protects frames per transform', async () => {
+  const code = fs.readFileSync(path.join(here, 'e2e-worker.js'), 'utf8');
+  const scope = { importScripts: () => {}, FreeMeetE2E: E2E };
+  scope.self = scope;
+  const calls = [];
+  scope.FreeMeetE2E = { spurSchuetzen: (...a) => calls.push(a) };
+  vm.runInNewContext(code, scope);
+  const handle = { marker: 1 };
+  scope.onmessage({ data: { key: handle } });
+  scope.onrtctransform({ transformer: { options: { art: 'video', richtung: 'raus' }, readable: 'R', writable: 'W' } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(1), ['video', 'R', 'W', 'raus']);
+  assert.equal(calls[0][0], handle);
+});
+
+test('web/e2e-worker.js: a transform arriving BEFORE the key waits for it', async () => {
+  const code = fs.readFileSync(path.join(here, 'e2e-worker.js'), 'utf8');
+  const calls = [];
+  const scope = { importScripts: () => {}, FreeMeetE2E: { spurSchuetzen: (...a) => calls.push(a) } };
+  scope.self = scope;
+  vm.runInNewContext(code, scope);
+  scope.onrtctransform({ transformer: { options: { art: 'audio', richtung: 'rein' }, readable: 'R', writable: 'W' } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls.length, 0, 'no key yet -> frames must not pass');
+  scope.onmessage({ data: { key: { k: 1 } } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls.length, 1);
 });

@@ -398,6 +398,10 @@ function spurSchuetzen(schluessel, art, lesbar, schreibbar, richtung) {
         if (richtung === 'raus') {
           const { salz, zaehler } = sender.nimm();
           if (!istTon) {
+            // Fail closed: a frame without any H.264 NAL unit (VP8/VP9 from a
+            // browser without H.264) cannot be protected by this format and
+            // would go out in the clear - drop it instead.
+            if (!nalEinheiten(daten).length) return;
             // Video: structure stays visible, only the content is encrypted.
             rahmen.data = (await schuetzenH264(schluessel, salz, zaehler, daten)).buffer;
             weiter.enqueue(rahmen);
@@ -474,16 +478,16 @@ async function schluesselAufbauen(roh) {
 /**
  * Can this browser do end-to-end at all?
  *
- * Only the legacy Insertable Streams API (createEncodedStreams, Chromium) is
- * wired up in app.js. RTCRtpScriptTransform (Firefox/Safari) needs a worker
- * that does not exist yet (state.e2eWorker is never set): answering "yes" for
- * it made those browsers show "E2E: on" and announce e2e in the join while
- * the media went out UNENCRYPTED (r62). So: no createEncodedStreams, no E2E -
- * the page then says so and the server keeps the browser out of E2E rooms.
+ * Two paths exist: the legacy Insertable Streams API (createEncodedStreams,
+ * Chromium, main thread) and RTCRtpScriptTransform (Firefox, Safari 15.4+),
+ * which app.js drives through web/e2e-worker.js. A browser with neither would
+ * announce "E2E on" and send unencrypted media (r62), so it gets "no" and the
+ * server keeps it out of E2E rooms. Workers are required for the second path.
  */
 function moeglich() {
-  return typeof RTCRtpSender !== 'undefined' &&
-    typeof RTCRtpSender.prototype.createEncodedStreams === 'function';
+  if (typeof RTCRtpSender === 'undefined') return false;
+  if (typeof RTCRtpSender.prototype.createEncodedStreams === 'function') return true;
+  return typeof RTCRtpScriptTransform !== 'undefined' && typeof Worker !== 'undefined';
 }
 
 
