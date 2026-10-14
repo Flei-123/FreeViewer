@@ -66,7 +66,7 @@ unset APPDATA ProgramData XDG_CONFIG_HOME || true
 # otherwise make node treat relay.js as an ES module. Needs the 'ws' package
 # (resolved via NODE_PATH or the JARVIS fallback inside relay.js).
 cp "$ROOT/relay/relay.js" "$D/relay.cjs"
-cp "$ROOT/relay/clientip.js" "$D/clientip.js"
+for m in clientip.js reqauth.js; do cp "$ROOT/relay/$m" "$D/$m"; done
 FV_PORT="$PORT" FV_DATA="$D/hosts.json" node "$D/relay.cjs" >"$D/relay.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 50); do
