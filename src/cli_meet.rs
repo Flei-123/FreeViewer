@@ -21,7 +21,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativAlles".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(35);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(35);
     let fvid = args
         .get(i + 5)
         .cloned()
@@ -47,7 +47,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
     println!("ALLES START {}", m.notice);
     let start = std::time::Instant::now();
     let (mut kamera_an, mut screen_on, mut frei) = (false, false, false);
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         m.pumpe();
         // Switch on one after another so that it is visible in the browser
         // WHAT is being added.
@@ -103,7 +103,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativSteuer".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let fvid = args
         .get(i + 5)
         .cloned()
@@ -121,7 +121,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
     let mut freigegeben = false;
     let mut go_back = false;
     let mut angebote = 0u32;
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
@@ -152,7 +152,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         // usual cleanup.
         if freigegeben
             && !go_back
-            && start.elapsed().as_secs() >= dauer.saturating_sub(8).max(9)
+            && start.elapsed().as_secs() >= dur.saturating_sub(8).max(9)
         {
             go_back = true;
             sig.fernsteuerung(false, "");
@@ -193,7 +193,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativAuge".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
     let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
@@ -213,7 +213,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
     let mut angeboten = false;
     let (mut kam_rahmen, mut screen_frame) = (0u64, 0u64);
     let start = std::time::Instant::now();
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -226,11 +226,11 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
                 meetsig::Ereignis::Spur {
                     mid,
                     peer,
-                    bildschirm,
+                    display,
                     art,
                 } => {
-                    ton.spur_art(mid, *peer, *bildschirm);
-                    println!("SPUR mid={} peer={} art={} bildschirm={}", mid, peer, art, bildschirm);
+                    ton.spur_art(mid, *peer, *display);
+                    println!("SPUR mid={} peer={} art={} bildschirm={}", mid, peer, art, display);
                 }
                 meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
                     ton.antwort(sdp);
@@ -249,12 +249,12 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
         for te in ton.abholen() {
             if let meetrtc::TonEreignis::Bild {
                 quelle,
-                bildschirm,
+                display,
                 daten,
                 ..
             } = te
             {
-                if bildschirm {
+                if display {
                     screen_frame += 1;
                     schirme.rahmen(quelle, &daten);
                 } else {
@@ -302,23 +302,23 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativSchirm".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let nr: usize = args.get(i + 5).and_then(|s| s.parse().ok()).unwrap_or(0);
     for (n, m) in meetschirm::liste().iter().enumerate() {
         println!(
             "SCHIRM {} name={} {}x{} primaer={}",
-            n, m.name, m.breite, m.hoehe, m.primaer
+            n, m.name, m.width_px, m.height_px, m.primaer
         );
     }
-    let auf = match meetschirm::oeffnen(nr, 1920, 1080, 15) {
+    let auf = match meetschirm::open(nr, 1920, 1080, 15) {
         Ok(a) => a,
         Err(e) => {
             println!("SCHIRMTEST FEHLER Aufnahme: {}", e);
             return Ok(());
         }
     };
-    println!("SCHIRM OFFEN {} {}x{}", auf.name, auf.breite, auf.hoehe);
-    let mut koder = match meetvideo::Kodierer::neu(auf.breite, auf.hoehe, 15, 3_500_000) {
+    println!("SCHIRM OFFEN {} {}x{}", auf.name, auf.width_px, auf.height_px);
+    let mut koder = match meetvideo::Kodierer::neu(auf.width_px, auf.height_px, 15, 3_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("SCHIRMTEST FEHLER Kodierer: {}", e);
@@ -347,8 +347,8 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
     let mut vorbild: Vec<u8> = Vec::new();
     let start = std::time::Instant::now();
     let mut naechstes = std::time::Instant::now();
-    let mut schluessel = std::time::Instant::now();
-    while start.elapsed().as_secs() < dauer {
+    let mut last_keyframe = std::time::Instant::now();
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -391,7 +391,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         if std::time::Instant::now() >= naechstes {
             naechstes += std::time::Duration::from_millis(66);
             if let Some(b) = auf.neuestes() {
-                let y = &b.nv12[..(b.breite * b.hoehe) as usize];
+                let y = &b.nv12[..(b.width_px * b.height_px) as usize];
                 hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
                 if vorbild.len() == y.len() {
                     let d: f64 = y
@@ -403,8 +403,8 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
                     bewegung += d;
                 }
                 vorbild = y.to_vec();
-                if schluessel.elapsed() >= std::time::Duration::from_secs(4) {
-                    schluessel = std::time::Instant::now();
+                if last_keyframe.elapsed() >= std::time::Duration::from_secs(4) {
+                    last_keyframe = std::time::Instant::now();
                     koder.schluesselbild();
                 }
                 gesendet += 1;
@@ -425,8 +425,8 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
     println!(
         "ZAHLEN schirm={} groesse={}x{} aufgenommen={} verwendet={} kodiert={} pakete={} schirm_gesendet={} bild_empfangen={} bytes_raus={} helligkeit={:.1} bewegung={:.2} fehler={}",
         auf.name,
-        auf.breite,
-        auf.hoehe,
+        auf.width_px,
+        auf.height_px,
         auf.aufgenommen(),
         gesendet,
         koder.bilder,
@@ -436,7 +436,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         z.bytes_raus,
         if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
         if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
-        auf.fehler()
+        auf.error()
     );
     auf.stoppen();
     sig.roh(serde_json::json!({"t":"screen","on":false}));
@@ -458,20 +458,20 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativKamera".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let welche = args.get(i + 5).cloned().filter(|s| !s.is_empty());
     for (n, k) in meetcam::liste().iter().enumerate() {
         println!("KAMERA {} name={}", n, k.name);
     }
-    let kam = match meetcam::oeffnen(welche, meetvideo::WIDTH, meetvideo::HEIGHT, 30) {
+    let kam = match meetcam::open(welche, meetvideo::WIDTH, meetvideo::HEIGHT, 30) {
         Ok(k) => k,
         Err(e) => {
             println!("KAMERATEST FEHLER Kamera: {}", e);
             return Ok(());
         }
     };
-    println!("KAMERA OFFEN name={} {}x{}", kam.name, kam.breite, kam.hoehe);
-    let mut koder = match meetvideo::Kodierer::neu(kam.breite, kam.hoehe, 15, 1_500_000) {
+    println!("KAMERA OFFEN name={} {}x{}", kam.name, kam.width_px, kam.height_px);
+    let mut koder = match meetvideo::Kodierer::neu(kam.width_px, kam.height_px, 15, 1_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("KAMERATEST FEHLER Kodierer: {}", e);
@@ -502,7 +502,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
     let mut vorbild: Vec<u8> = Vec::new();
     let start = std::time::Instant::now();
     let mut naechstes = std::time::Instant::now();
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -535,7 +535,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         if std::time::Instant::now() >= naechstes {
             naechstes += std::time::Duration::from_millis(66);
             if let Some(b) = kam.neuestes() {
-                let y = &b.nv12[..(b.breite * b.hoehe) as usize];
+                let y = &b.nv12[..(b.width_px * b.height_px) as usize];
                 hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
                 if vorbild.len() == y.len() {
                     let d: f64 = y
@@ -574,7 +574,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         z.bytes_raus,
         if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
         if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
-        kam.fehler()
+        kam.error()
     );
     kam.stoppen();
     ton.finish();
@@ -592,7 +592,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
     let raum = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativBild".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let mut koder = match meetvideo::Kodierer::neu(
         meetvideo::WIDTH,
         meetvideo::HEIGHT,
@@ -624,7 +624,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
     let mut pakete: u64 = 0;
     let start = std::time::Instant::now();
     let mut naechstes = std::time::Instant::now();
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -690,7 +690,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
     let raum = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativMikro".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
     let (ein_liste, aus_liste) = meetaudio::geraete_liste();
     println!("MIKROFONE {:?}", ein_liste);
     println!("LAUTSPRECHER {:?}", aus_liste);
@@ -720,7 +720,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
     let start = std::time::Instant::now();
     let mut mikro_rahmen: u64 = 0;
     let mut mikro_pegel = 0.0f32;
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -789,7 +789,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
     let raum = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativTon".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(20);
     let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
@@ -816,7 +816,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
         .unwrap_or(0);
     let mut geschwallt = false;
     let mut stau_max: u32 = 0;
-    while start.elapsed().as_secs() < dauer {
+    while start.elapsed().as_secs() < dur {
         for e in sig.abholen() {
             match &e {
                 meetsig::Ereignis::Willkommen { .. } => {
@@ -855,14 +855,14 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
                 meetrtc::TonEreignis::Rahmen { .. } => {}
                 meetrtc::TonEreignis::Bild {
                     quelle,
-                    bildschirm,
+                    display,
                     daten,
                     schluesselbild,
                     codec,
                 } => {
                     println!(
                         "EREIGNIS {} von {} ({} Bytes, {}{})",
-                        if bildschirm { "Bildschirm" } else { "Bild" },
+                        if display { "Bildschirm" } else { "Bild" },
                         quelle,
                         daten.len(),
                         codec,
@@ -920,12 +920,12 @@ pub(crate) fn cli_meettest(i: usize) -> eframe::Result<()> {
     let raum = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "Nativ".to_string());
-    let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(12);
+    let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(12);
     match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
         Ok(s) => {
             let start = std::time::Instant::now();
             let mut chat_geschickt = false;
-            while start.elapsed().as_secs() < dauer {
+            while start.elapsed().as_secs() < dur {
                 for e in s.abholen() {
                     println!("EREIGNIS {:?}", e);
                     // In the test we let waiting people in immediately so that the path

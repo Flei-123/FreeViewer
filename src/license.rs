@@ -157,7 +157,7 @@ fn b32_decode(s: &str) -> Option<Vec<u8>> {
 
 // ------------------------------------------------------------- signatur ---
 
-/// Nachricht bauen: "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8.
+/// Nachricht bauen: "XRL1" || name-len u8 || name || ablauf u32 LE || output u8.
 fn message(name: &str, expires: u32, edition: u8) -> Option<Vec<u8>> {
     let n = name.trim();
     if n.is_empty() || n.len() > 60 {

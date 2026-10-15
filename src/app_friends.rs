@@ -495,7 +495,7 @@ if let Some(path) = self.shot.clone() {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui.button("Entfernen").clicked() {
-                                        if let Err(e) = d.entfernen(&fr.schluessel()) {
+                                        if let Err(e) = d.entfernen(&fr.entry_key()) {
                                             self.friends_notice = format!("{}", e);
                                         }
                                     }

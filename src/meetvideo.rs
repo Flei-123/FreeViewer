@@ -18,16 +18,16 @@ pub const HEIGHT: u32 = 360;
 
 /// Erzeugt Bilder in RGB (3 Bytes je Punkt).
 pub struct Muster {
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     schritt: u32,
 }
 
 impl Muster {
-    pub fn neu(breite: u32, hoehe: u32) -> Muster {
+    pub fn neu(width_px: u32, height_px: u32) -> Muster {
         Muster {
-            breite,
-            hoehe,
+            width_px,
+            height_px,
             schritt: 0,
         }
     }
@@ -36,7 +36,7 @@ impl Muster {
     /// left to right. This way the cross-check shows at once whether
     /// something really moves and not just a still image arriving.
     pub fn naechstes(&mut self) -> Vec<u8> {
-        let (w, h) = (self.breite as usize, self.hoehe as usize);
+        let (w, h) = (self.width_px as usize, self.height_px as usize);
         let mut rgb = vec![0u8; w * h * 3];
         let versatz = (self.schritt * 4) as usize;
         for y in 0..h {
@@ -77,20 +77,20 @@ impl Muster {
 pub struct Kodierer {
     enc: crate::h264::Encoder,
     nv12: Vec<u8>,
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     pub bilder: u64,
 }
 
 impl Kodierer {
-    pub fn neu(breite: u32, hoehe: u32, fps: u32, bitrate: u32) -> Result<Kodierer> {
-        let enc = crate::h264::Encoder::new(breite, hoehe, fps, bitrate)
+    pub fn neu(width_px: u32, height_px: u32, fps: u32, bitrate: u32) -> Result<Kodierer> {
+        let enc = crate::h264::Encoder::new(width_px, height_px, fps, bitrate)
             .map_err(|e| anyhow!("H.264-Kodierer: {}", e))?;
         Ok(Kodierer {
             enc,
             nv12: Vec::new(),
-            breite,
-            hoehe,
+            width_px,
+            height_px,
             bilder: 0,
         })
     }
@@ -98,7 +98,7 @@ impl Kodierer {
     /// Feed in a finished NV12 image (as the camera delivers it) -
     /// saves the RGB->NV12 conversion completely.
     pub fn nv12_rahmen(&mut self, nv12: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
-        let erwartet = (self.breite as usize) * (self.hoehe as usize) * 3 / 2;
+        let erwartet = (self.width_px as usize) * (self.height_px as usize) * 3 / 2;
         if nv12.len() < erwartet {
             return Err(anyhow!(
                 "NV12 zu klein: {} statt {}",
@@ -123,7 +123,7 @@ impl Kodierer {
 
     /// Ein RGB-Bild hineingeben, fertige H.264-Pakete herausbekommen.
     pub fn rahmen(&mut self, rgb: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
-        crate::h264::rgb_to_nv12(rgb, self.breite, self.hoehe, &mut self.nv12);
+        crate::h264::rgb_to_nv12(rgb, self.width_px, self.height_px, &mut self.nv12);
         let aus = self
             .enc
             .encode(&self.nv12)
@@ -138,7 +138,7 @@ impl Kodierer {
 /// decoder per participant, because each can send a different size.
 pub struct Dekodierer {
     leute: std::collections::HashMap<u64, crate::h264::Decoder>,
-    /// Letztes fertiges Bild je Participant: (Breite, Hoehe, RGBA).
+    /// Letztes fertiges Bild je Participant: (Width, Hoehe, RGBA).
     pub bilder: std::collections::HashMap<u64, (u32, u32, Vec<u8>)>,
     pub gezaehlt: u64,
     pub last_error: String,

@@ -26,7 +26,7 @@
 //! a friend can have several PCs (`geraete`), or none at all - then
 //! `fvid` is empty and they are addressed via `person` (account ID) or
 //! `@handle`. Without an account everything stays on the FreeViewer ID as before.
-//! The key of an entry is therefore `schluessel()`: the number,
+//! The key of an entry is therefore `entry_key()`: the number,
 //! otherwise "k:<person>", otherwise "@handle" - the relay understands exactly that too.
 //!
 //! The client identifies itself exactly as with the WebSocket login
@@ -75,9 +75,10 @@ pub struct Friend {
     /// Is the friend reachable right now? Comes from the relay.
     #[serde(default)]
     pub online: bool,
-    /// Zuletzt gesehen, unix MILLIsekunden (wie in `presence.rs`).
+    /// Zuletzt seen, unix MILLIsekunden (wie in `presence.rs`).
     #[serde(default)]
-    pub gesehen: u64,
+    #[serde(rename = "gesehen")]
+    pub seen: u64,
     /// Account ID of the person in the address book (empty = friend only via ID).
     #[serde(default)]
     pub person: String,
@@ -101,7 +102,8 @@ pub struct FriendDevice {
     #[serde(default)]
     pub online: bool,
     #[serde(default)]
-    pub gesehen: u64,
+    #[serde(rename = "gesehen")]
+    pub seen: u64,
 }
 
 /// Number, otherwise "k:<person>", otherwise "@handle" - the key the
@@ -145,7 +147,7 @@ impl Friend {
         }
     }
 
-    pub fn schluessel(&self) -> String {
+    pub fn entry_key(&self) -> String {
         key_from(&self.fvid, &self.person, &self.handle)
     }
 
@@ -166,7 +168,7 @@ impl Friend {
         if self.online {
             "online".to_string()
         } else {
-            crate::presence::ago_ms(self.gesehen)
+            crate::presence::ago_ms(self.seen)
         }
     }
 
@@ -265,7 +267,7 @@ pub struct Blockiert {
 }
 
 impl Blockiert {
-    pub fn schluessel(&self) -> String {
+    pub fn entry_key(&self) -> String {
         key_from(&self.fvid, &self.person, &self.handle)
     }
 
@@ -326,7 +328,7 @@ impl std::error::Error for FriendError {}
 /// What a background run reports back to the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
-    /// Abgleich fertig: so viele Friends, so viele offene Anfragen.
+    /// Abgleich done: so viele Friends, so viele offene Anfragen.
     Abgeglichen { friends: usize, offen: usize },
     /// Request has arrived at the relay.
     Angefragt(String),
@@ -644,7 +646,7 @@ impl Buch {
             name: a.name,
             seit: jetzt(),
             online: a.online,
-            gesehen: 0,
+            seen: 0,
             person: a.person,
             handle: a.handle,
             geraete: Vec::new(),
@@ -753,9 +755,9 @@ impl Buch {
         }
         // A friend from the address book may also stand there WITHOUT a PC - then
         // they are carried by their account (person) or their @name.
-        neu.friends.retain(|f| !f.schluessel().is_empty());
+        neu.friends.retain(|f| !f.entry_key().is_empty());
         neu.anfragen.retain(|a| !a.gegenueber().is_empty());
-        neu.blockiert.retain(|b| !b.schluessel().is_empty());
+        neu.blockiert.retain(|b| !b.entry_key().is_empty());
         neu.kuerzen();
         let anders = neu.friends != self.friends
             || neu.anfragen != self.anfragen
@@ -876,8 +878,8 @@ fn ausweis(geheimnis: &str, token: &str, name: &str) -> serde_json::Value {
     v
 }
 
-fn mit(mut v: serde_json::Value, schluessel: &str, wert: &str) -> serde_json::Value {
-    v[schluessel] = serde_json::Value::String(wert.to_string());
+fn mit(mut v: serde_json::Value, json_key: &str, wert: &str) -> serde_json::Value {
+    v[json_key] = serde_json::Value::String(wert.to_string());
     v
 }
 
@@ -1761,7 +1763,7 @@ mod tests {
                 name: "Laptop".into(),
                 seit: 1_700_000_000,
                 online: true,
-                gesehen: 1_700_000_000_000,
+                seen: 1_700_000_000_000,
                 ..Default::default()
             }],
             eingehend: vec![eingehend("333333333", "Handy")],
@@ -1920,7 +1922,7 @@ mod tests {
         let carla = b.friend("k:u_CARLA").expect("Carla fehlt");
         assert!(!carla.hat_pc());
         assert!(!carla.erreichbar());
-        assert_eq!(carla.schluessel(), "k:u_CARLA");
+        assert_eq!(carla.entry_key(), "k:u_CARLA");
         // requests without a PC number stay, via the account
         assert_eq!(b.eingehende().len(), 1);
         assert_eq!(b.eingehende()[0].gegenueber(), "k:u_EMIL");
@@ -2017,7 +2019,7 @@ mod tests {
         let mut b = buch_mit_mir("111111111");
         b.uebernehmen(&s);
         assert!(b.is_friend("222222222"));
-        assert_eq!(b.friends[0].schluessel(), "222222222");
+        assert_eq!(b.friends[0].entry_key(), "222222222");
         assert!(b.ist_blockiert("333333333"));
     }
 
@@ -2033,7 +2035,7 @@ mod tests {
                     fvid: id.to_string(),
                     label: String::new(),
                     online: *on,
-                    gesehen: 0,
+                    seen: 0,
                 })
                 .collect(),
             ..Default::default()

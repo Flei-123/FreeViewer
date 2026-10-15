@@ -71,13 +71,13 @@ fn main() {
             let sk = SigningKey::from_bytes(&b);
             let n = name.trim();
             assert!(!n.is_empty() && n.len() <= 60, "Name: 1-60 Zeichen");
-            // Nachricht: "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8
+            // Nachricht: "XRL1" || name-len u8 || name || ablauf u32 LE || output u8
             let mut msg = Vec::new();
             msg.extend_from_slice(b"XRL1");
             msg.push(n.len() as u8);
             msg.extend_from_slice(n.as_bytes());
             msg.extend_from_slice(&expires.to_le_bytes());
-            msg.push(0u8); // Ausgabe 0 = Pro
+            msg.push(0u8); // Output 0 = Pro
             let sig = sk.sign(&msg);
             msg.extend_from_slice(&sig.to_bytes());
             println!("{}", b32_encode(&msg));

@@ -29,8 +29,8 @@ pub struct Fenster {
     pub titel: String,
     /// Name of the program without path and extension ("firefox", "excel").
     pub programm: String,
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
 }
 
 /// All sensibly shareable windows, topmost first.
@@ -45,10 +45,10 @@ pub fn liste() -> Vec<Fenster> {
     }
 }
 
-/// Aufnahme eines einzelnen Fensters oeffnen.
+/// Aufnahme eines einzelnen Fensters open.
 #[cfg(windows)]
 pub fn aufnahme(kennung: isize) -> Option<Box<dyn crate::capture::Backend>> {
-    win::FensterCap::neu(kennung).ok().map(|c| {
+    win::WindowCap::neu(kennung).ok().map(|c| {
         let b: Box<dyn crate::capture::Backend> = Box::new(c);
         b
     })
@@ -70,7 +70,7 @@ impl Rahmen {
     pub fn zeigen(x: i32, y: i32, b: i32, h: i32) -> Rahmen {
         #[cfg(windows)]
         {
-            win::rahmen_starten(x, y, b, h)
+            win::start_frame(x, y, b, h)
         }
         #[cfg(not(windows))]
         {
@@ -100,7 +100,7 @@ impl Drop for Rahmen {
     }
 }
 
-/// Wo liegt dieses Fenster gerade? (x, y, Breite, Hoehe) in Bildpunkten.
+/// Wo liegt dieses Fenster gerade? (x, y, Width, Hoehe) in Bildpunkten.
 pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
     #[cfg(windows)]
     {
@@ -149,7 +149,7 @@ mod win {
     // therefore valid, properly aligned and not aliased by anything else during the call.
     unsafe extern "system" fn sammeln(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
         let s = &mut *(lp.0 as *mut Sammler);
-        if let Some(f) = pruefen(hwnd, s.eigen) {
+        if let Some(f) = check(hwnd, s.eigen) {
             s.raus.push(f);
         }
         true.into()
@@ -164,7 +164,7 @@ mod win {
     /// list: invisible helper windows, minimised programs, the empty
     /// shells of UWP applications and - important - our OWN window
     /// (sharing that would create a hall-of-mirrors effect).
-    unsafe fn pruefen(hwnd: HWND, eigen: u32) -> Option<Fenster> {
+    unsafe fn check(hwnd: HWND, eigen: u32) -> Option<Fenster> {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return None;
         }
@@ -208,8 +208,8 @@ mod win {
             kennung: hwnd.0 as isize,
             titel,
             programm: programmname(pid),
-            breite: b as u32,
-            hoehe: h as u32,
+            width_px: b as u32,
+            height_px: h as u32,
         })
     }
 
@@ -305,7 +305,7 @@ mod win {
     // -------------------------------------------------------------- aufnehmen
 
     /// Aufnahme eines Fensters ueber `PrintWindow`.
-    pub struct FensterCap {
+    pub struct WindowCap {
         hwnd: HWND,
         mem: HDC,
         bmp: HBITMAP,
@@ -322,18 +322,18 @@ mod win {
         rand_y: i32,
     }
 
-    impl FensterCap {
+    impl WindowCap {
         pub fn neu(kennung: isize) -> Result<Self> {
             let hwnd = HWND(kennung as *mut core::ffi::c_void);
             // SAFETY: the window handle is only validated with IsWindow before use. `c` is fully
-            // initialised with null/default GDI handles before `flaeche_bauen` runs, so `Drop` is
+            // initialised with null/default GDI handles before `build_area` runs, so `Drop` is
             // safe on every error path. All pointers used inside the callees are locals.
             unsafe {
                 if !IsWindow(hwnd).as_bool() {
                     return Err(anyhow!("das Fenster gibt es nicht mehr"));
                 }
                 let (_, _, b, h) = rahmen_rect(hwnd).ok_or_else(|| anyhow!("Fenster ohne Groesse"))?;
-                let mut c = FensterCap {
+                let mut c = WindowCap {
                     hwnd,
                     mem: HDC::default(),
                     bmp: HBITMAP::default(),
@@ -346,14 +346,14 @@ mod win {
                     rand_x: 0,
                     rand_y: 0,
                 };
-                c.flaeche_bauen(b as u32, h as u32)?;
+                c.build_area(b as u32, h as u32)?;
                 Ok(c)
             }
         }
 
         // SAFETY: caller contract: `&mut self` gives exclusive access, and the capture thread that
         // owns this backend must be the one calling. The previous bitmap and DC are freed first via
-        // `flaeche_freigeben`, which resets the handles, so nothing is freed twice. The screen DC
+        // `release_area`, which resets the handles, so nothing is freed twice. The screen DC
         // from GetDC is released on every path, `info` and `bits` are locals that outlive
         // CreateDIBSection, and `bits` points to a top-down 32 bpp section of `b * h * 4` bytes
         // which stays valid until `bmp` is deleted. `self.buf` is allocated with exactly the same
@@ -361,14 +361,14 @@ mod win {
         /// Create a memory bitmap in the new size. Called anew on every
         /// size change of the window - otherwise the image would be cut off
         /// after the first drag at the corner.
-        unsafe fn flaeche_bauen(&mut self, b: u32, h: u32) -> Result<()> {
+        unsafe fn build_area(&mut self, b: u32, h: u32) -> Result<()> {
             let b = b.max(2);
             let h = h.max(2);
-            self.flaeche_freigeben();
-            let bildschirm = GetDC(HWND::default());
-            let mem = CreateCompatibleDC(bildschirm);
+            self.release_area();
+            let display = GetDC(HWND::default());
+            let mem = CreateCompatibleDC(display);
             if mem.is_invalid() {
-                ReleaseDC(HWND::default(), bildschirm);
+                ReleaseDC(HWND::default(), display);
                 return Err(anyhow!("kein Speicher-DC"));
             }
             let mut info = BITMAPINFO::default();
@@ -383,8 +383,8 @@ mod win {
                 ..Default::default()
             };
             let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let bmp = CreateDIBSection(bildschirm, &info, DIB_RGB_COLORS, &mut bits, None, 0);
-            ReleaseDC(HWND::default(), bildschirm);
+            let bmp = CreateDIBSection(display, &info, DIB_RGB_COLORS, &mut bits, None, 0);
+            ReleaseDC(HWND::default(), display);
             let bmp = match bmp {
                 Ok(b) => b,
                 Err(e) => {
@@ -407,7 +407,7 @@ mod win {
         // after, so a second call is a no-op, and `bits` (which points into the freed section) is
         // set to null. Known nit: the bitmap is still selected into `mem` when it is deleted, so
         // DeleteObject can fail and leak the bitmap (see roadmap); no dangling use results.
-        unsafe fn flaeche_freigeben(&mut self) {
+        unsafe fn release_area(&mut self) {
             if !self.bmp.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(self.bmp.0));
                 self.bmp = HBITMAP::default();
@@ -420,10 +420,10 @@ mod win {
         }
     }
 
-    impl crate::capture::Backend for FensterCap {
+    impl crate::capture::Backend for WindowCap {
         fn next(&mut self, _timeout_ms: u32) -> crate::capture::Next {
             // SAFETY: all handles used here (`self.hwnd`, `self.mem`) are either validated
-            // (IsWindow) or owned by this backend (created in `flaeche_bauen`). `aussen` is a local
+            // (IsWindow) or owned by this backend (created in `build_area`). `aussen` is a local
             // RECT. The DIB section is rebuilt whenever the window size changes, so `self.bits`
             // always points to `self.w * self.h * 4` readable bytes (checked non-null) and
             // `self.buf` has exactly that length; the copy is therefore in bounds for both and the
@@ -453,7 +453,7 @@ mod win {
                     self.rand_y = 0;
                 }
                 if b as u32 != self.w || h as u32 != self.h {
-                    if self.flaeche_bauen(b as u32, h as u32).is_err() {
+                    if self.build_area(b as u32, h as u32).is_err() {
                         return crate::capture::Next::Lost;
                     }
                 }
@@ -510,12 +510,12 @@ mod win {
         }
     }
 
-    impl Drop for FensterCap {
+    impl Drop for WindowCap {
         fn drop(&mut self) {
             // SAFETY: Drop runs once and nothing uses the backend afterwards, so freeing its bitmap
-            // and DC here is the matching cleanup for `flaeche_bauen` (the function resets the
+            // and DC here is the matching cleanup for `build_area` (the function resets the
             // handles, so it is also safe if they were never created).
-            unsafe { self.flaeche_freigeben() }
+            unsafe { self.release_area() }
         }
     }
 
@@ -535,7 +535,7 @@ mod win {
         DefWindowProcW(h, m, w, l)
     }
 
-    pub fn rahmen_starten(x: i32, y: i32, b: i32, h: i32) -> Rahmen {
+    pub fn start_frame(x: i32, y: i32, b: i32, h: i32) -> Rahmen {
         let ziel = Arc::new(Mutex::new(Some((x, y, b, h))));
         let z2 = ziel.clone();
         let _ = std::thread::Builder::new()
@@ -640,7 +640,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ohne_fenster_bleibt_die_liste_leer_statt_zu_luegen() {
+    fn without_windows_list_stays_empty_instead_of_lying() {
         // On the build server (Linux, no screen) nothing made-up
         // may stand here - a made-up window list would be worse
         // than an empty one.
@@ -652,7 +652,7 @@ mod tests {
             // Eintraege enthalten.
             for f in liste() {
                 assert!(f.kennung != 0, "Fenster ohne Kennung");
-                assert!(f.breite >= 120 && f.hoehe >= 80, "Zwergfenster in der Liste");
+                assert!(f.width_px >= 120 && f.height_px >= 80, "Zwergfenster in der Liste");
             }
         }
     }

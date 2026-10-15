@@ -28,8 +28,8 @@ pub struct Geraet {
 /// A frame in tightly packed NV12 (Y plane, then interleaved UV).
 #[derive(Clone)]
 pub struct Bild {
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     pub nv12: Vec<u8>,
 }
 
@@ -92,7 +92,7 @@ pub fn echte_groesse(len: usize, stride: usize, w: u32, h: u32) -> Option<(u32, 
         return None;
     }
     if zeilen as usize == hu {
-        return Some((w, h)); // Meldung und Puffer passen zusammen
+        return Some((w, h)); // Notice und Puffer passen zusammen
     }
     // MORE rows than reported -> the media type lied. Then the
     // row stride is also the real width (cameras deliver NV12 without
@@ -159,7 +159,7 @@ pub fn nv12_zuschneiden_skalieren(
             }
         }
         // Colour: already at half resolution, so 2x2 colour pairs.
-        let sw2 = swu; // Bytes je Farbzeile = Breite (je Punktpaar U und V)
+        let sw2 = swu; // Bytes je Farbzeile = Width (je Punktpaar U und V)
         let (cx2, cy2) = (cx / 2, cy / 2);
         for ty in 0..zhu / 2 {
             let z0 = uv_src + (cy2 + ty * 2) * sw2 + cx2 * 2;
@@ -227,12 +227,12 @@ pub fn nv12_zuschneiden_skalieren(
 /// Runs in the background and keeps the newest camera frame ready.
 pub struct Kamera {
     pub name: String,
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     neu: Arc<Mutex<Option<Bild>>>,
-    zaehler: Arc<AtomicU64>,
+    ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    fehler: Arc<Mutex<String>>,
+    error: Arc<Mutex<String>>,
 }
 
 impl Kamera {
@@ -244,11 +244,11 @@ impl Kamera {
 
     /// How many frames the camera has delivered so far.
     pub fn aufgenommen(&self) -> u64 {
-        self.zaehler.load(Ordering::Relaxed)
+        self.ctr.load(Ordering::Relaxed)
     }
 
-    pub fn fehler(&self) -> String {
-        self.fehler.lock().map(|f| f.clone()).unwrap_or_default()
+    pub fn error(&self) -> String {
+        self.error.lock().map(|f| f.clone()).unwrap_or_default()
     }
 
     pub fn stoppen(&self) {
@@ -294,21 +294,21 @@ pub fn liste() -> Vec<Geraet> {
 }
 
 /// Open the camera. `id` empty = first camera. What is always delivered is exactly
-/// `breite` x `hoehe` in NV12.
-pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<Kamera> {
-    let breite = breite & !1;
-    let hoehe = hoehe & !1;
-    if breite < 2 || hoehe < 2 {
+/// `width_px` x `height_px` in NV12.
+pub fn open(id: Option<String>, width_px: u32, height_px: u32, fps: u32) -> Result<Kamera> {
+    let width_px = width_px & !1;
+    let height_px = height_px & !1;
+    if width_px < 2 || height_px < 2 {
         return Err(anyhow!("unsinnige Bildgroesse"));
     }
     #[cfg(windows)]
     {
         let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
-        let zaehler = Arc::new(AtomicU64::new(0));
+        let ctr = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let fehler = Arc::new(Mutex::new(String::new()));
+        let error = Arc::new(Mutex::new(String::new()));
         let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
-        let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+        let (n2, z2, s2, f2) = (neu.clone(), ctr.clone(), stop.clone(), error.clone());
         // If the id carries the DirectShow prefix, it belongs to a
         // source that Media Foundation does not know at all (OBS & co.).
         let ueber_dshow = id
@@ -318,21 +318,21 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
             .name("kamera".into())
             .spawn(move || {
                 if ueber_dshow {
-                    crate::camdshow::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2)
+                    crate::camdshow::schleife(id, width_px, height_px, fps, tx, n2, z2, s2, f2)
                 } else {
-                    win::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2)
+                    win::schleife(id, width_px, height_px, fps, tx, n2, z2, s2, f2)
                 }
             })
             .map_err(|e| anyhow!("Kamerafaden: {}", e))?;
         match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Ok(name)) => Ok(Kamera {
                 name,
-                breite,
-                hoehe,
+                width_px,
+                height_px,
                 neu,
-                zaehler,
+                ctr,
                 stop,
-                fehler,
+                error,
             }),
             Ok(Err(e)) => Err(anyhow!(e)),
             Err(_) => {
@@ -344,24 +344,24 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
     #[cfg(target_os = "macos")]
     {
         let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
-        let zaehler = Arc::new(AtomicU64::new(0));
+        let ctr = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let fehler = Arc::new(Mutex::new(String::new()));
+        let error = Arc::new(Mutex::new(String::new()));
         let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
-        let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+        let (n2, z2, s2, f2) = (neu.clone(), ctr.clone(), stop.clone(), error.clone());
         std::thread::Builder::new()
             .name("kamera".into())
-            .spawn(move || mac::schleife(id, breite, hoehe, fps, tx, n2, z2, s2, f2))
+            .spawn(move || mac::schleife(id, width_px, height_px, fps, tx, n2, z2, s2, f2))
             .map_err(|e| anyhow!("Kamerafaden: {}", e))?;
         match rx.recv_timeout(std::time::Duration::from_secs(15)) {
             Ok(Ok(name)) => Ok(Kamera {
                 name,
-                breite,
-                hoehe,
+                width_px,
+                height_px,
                 neu,
-                zaehler,
+                ctr,
                 stop,
-                fehler,
+                error,
             }),
             Ok(Err(e)) => Err(anyhow!(e)),
             Err(_) => {
@@ -428,16 +428,16 @@ pub fn rgb_nach_nv12(rgb: &[u8], sb: u32, sh: u32, zb: u32, zh: u32, out: &mut V
 }
 
 
-/// Camera diagnostics (Windows only). Writes cam-roh.png / cam-fertig.png
-/// to `ordner` and returns the measurement report as text.
-pub fn diagnose(id: Option<String>, breite: u32, hoehe: u32, fps: u32, ordner: &str) -> String {
+/// Camera diagnostics (Windows only). Writes cam-roh.png / cam-done.png
+/// to `dir` and returns the measurement report as text.
+pub fn diagnose(id: Option<String>, width_px: u32, height_px: u32, fps: u32, dir: &str) -> String {
     #[cfg(windows)]
     {
-        win::diagnose(id, breite & !1, hoehe & !1, fps, ordner)
+        win::diagnose(id, width_px & !1, height_px & !1, fps, dir)
     }
     #[cfg(not(windows))]
     {
-        let _ = (id, breite, hoehe, fps, ordner);
+        let _ = (id, width_px, height_px, fps, dir);
         "Kamera-Diagnose gibt es nur unter Windows".to_string()
     }
 }
@@ -476,14 +476,14 @@ mod mac {
     #[allow(clippy::too_many_arguments)]
     pub fn schleife(
         id: Option<String>,
-        breite: u32,
-        hoehe: u32,
+        width_px: u32,
+        height_px: u32,
         fps: u32,
         tx: std::sync::mpsc::Sender<std::result::Result<String, String>>,
         neu: Arc<Mutex<Option<Bild>>>,
-        zaehler: Arc<AtomicU64>,
+        ctr: Arc<AtomicU64>,
         stop: Arc<AtomicBool>,
-        fehler: Arc<Mutex<String>>,
+        error: Arc<Mutex<String>>,
     ) {
         // Which camera? Without a specification the first one.
         //
@@ -517,7 +517,7 @@ mod mac {
         // Closest setting to the wanted size and frame rate. NV12 is
         // what cameras can do most often; nokhwa converts if necessary.
         let wunsch = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
-            CameraFormat::new(Resolution::new(breite, hoehe), FrameFormat::NV12, fps),
+            CameraFormat::new(Resolution::new(width_px, height_px), FrameFormat::NV12, fps),
         ));
         let mut kamera = match Camera::new(welche, wunsch) {
             Ok(k) => k,
@@ -536,8 +536,8 @@ mod mac {
             kamera.info().human_name(),
             auf.width(),
             auf.height(),
-            breite,
-            hoehe
+            width_px,
+            height_px
         );
         if tx.send(Ok(name)).is_err() {
             return;
@@ -547,7 +547,7 @@ mod mac {
             let rahmen = match kamera.frame() {
                 Ok(r) => r,
                 Err(e) => {
-                    if let Ok(mut f) = fehler.lock() {
+                    if let Ok(mut f) = error.lock() {
                         *f = format!("Kamera liefert nichts: {}", e);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -557,21 +557,21 @@ mod mac {
             let bild = match rahmen.decode_image::<RgbFormat>() {
                 Ok(b) => b,
                 Err(e) => {
-                    if let Ok(mut f) = fehler.lock() {
+                    if let Ok(mut f) = error.lock() {
                         *f = format!("Bild nicht lesbar: {}", e);
                     }
                     continue;
                 }
             };
             let (sb, sh) = (bild.width(), bild.height());
-            if !rgb_nach_nv12(bild.as_raw(), sb, sh, breite, hoehe, &mut nv12) {
+            if !rgb_nach_nv12(bild.as_raw(), sb, sh, width_px, height_px, &mut nv12) {
                 continue;
             }
-            zaehler.fetch_add(1, Ordering::Relaxed);
+            ctr.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut b) = neu.lock() {
                 *b = Some(Bild {
-                    breite,
-                    hoehe,
+                    width_px,
+                    height_px,
                     nv12: nv12.clone(),
                 });
             }
@@ -608,14 +608,14 @@ mod win {
         ((a as u64) << 32) | b as u64
     }
 
-    // SAFETY: caller contract: `a` is a live IMFActivate and `schluessel` a valid GUID reference.
+    // SAFETY: caller contract: `a` is a live IMFActivate and `guid_key` a valid GUID reference.
     // `p` and `len` are local out-slots. On success GetAllocatedString returns a NUL-terminated
     // CoTaskMem string that we own: it is copied into a Rust String and freed exactly once with
     // CoTaskMemFree.
-    unsafe fn text(a: &IMFActivate, schluessel: &GUID) -> String {
+    unsafe fn text(a: &IMFActivate, guid_key: &GUID) -> String {
         let mut p = PWSTR::null();
         let mut len = 0u32;
-        if a.GetAllocatedString(schluessel, &mut p, &mut len).is_err() {
+        if a.GetAllocatedString(guid_key, &mut p, &mut len).is_err() {
             return String::new();
         }
         let s = p.to_string().unwrap_or_default();
@@ -696,9 +696,9 @@ mod win {
         fps: u32,
         tx: std::sync::mpsc::Sender<std::result::Result<String, String>>,
         neu: Arc<Mutex<Option<Bild>>>,
-        zaehler: Arc<AtomicU64>,
+        ctr: Arc<AtomicU64>,
         stop: Arc<AtomicBool>,
-        fehler: Arc<Mutex<String>>,
+        error: Arc<Mutex<String>>,
     ) {
         // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
         // CoUninitialize after `schleife_inner` has returned, so every COM interface created there
@@ -707,12 +707,12 @@ mod win {
         // fresh thread.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop, &fehler);
+            let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &ctr, &stop, &error);
             if let Err(e) = r {
                 // If the start already failed, the caller has not yet received
                 // anything - the message has to go to them.
                 let _ = tx.send(Err(e.clone()));
-                if let Ok(mut f) = fehler.lock() {
+                if let Ok(mut f) = error.lock() {
                     *f = e;
                 }
             }
@@ -724,7 +724,7 @@ mod win {
     // owns every interface it creates and drops them before returning. All out-slots (`attrs`,
     // `flags`, `ts`, `sample`) are locals that outlive the calls. Pixel data only leaves through
     // `bild_holen`, which copies into `roh` before the sample is released; the later accesses to
-    // `roh`/`fertig` are safe slice code.
+    // `roh`/`done` are safe slice code.
     #[allow(clippy::too_many_arguments)]
     unsafe fn schleife_inner(
         id: Option<String>,
@@ -733,9 +733,9 @@ mod win {
         fps: u32,
         tx: &std::sync::mpsc::Sender<std::result::Result<String, String>>,
         neu: &Arc<Mutex<Option<Bild>>>,
-        zaehler: &Arc<AtomicU64>,
+        ctr: &Arc<AtomicU64>,
         stop: &Arc<AtomicBool>,
-        fehler: &Arc<Mutex<String>>,
+        error: &Arc<Mutex<String>>,
     ) -> std::result::Result<(), String> {
         mf_startup();
         let gesucht = id.unwrap_or_default();
@@ -803,7 +803,7 @@ mod win {
         let _ = tx.send(Ok(name));
 
         let mut roh: Vec<u8> = Vec::new();
-        let mut fertig: Vec<u8> = Vec::new();
+        let mut done: Vec<u8> = Vec::new();
         while !stop.load(Ordering::Relaxed) {
             let mut flags = 0u32;
             let mut ts = 0i64;
@@ -816,13 +816,13 @@ mod win {
                 Some(&mut ts),
                 Some(&mut sample),
             ) {
-                if let Ok(mut f) = fehler.lock() {
+                if let Ok(mut f) = error.lock() {
                     *f = format!("lesen: {}", e);
                 }
                 break;
             }
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                if let Ok(mut f) = fehler.lock() {
+                if let Ok(mut f) = error.lock() {
                     *f = "Kamera hat den Strom beendet".into();
                 }
                 break;
@@ -855,22 +855,22 @@ mod win {
                 skalieren = qw != zw || qh != zh;
             }
             let bild = if skalieren {
-                if !super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig) {
+                if !super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut done) {
                     continue;
                 }
                 Bild {
-                    breite: zw,
-                    hoehe: zh,
-                    nv12: fertig.clone(),
+                    width_px: zw,
+                    height_px: zh,
+                    nv12: done.clone(),
                 }
             } else {
                 Bild {
-                    breite: zw,
-                    hoehe: zh,
+                    width_px: zw,
+                    height_px: zh,
                     nv12: roh.clone(),
                 }
             };
-            zaehler.fetch_add(1, Ordering::Relaxed);
+            ctr.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut b) = neu.lock() {
                 *b = Some(bild);
             }
@@ -887,13 +887,13 @@ mod win {
     /// WHY: Justin's image arrived green/magenta and strongly zoomed in. Whether
     /// that is down to the colour space, the row stride or the cropping can
     /// only be measured on the REAL device - guessing does not help here.
-    pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, ordner: &str) -> String {
+    pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, dir: &str) -> String {
         // SAFETY: COM is initialised on this thread first and uninitialised after `diagnose_inner`
         // returned, which has dropped all its interfaces by then (same pattern as `schleife`); the
         // call has no pointer arguments of its own.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let r = diagnose_inner(id, zw, zh, fps, ordner);
+            let r = diagnose_inner(id, zw, zh, fps, dir);
             CoUninitialize();
             r
         }
@@ -978,7 +978,7 @@ mod win {
         zw: u32,
         zh: u32,
         fps: u32,
-        ordner: &str,
+        dir: &str,
     ) -> String {
         let mut log = String::new();
         macro_rules! sag {
@@ -1076,8 +1076,8 @@ mod win {
 
         // Discard a few frames (exposure), then look at one closely.
         let mut roh: Vec<u8> = Vec::new();
-        let mut fertig: Vec<u8> = Vec::new();
-        let mut gesehen = 0;
+        let mut done: Vec<u8> = Vec::new();
+        let mut seen = 0;
         for runde in 0..60 {
             let mut flags = 0u32;
             let mut ts = 0i64;
@@ -1093,8 +1093,8 @@ mod win {
                 Some(s) => s,
                 None => continue,
             };
-            gesehen += 1;
-            if gesehen < 12 {
+            seen += 1;
+            if seen < 12 {
                 continue;
             }
             // --- Puffer genau vermessen ---
@@ -1153,11 +1153,11 @@ mod win {
                 us as f64 / n2 as f64,
                 vs as f64 / n2 as f64
             );
-            sag!("  {}", nv12_png(&roh, qw, qh, &format!("{}\\cam-roh.png", ordner)));
+            sag!("  {}", nv12_png(&roh, qw, qh, &format!("{}\\cam-roh.png", dir)));
             if (qw != zw || qh != zh)
-                && super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut fertig)
+                && super::nv12_zuschneiden_skalieren(&roh, qw, qh, zw, zh, &mut done)
             {
-                sag!("  {}", nv12_png(&fertig, zw, zh, &format!("{}\\cam-fertig.png", ordner)));
+                sag!("  {}", nv12_png(&done, zw, zh, &format!("{}\\cam-fertig.png", dir)));
             }
             break;
         }
@@ -1345,7 +1345,7 @@ mod tests_stufe5 {
     use super::*;
 
     #[test]
-    fn rgb_nach_nv12_haelt_groesse_und_farbe() {
+    fn rgb_to_nv12_keeps_size_and_color() {
         // Reines Gruen, 40x30 -> 16x16: Ausschnitt mittig, Farbe bleibt.
         let (sb, sh) = (40u32, 30u32);
         let mut rgb = vec![0u8; (sb * sh * 3) as usize];
@@ -1390,21 +1390,21 @@ mod tests_stufe5 {
     /// What does this machine find? On a build box without a camera an
     /// empty list is correct - it must never crash.
     #[test]
-    fn kameraliste_und_oeffnen_melden_ehrlich() {
+    fn camera_list_and_open_report_honestly() {
         let l = liste();
         println!("Kameras: {}", l.len());
         for g in &l {
             println!("  {} [{}]", g.name, g.id);
         }
         if l.is_empty() {
-            match oeffnen(None, 640, 360, 15) {
+            match open(None, 640, 360, 15) {
                 Ok(_) => println!("ohne Kameraliste trotzdem eine bekommen"),
                 Err(e) => println!("keine Kamera: {}", e),
             }
             return;
         }
         // There is one: then the whole path to NV12 must run.
-        match oeffnen(None, 640, 360, 15) {
+        match open(None, 640, 360, 15) {
             Ok(k) => {
                 let start = std::time::Instant::now();
                 let mut bild = None;
@@ -1421,12 +1421,12 @@ mod tests_stufe5 {
                         println!(
                             "Kamera {} liefert {}x{}, Helligkeit {:.1}",
                             k.name,
-                            b.breite,
-                            b.hoehe,
+                            b.width_px,
+                            b.height_px,
                             hell as f64 / (640.0 * 360.0)
                         );
                     }
-                    None => println!("kein Bild binnen 6 s ({})", k.fehler()),
+                    None => println!("kein Bild binnen 6 s ({})", k.error()),
                 }
                 k.stoppen();
             }
@@ -1490,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn unsinnige_puffer_geben_nichts_zurueck() {
+    fn nonsense_buffers_return_nothing() {
         assert_eq!(echte_groesse(0, 1280, 640, 360), None);
         assert_eq!(echte_groesse(1000, 0, 640, 360), None);
         assert_eq!(echte_groesse(100, 1280, 640, 360), None);
@@ -1499,7 +1499,7 @@ mod tests {
     /// The colour plane MUST lie behind the whole luma. If it is read too
     /// early, luma arrives as colour - the image turns green.
     #[test]
-    fn packen_liest_die_farbe_nicht_aus_der_helligkeit() {
+    fn pack_reads_color_not_from_brightness() {
         let (w, h, stride) = (8u32, 6u32, 8usize);
         let mut src = vec![0u8; stride * (h as usize) * 3 / 2];
         // Helligkeit 200, Farbe 128 (= farblos).
@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn skalieren_haelt_die_farbe() {
+    fn scale_keeps_the_color() {
         // Uniform image: after scaling down the same must come out.
         let (sw, sh) = (640u32, 480u32);
         let mut src = vec![0u8; (sw * sh * 3 / 2) as usize];
@@ -1576,9 +1576,9 @@ mod tests {
     }
 
     #[test]
-    fn oeffnen_ohne_kamera_meldet_sauber() {
+    fn open_without_camera_reports_cleanly() {
         // Without a camera (server) an error must come, not a crash.
-        match oeffnen(None, 640, 360, 15) {
+        match open(None, 640, 360, 15) {
             Ok(k) => {
                 println!("Kamera da: {}", k.name);
                 k.stoppen();

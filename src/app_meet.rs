@@ -241,7 +241,7 @@ impl App {
         // to ASK which one should be shared when there are several.
         self.meet_win.monitore = meetschirm::liste()
             .into_iter()
-            .map(|m| (m.name, m.breite, m.hoehe))
+            .map(|m| (m.name, m.width_px, m.height_px))
             .collect();
         if std::time::Instant::now() >= self.meet_win.next_window {
             self.meet_win.next_window =

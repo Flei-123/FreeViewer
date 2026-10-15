@@ -164,21 +164,21 @@ impl Blatt<'_> {
     }
 }
 
-/// Draw the avatar. `out` is brought to `breite*hoehe*3` (RGB).
+/// Draw the avatar. `out` is brought to `width_px*height_px*3` (RGB).
 ///
 /// * `mund` 0..1  - how far the mouth is open (from the microphone level)
 /// * `blinzeln` 0..1 - 0 open, 1 closed
 /// * `atmen` -1..1 - slight up/down movement of the head
 pub fn zeichnen(
     a: &Aussehen,
-    breite: u32,
-    hoehe: u32,
+    width_px: u32,
+    height_px: u32,
     mund: f32,
     blinzeln: f32,
     atmen: f32,
     out: &mut Vec<u8>,
 ) {
-    let (b, h) = (breite.max(2) as i32, hoehe.max(2) as i32);
+    let (b, h) = (width_px.max(2) as i32, height_px.max(2) as i32);
     out.clear();
     out.resize((b * h * 3) as usize, 0);
     let grund = hole(&GRUNDFARBEN, a.grund);

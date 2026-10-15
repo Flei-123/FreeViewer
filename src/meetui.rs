@@ -229,7 +229,7 @@ impl NativMeet {
         pass: &str,
         name: &str,
         fvid: &str,
-        steuerung: bool,
+        control: bool,
         mikro: Option<String>,
         lautsprecher: Option<String>,
         e2e: Option<String>,
@@ -241,19 +241,19 @@ impl NativMeet {
         // fixed BEFORE joining - the server learns in the join message
         // whether we encrypt, and from that decides
         // who may enter the room. Without a key everything stays as before.
-        let schluessel = e2e
+        let e2e_key = e2e
             .as_deref()
             .and_then(crate::meete2e::Key::aus_text);
-        let e2e_an = schluessel.is_some();
+        let e2e_an = e2e_key.is_some();
         let sig = meetsig::beitreten(
             basis,
             raum,
             pass,
             name,
-            if steuerung { fvid } else { "" },
+            if control { fvid } else { "" },
             e2e_an,
         )?;
-        let ton = meetrtc::start_with(schluessel)?;
+        let ton = meetrtc::start_with(e2e_key)?;
         // Without a sound card (server, test machine) the meeting still runs -
         // you just hear nothing. Report honestly instead of aborting.
         let (mikro_merk, lautsprecher_merk) = (mikro.clone(), lautsprecher.clone());
@@ -329,7 +329,7 @@ impl NativMeet {
             letzter_zeiger: None,
             letztes_schluesselbild: std::time::Instant::now(),
             ich_fvid: fvid.to_string(),
-            steuer_frei: steuerung && fvid.chars().any(|c| c.is_ascii_digit()),
+            steuer_frei: control && fvid.chars().any(|c| c.is_ascii_digit()),
             steuer_anfragen: Vec::new(),
             steuer_erlaubt: Vec::new(),
             steuer_gefragt: false,
@@ -393,9 +393,9 @@ impl NativMeet {
                 meetsig::Ereignis::Spur {
                     mid,
                     peer,
-                    bildschirm,
+                    display,
                     ..
-                } => self.ton.spur_art(&mid, peer, bildschirm),
+                } => self.ton.spur_art(&mid, peer, display),
                 meetsig::Ereignis::Chat { von, text, .. } => self.chat.push((von, text)),
                 meetsig::Ereignis::Dazu(t) => {
                     self.chat.push((0, format!("{} ist dazugekommen", t.name)))
@@ -571,7 +571,7 @@ impl NativMeet {
                 }
                 meetrtc::TonEreignis::Bild {
                     quelle,
-                    bildschirm,
+                    display,
                     daten,
                     schluesselbild,
                     codec,
@@ -582,7 +582,7 @@ impl NativMeet {
                     // video really arrives.
                     self.image_counter += 1;
                     let _ = schluesselbild;
-                    if bildschirm {
+                    if display {
                         self.schirme.rahmen(quelle, &daten);
                     } else {
                         self.bilder.rahmen(quelle, &daten);
@@ -718,17 +718,17 @@ impl NativMeet {
             let mut rgba = Vec::new();
             if crate::h264::nv12_to_rgba(
                 &bild.nv12,
-                bild.breite,
-                bild.hoehe,
-                bild.breite as usize,
-                bild.hoehe,
+                bild.width_px,
+                bild.height_px,
+                bild.width_px as usize,
+                bild.height_px,
                 &mut rgba,
             ) {
-                self.own_screen = Some((bild.breite, bild.hoehe, rgba));
+                self.own_screen = Some((bild.width_px, bild.height_px, rgba));
                 self.own_screen_state += 1;
             }
         }
-        let f = auf.fehler();
+        let f = auf.error();
         if !f.is_empty() {
             self.screen_notice = f;
         }
@@ -824,7 +824,7 @@ impl NativMeet {
                 return;
             }
             match crate::meetschirm::open_source(quelle, 1920, 1080, 15) {
-                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, SCREEN_BITRATE) {
+                Ok(a) => match crate::meetvideo::Kodierer::neu(a.width_px, a.height_px, 20, SCREEN_BITRATE) {
                     Ok(k) => {
                         self.screen_notice = format!("Teile {}", a.name);
                         self.screen = Some(a);
@@ -909,7 +909,7 @@ impl NativMeet {
         let (k, s) = bitraten_verteilen(schaetzung, self.kamera_an, self.screen_on);
         if self.koder.is_some() && bitrate_lohnt_wechsel(self.koder_bitrate, k) {
             let (b, h, fps) = match (&self.kamera, self.avatar_an) {
-                (Some(kam), _) => (kam.breite, kam.hoehe, 30),
+                (Some(kam), _) => (kam.width_px, kam.height_px, 30),
                 (None, true) => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 20),
                 _ => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30),
             };
@@ -921,7 +921,7 @@ impl NativMeet {
         }
         if self.screen_encoder.is_some() && bitrate_lohnt_wechsel(self.screen_bitrate, s) {
             if let Some(a) = self.screen.as_ref() {
-                if let Ok(c) = crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, s) {
+                if let Ok(c) = crate::meetvideo::Kodierer::neu(a.width_px, a.height_px, 20, s) {
                     self.screen_encoder = Some(c);
                     self.screen_bitrate = s;
                     self.bitrate_wechsel += 1;
@@ -968,17 +968,17 @@ impl NativMeet {
             let mut rgba = Vec::new();
             if crate::h264::nv12_to_rgba(
                 &bild.nv12,
-                bild.breite,
-                bild.hoehe,
-                bild.breite as usize,
-                bild.hoehe,
+                bild.width_px,
+                bild.height_px,
+                bild.width_px as usize,
+                bild.height_px,
                 &mut rgba,
             ) {
-                self.eigen = Some((bild.breite, bild.hoehe, rgba));
+                self.eigen = Some((bild.width_px, bild.height_px, rgba));
                 self.eigen_stand += 1;
             }
         }
-        let f = kam.fehler();
+        let f = kam.error();
         if !f.is_empty() {
             self.camera_notice = f;
         }
@@ -1104,14 +1104,14 @@ impl NativMeet {
             if self.kamera.is_some() {
                 return;
             }
-            match crate::meetcam::oeffnen(
+            match crate::meetcam::open(
                 self.kamera_geraet.clone(),
                 crate::meetvideo::WIDTH,
                 crate::meetvideo::HEIGHT,
                 30,
             ) {
                 Ok(k) => {
-                    match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 30, KAMERA_BITRATE) {
+                    match crate::meetvideo::Kodierer::neu(k.width_px, k.height_px, 30, KAMERA_BITRATE) {
                         Ok(c) => {
                             self.camera_notice = format!("Kamera: {}", k.name);
                             self.kamera = Some(k);
@@ -1580,7 +1580,7 @@ impl Vorprobe {
             self.stand += 1;
             return;
         }
-        match crate::meetcam::oeffnen(None, crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30) {
+        match crate::meetcam::open(None, crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30) {
             Ok(k) => {
                 self.notice = format!("Kamera: {}", k.name);
                 self.kamera = Some(k);
@@ -1642,16 +1642,16 @@ impl Vorprobe {
         let mut rgba = Vec::new();
         if crate::h264::nv12_to_rgba(
             &bild.nv12,
-            bild.breite,
-            bild.hoehe,
-            bild.breite as usize,
-            bild.hoehe,
+            bild.width_px,
+            bild.height_px,
+            bild.width_px as usize,
+            bild.height_px,
             &mut rgba,
         ) {
-            self.eigen = Some((bild.breite, bild.hoehe, rgba));
+            self.eigen = Some((bild.width_px, bild.height_px, rgba));
             self.stand += 1;
         }
-        let f = kam.fehler();
+        let f = kam.error();
         if !f.is_empty() {
             self.notice = f;
         }

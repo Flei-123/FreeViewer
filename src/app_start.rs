@@ -268,7 +268,7 @@ impl App {
                 ui.add_space(8.0);
                 section(ui, i18n::t("nav.friends"));
                 let mut go_f: Option<String> = None;
-                let mut oeffnen = false;
+                let mut open = false;
                 card(ui, |ui| {
                     if offen > 0 {
                         ui.horizontal(|ui| {
@@ -289,7 +289,7 @@ impl App {
                                 )
                                 .clicked()
                             {
-                                oeffnen = true;
+                                open = true;
                             }
                         });
                     }
@@ -334,12 +334,12 @@ impl App {
                         )
                         .clicked()
                     {
-                        oeffnen = true;
+                        open = true;
                     }
                 });
                 if let Some(id) = go_f {
                     self.connect_to(&id);
-                } else if oeffnen {
+                } else if open {
                     self.view = View::Friends;
                 }
             }

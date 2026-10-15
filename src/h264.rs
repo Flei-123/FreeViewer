@@ -1050,7 +1050,7 @@ mod stub {
         pub fn size(&self) -> (u32, u32) {
             (0, 0)
         }
-        /// Breite, Hoehe, Zeilenabstand - wie beim echten Dekodierer.
+        /// Width, Hoehe, Zeilenabstand - wie beim echten Dekodierer.
         pub fn raw_size(&self) -> (u32, u32, usize) {
             (0, 0, 0)
         }
@@ -1116,7 +1116,7 @@ mod tests {
     /// on a bare Linux server there is none, then the test is
     /// honestly skipped instead of falsely reporting green.
     #[test]
-    fn h264_hin_und_zurueck() {
+    fn h264_round_trip() {
         if !available() {
             println!("kein H.264-Kodierer auf dieser Maschine - uebersprungen");
             return;
@@ -1130,12 +1130,12 @@ mod tests {
         let mut rgba = Vec::new();
         let mut bilder = 0;
         let mut bytes = 0usize;
-        let mut schluessel = 0;
+        let mut key_frames = 0;
         for _ in 0..10 {
             for c in enc.encode(&nv12).expect("kodieren") {
                 bytes += c.data.len();
                 if c.key {
-                    schluessel += 1;
+                    key_frames += 1;
                 }
                 // Startmarke muss vorne stehen, sonst versteht uns niemand.
                 assert!(
@@ -1150,10 +1150,10 @@ mod tests {
         }
         println!(
             "kodiert {} Bytes, {} Schluesselbilder, {} Bilder dekodiert",
-            bytes, schluessel, bilder
+            bytes, key_frames, bilder
         );
         assert!(bytes > 0, "nichts kodiert");
-        assert!(schluessel > 0, "kein Schluesselbild");
+        assert!(key_frames > 0, "kein Schluesselbild");
         assert!(bilder > 0, "nichts dekodiert");
         // And the image must also REALLY resemble the original.
         let (mean, _max) = rgb_vs_rgba_error(&rgb, &rgba, w, h);

@@ -113,7 +113,7 @@ impl Echo {
         let echo: Vec<f32> = (BLOCK..FFT_N).map(|i| y[i].re * skal).collect();
 
         // --- FriendError = Mikrofon minus geschaetztes Echo ---------------------
-        let fehler: Vec<f32> = (0..BLOCK).map(|i| mikro[i] - echo[i]).collect();
+        let error: Vec<f32> = (0..BLOCK).map(|i| mikro[i] - echo[i]).collect();
 
         // --- double-talk detection (Geigel) --------------------------------
         // The filter is empty at the start, so one can NOT compare with the
@@ -139,7 +139,7 @@ impl Echo {
                 ef.push(Complex32::new(0.0, 0.0));
             }
             for i in 0..BLOCK {
-                ef.push(Complex32::new(fehler[i], 0.0));
+                ef.push(Complex32::new(error[i], 0.0));
             }
             self.fft.process(&mut ef);
 
@@ -225,7 +225,7 @@ impl Echo {
             fspek.push(Complex32::new(0.0, 0.0));
         }
         for i in 0..BLOCK {
-            fspek.push(Complex32::new(fehler[i], 0.0));
+            fspek.push(Complex32::new(error[i], 0.0));
         }
         let mut espek: Vec<Complex32> = Vec::with_capacity(FFT_N);
         for _ in 0..BLOCK {
@@ -969,9 +969,9 @@ mod tests {
             let m = sinus(BLOCK, 500.0, 0.15, &mut ph);
             let _ = e.block(&m, &r);
         }
-        let dauer = start.elapsed().as_secs_f32();
+        let dur = start.elapsed().as_secs_f32();
         let echtzeit = bloecke as f32 * 0.01;
-        let faktor = dauer / echtzeit;
+        let faktor = dur / echtzeit;
         println!("Echo-Rechenzeit: {:.1} % der Echtzeit", faktor * 100.0);
         // In the debug build Rust computes without optimisation (factor ~40). What is measured
         // is the release build: there it is 3.6 % of real time.

@@ -28,8 +28,8 @@ pub use crate::meetcam::Bild;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Screen {
     pub name: String,
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     pub primaer: bool,
 }
 
@@ -48,7 +48,7 @@ pub enum Quelle {
 }
 
 impl Quelle {
-    fn oeffnen(&self) -> Option<Box<dyn crate::capture::Backend>> {
+    fn open(&self) -> Option<Box<dyn crate::capture::Backend>> {
         match self {
             Quelle::Display(i) => crate::capture::open_index(true, *i),
             Quelle::Fenster(k) => crate::fenster::aufnahme(*k),
@@ -73,8 +73,8 @@ pub fn liste() -> Vec<Screen> {
         .into_iter()
         .map(|m| Screen {
             name: m.name,
-            breite: m.w,
-            hoehe: m.h,
+            width_px: m.w,
+            height_px: m.h,
             primaer: m.primary,
         })
         .collect()
@@ -385,14 +385,14 @@ pub fn zeiger_malen(nv12: &mut [u8], w: u32, h: u32, x: i32, y: i32, groesse: f3
 /// Running screen capture. Only ever holds the NEWEST frame ready.
 pub struct Aufnahme {
     pub name: String,
-    pub breite: u32,
-    pub hoehe: u32,
+    pub width_px: u32,
+    pub height_px: u32,
     /// Where the image comes from (screen or window).
     pub quelle: Quelle,
     neu: Arc<Mutex<Option<Bild>>>,
-    zaehler: Arc<AtomicU64>,
+    ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    fehler: Arc<Mutex<String>>,
+    error: Arc<Mutex<String>>,
     /// Which part of the screen is sent (fractions). The
     /// capture thread reads this on EVERY frame - so a change takes effect immediately,
     /// without reopening the capture.
@@ -415,10 +415,10 @@ impl Aufnahme {
         self.neu.lock().ok().and_then(|mut b| b.take())
     }
     pub fn aufgenommen(&self) -> u64 {
-        self.zaehler.load(Ordering::Relaxed)
+        self.ctr.load(Ordering::Relaxed)
     }
-    pub fn fehler(&self) -> String {
-        self.fehler.lock().map(|f| f.clone()).unwrap_or_default()
+    pub fn error(&self) -> String {
+        self.error.lock().map(|f| f.clone()).unwrap_or_default()
     }
     pub fn stoppen(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -435,20 +435,20 @@ impl Drop for Aufnahme {
 ///
 /// `max_b`/`max_h` limit the transmission size (aspect ratio
 /// is preserved), `fps` is the upper limit of the frame rate.
-pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
+pub fn open(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
     open_source(Quelle::Display(index), max_b, max_h, fps)
 }
 
-/// Like `oeffnen`, but the source may also be a single window.
+/// Like `open`, but the source may also be a single window.
 pub fn open_source(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
     let fps = fps.clamp(1, 60);
     let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
-    let zaehler = Arc::new(AtomicU64::new(0));
+    let ctr = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    let fehler = Arc::new(Mutex::new(String::new()));
+    let error = Arc::new(Mutex::new(String::new()));
     let bereich = Arc::new(Mutex::new(GANZ));
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(String, u32, u32), String>>();
-    let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
+    let (n2, z2, s2, f2) = (neu.clone(), ctr.clone(), stop.clone(), error.clone());
     let b2 = bereich.clone();
     std::thread::Builder::new()
         .name("meetschirm".into())
@@ -457,13 +457,13 @@ pub fn open_source(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<A
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(Ok((name, b, h))) => Ok(Aufnahme {
             name,
-            breite: b,
-            hoehe: h,
+            width_px: b,
+            height_px: h,
             quelle,
             neu,
-            zaehler,
+            ctr,
             stop,
-            fehler,
+            error,
             bereich,
         }),
         Ok(Err(e)) => Err(anyhow!(e)),
@@ -482,12 +482,12 @@ fn schleife(
     fps: u32,
     tx: std::sync::mpsc::Sender<std::result::Result<(String, u32, u32), String>>,
     neu: Arc<Mutex<Option<Bild>>>,
-    zaehler: Arc<AtomicU64>,
+    ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    fehler: Arc<Mutex<String>>,
+    error: Arc<Mutex<String>>,
     bereich: Arc<Mutex<Bereich>>,
 ) {
-    let mut backend = match quelle.oeffnen() {
+    let mut backend = match quelle.open() {
         Some(b) => b,
         None => {
             let _ = tx.send(Err(match quelle {
@@ -533,17 +533,17 @@ fn schleife(
             }
             crate::capture::Next::Lost => {
                 verluste += 1;
-                if let Ok(mut f) = fehler.lock() {
+                if let Ok(mut f) = error.lock() {
                     *f = format!("Aufnahme abgerissen ({}. Mal) - neu geoeffnet", verluste);
                 }
-                match quelle.oeffnen() {
+                match quelle.open() {
                     Some(b) => {
                         backend = b;
                         std::thread::sleep(std::time::Duration::from_millis(120));
                         continue;
                     }
                     None => {
-                        if let Ok(mut f) = fehler.lock() {
+                        if let Ok(mut f) = error.lock() {
                             *f = match quelle {
                                 Quelle::Display(_) => "Bildschirm nicht mehr aufnehmbar".into(),
                                 // For a window the most common reason
@@ -568,7 +568,7 @@ fn schleife(
         // reads the full image back into RAM (saves PCIe) -
         // frame() then returns an old or empty buffer. That is exactly why
         // the sharp zoom turned black from about 140 %.
-        let fertig = match backend.scaled_teil(zb, zh, true, teil) {
+        let done = match backend.scaled_teil(zb, zh, true, teil) {
             Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
                 nv12.clear();
                 nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
@@ -581,7 +581,7 @@ fn schleife(
                 bild_nach_nv12_teil(px, sb2, sh2, bgra, teil, zb, zh, &mut nv12)
             }
         };
-        if !fertig {
+        if !done {
             continue;
         }
         // Paint the mouse pointer into the image. Windows does NOT put it in
@@ -599,11 +599,11 @@ fn schleife(
             }
         }
         letzte_lieferung = std::time::Instant::now();
-        zaehler.fetch_add(1, Ordering::Relaxed);
+        ctr.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut b) = neu.lock() {
             *b = Some(Bild {
-                breite: zb,
-                hoehe: zh,
+                width_px: zb,
+                height_px: zh,
                 nv12: nv12.clone(),
             });
         }
@@ -656,11 +656,11 @@ mod tests {
     #[test]
     fn zeiger_malt_nie_ueber_den_rand_hinaus() {
         let (w, h) = (32u32, 24u32);
-        let laenge = (w * h * 3 / 2) as usize;
+        let length = (w * h * 3 / 2) as usize;
         for (x, y) in [(-5i32, -5i32), (31, 23), (0, 0), (100, 100)] {
-            let mut nv12 = vec![50u8; laenge];
+            let mut nv12 = vec![50u8; length];
             zeiger_malen(&mut nv12, w, h, x, y, 19.0);
-            assert_eq!(nv12.len(), laenge, "Puffer veraendert");
+            assert_eq!(nv12.len(), length, "Puffer veraendert");
         }
     }
 
@@ -816,14 +816,14 @@ mod tests {
             return;
         }
         println!("Bildschirm 0: {:?}", schirme[0]);
-        let auf = match oeffnen(0, 1280, 720, 10) {
+        let auf = match open(0, 1280, 720, 10) {
             Ok(a) => a,
             Err(e) => {
                 println!("Aufnahme nicht moeglich ({}) - uebersprungen", e);
                 return;
             }
         };
-        let (zb, zh) = (auf.breite, auf.hoehe);
+        let (zb, zh) = (auf.width_px, auf.height_px);
         assert!(zb % 2 == 0 && zh % 2 == 0, "ungerade Kante {}x{}", zb, zh);
         assert!(zb <= 1280 && zh <= 720, "zu gross: {}x{}", zb, zh);
         let start = std::time::Instant::now();
@@ -837,12 +837,12 @@ mod tests {
         let Some(b) = bild else {
             println!(
                 "kein Bild binnen 5 s (Fehler: {}) - uebersprungen",
-                auf.fehler()
+                auf.error()
             );
             return;
         };
-        assert_eq!(b.breite, zb);
-        assert_eq!(b.hoehe, zh);
+        assert_eq!(b.width_px, zb);
+        assert_eq!(b.height_px, zh);
         assert_eq!(
             b.nv12.len(),
             zb as usize * zh as usize * 3 / 2,
@@ -870,7 +870,7 @@ mod tests {
         }
         let mut enc = crate::h264::Encoder::new(zb, zh, 10, 3_000_000).expect("Kodierer");
         let mut bytes = 0usize;
-        let mut schluessel = 0;
+        let mut key_frames = 0;
         // Media Foundation does NOT release the first frame immediately (the
         // chain only starts up) - VideoToolbox does. Hence push a few frames
         // after instead of making a statement from a single image.
@@ -878,16 +878,16 @@ mod tests {
             for c in enc.encode(&b.nv12).expect("kodieren") {
                 bytes += c.data.len();
                 if c.key {
-                    schluessel += 1;
+                    key_frames += 1;
                 }
             }
-            if bytes > 0 && schluessel > 0 {
+            if bytes > 0 && key_frames > 0 {
                 break;
             }
         }
-        println!("H.264: {} Bytes, {} Schluesselbilder", bytes, schluessel);
+        println!("H.264: {} Bytes, {} Schluesselbilder", bytes, key_frames);
         assert!(bytes > 0, "Bildschirmbild liess sich nicht kodieren");
-        assert!(schluessel > 0, "kein Schluesselbild am Anfang");
+        assert!(key_frames > 0, "kein Schluesselbild am Anfang");
         auf.stoppen();
     }
 

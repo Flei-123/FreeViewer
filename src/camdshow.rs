@@ -49,7 +49,7 @@ use windows::Win32::System::Com::{
 };
 
 /// Marker in `Geraet::id`: everything after it is a DirectShow path.
-/// This way `meetcam::oeffnen` knows which path is meant without having to
+/// This way `meetcam::open` knows which path is meant without having to
 /// guess - and without the two namespaces getting mixed up.
 pub const PRAEFIX: &str = "ds:";
 
@@ -154,7 +154,7 @@ pub fn liste() -> Vec<Geraet> {
 }
 
 /// The capture thread. Structure and signature like `meetcam::win::schleife`,
-/// so that `meetcam::oeffnen` can swap the two paths.
+/// so that `meetcam::open` can swap the two paths.
 #[allow(clippy::too_many_arguments)]
 pub fn schleife(
     id: Option<String>,
@@ -163,9 +163,9 @@ pub fn schleife(
     fps: u32,
     tx: std::sync::mpsc::Sender<std::result::Result<String, String>>,
     neu: Arc<Mutex<Option<Bild>>>,
-    zaehler: Arc<AtomicU64>,
+    ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    fehler: Arc<Mutex<String>>,
+    error: Arc<Mutex<String>>,
 ) {
     // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
     // CoUninitialize after `schleife_inner` has returned, so every COM interface created there (all
@@ -173,12 +173,12 @@ pub fn schleife(
     // is also called when CoInitializeEx failed (see roadmap); it cannot fail on a fresh thread.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if let Err(e) = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop) {
+        if let Err(e) = schleife_inner(id, zw, zh, fps, &tx, &neu, &ctr, &stop) {
             // If the start already failed, the caller has not received anything
             // yet - the message has to go to them, otherwise it looks as if
             // simply nothing happens.
             let _ = tx.send(Err(e.clone()));
-            if let Ok(mut f) = fehler.lock() {
+            if let Ok(mut f) = error.lock() {
                 *f = e;
             }
         }
@@ -199,7 +199,7 @@ unsafe fn schleife_inner(
     fps: u32,
     tx: &std::sync::mpsc::Sender<std::result::Result<String, String>>,
     neu: &Arc<Mutex<Option<Bild>>>,
-    zaehler: &Arc<AtomicU64>,
+    ctr: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) -> std::result::Result<(), String> {
     let gesucht = id
@@ -307,10 +307,10 @@ unsafe fn schleife_inner(
     let zeile = ((qb as usize * 3) + 3) & !3;
 
     // 5) Los.
-    let steuerung: IMediaControl = graph
+    let control: IMediaControl = graph
         .cast()
         .map_err(|e| format!("Steuerung fehlt: {}", e))?;
-    steuerung
+    control
         .Run()
         .map_err(|e| format!("Graph laeuft nicht an: {}", e))?;
     let _ = tx.send(Ok(name));
@@ -360,15 +360,15 @@ unsafe fn schleife_inner(
         if crate::meetcam::rgb_nach_nv12(&rgb, qb, qh, zw, zh, &mut nv12) {
             if let Ok(mut b) = neu.lock() {
                 *b = Some(Bild {
-                    breite: zw,
-                    hoehe: zh,
+                    width_px: zw,
+                    height_px: zh,
                     nv12: nv12.clone(),
                 });
             }
-            zaehler.fetch_add(1, Ordering::Relaxed);
+            ctr.fetch_add(1, Ordering::Relaxed);
         }
     }
-    let _ = steuerung.Stop();
+    let _ = control.Stop();
     Ok(())
 }
 
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn kennung_traegt_das_praefix() {
-        // Without a unique prefix `oeffnen` could not decide
+        // Without a unique prefix `open` could not decide
         // through which path the device is to be opened.
         assert!(format!("{}\\\\?\\usb#vid_046d", PRAEFIX).starts_with(PRAEFIX));
     }

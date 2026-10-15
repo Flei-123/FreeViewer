@@ -94,7 +94,7 @@ struct VTDecompressionOutputCallbackRecord {
 
 // SAFETY: function-pointer type only (no operation happens here). The signature must match Apple's
 // VTCompressionOutputCallback; VideoToolbox passes back the `refcon` given to
-// VTCompressionSessionCreate, a pointer to the encoder's `Mutex<Ausgabe>`.
+// VTCompressionSessionCreate, a pointer to the encoder's `Mutex<Output>`.
 type VTCompressionOutputCallback =
     Option<unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CMSampleBufferRef)>;
 
@@ -108,7 +108,7 @@ extern "C" {
         alloc: CFAllocatorRef,
         keys: *const *const c_void,
         values: *const *const c_void,
-        anzahl: isize,
+        item_count: isize,
         key_cb: *const c_void,
         val_cb: *const c_void,
     ) -> CFDictionaryRef;
@@ -122,8 +122,8 @@ extern "C" {
 extern "C" {
     fn CVPixelBufferCreate(
         alloc: CFAllocatorRef,
-        breite: usize,
-        hoehe: usize,
+        width_px: usize,
+        height_px: usize,
         format: OSType,
         attrs: CFDictionaryRef,
         raus: *mut CVPixelBufferRef,
@@ -146,8 +146,8 @@ extern "C" {
     fn CMBlockBufferGetDataPointer(
         bb: CMBlockBufferRef,
         offset: usize,
-        laenge_hier: *mut usize,
-        laenge_gesamt: *mut usize,
+        length_here: *mut usize,
+        length_total: *mut usize,
         daten: *mut *mut u8,
     ) -> OSStatus;
     fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
@@ -155,12 +155,12 @@ extern "C" {
         index: usize,
         zeiger: *mut *const u8,
         groesse: *mut usize,
-        anzahl: *mut usize,
+        item_count: *mut usize,
         nal_kopf: *mut c_int,
     ) -> OSStatus;
     fn CMVideoFormatDescriptionCreateFromH264ParameterSets(
         alloc: CFAllocatorRef,
-        anzahl: usize,
+        item_count: usize,
         zeiger: *const *const u8,
         groessen: *const usize,
         nal_kopf: c_int,
@@ -169,11 +169,11 @@ extern "C" {
     fn CMBlockBufferCreateWithMemoryBlock(
         struct_alloc: CFAllocatorRef,
         speicher: *mut c_void,
-        block_laenge: usize,
+        block_length: usize,
         block_alloc: CFAllocatorRef,
         quelle: *const c_void,
         offset: usize,
-        laenge: usize,
+        length: usize,
         flags: u32,
         raus: *mut CMBlockBufferRef,
     ) -> OSStatus;
@@ -181,16 +181,16 @@ extern "C" {
         quelle: *const c_void,
         bb: CMBlockBufferRef,
         offset: usize,
-        laenge: usize,
+        length: usize,
     ) -> OSStatus;
     fn CMSampleBufferCreateReady(
         alloc: CFAllocatorRef,
         daten: CMBlockBufferRef,
         format: CMFormatDescriptionRef,
-        anzahl_proben: isize,
-        anzahl_zeiten: isize,
+        sample_count: isize,
+        row_count: isize,
         zeiten: *const CMSampleTimingInfo,
-        anzahl_groessen: isize,
+        size_count: isize,
         groessen: *const usize,
         raus: *mut CMSampleBufferRef,
     ) -> OSStatus;
@@ -200,8 +200,8 @@ extern "C" {
 extern "C" {
     fn VTCompressionSessionCreate(
         alloc: CFAllocatorRef,
-        breite: i32,
-        hoehe: i32,
+        width_px: i32,
+        height_px: i32,
         codec: OSType,
         enc_spec: CFDictionaryRef,
         quell_attrs: CFDictionaryRef,
@@ -214,7 +214,7 @@ extern "C" {
         s: VTCompressionSessionRef,
         bild: CVImageBufferRef,
         pts: CMTime,
-        dauer: CMTime,
+        dur: CMTime,
         rahmen_eigenschaften: CFDictionaryRef,
         quell_refcon: *mut c_void,
         info: *mut u32,
@@ -238,7 +238,7 @@ extern "C" {
     ) -> OSStatus;
     fn VTDecompressionSessionWaitForAsynchronousFrames(s: VTDecompressionSessionRef) -> OSStatus;
     fn VTDecompressionSessionInvalidate(s: VTDecompressionSessionRef);
-    fn VTSessionSetProperty(s: VTSessionRef, schluessel: CFStringRef, wert: CFTypeRef) -> OSStatus;
+    fn VTSessionSetProperty(s: VTSessionRef, prop_key: CFStringRef, wert: CFTypeRef) -> OSStatus;
 
     static kVTCompressionPropertyKey_RealTime: CFStringRef;
     static kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef;
@@ -267,14 +267,14 @@ fn zahl_f64(v: f64) -> CFNumberRef {
 }
 
 /// A dictionary with exactly one entry - nobody needs more here.
-fn dict1(schluessel: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
-    // SAFETY: `k` and `v` are local one-element arrays that outlive the call and `anzahl` is 1,
+fn dict1(prop_key: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
+    // SAFETY: `k` and `v` are local one-element arrays that outlive the call and `item_count` is 1,
     // matching their length; CFDictionaryCreate copies the entries. The key/value callbacks are the
     // CoreFoundation statics (only their addresses are taken), so the dictionary retains and
-    // releases its entries correctly; `schluessel` and `wert` must be valid CF objects (the callers
+    // releases its entries correctly; `prop_key` and `wert` must be valid CF objects (the callers
     // pass Apple's constants). The result is an owned (+1) dictionary.
     unsafe {
-        let k = [schluessel as *const c_void];
+        let k = [prop_key as *const c_void];
         let v = [wert];
         CFDictionaryCreate(
             std::ptr::null(),
@@ -324,9 +324,9 @@ fn nal_typ(b: u8) -> u8 {
 
 /// What the encoder's callback collects.
 #[derive(Default)]
-struct Ausgabe {
-    fertig: Vec<Chunk>,
-    fehler: Option<String>,
+struct Output {
+    done: Vec<Chunk>,
+    error: Option<String>,
 }
 
 pub struct Encoder {
@@ -335,9 +335,9 @@ pub struct Encoder {
     w: u32,
     h: u32,
     fps: u32,
-    zaehler: i64,
-    schluessel_anfordern: bool,
-    ausgabe: Arc<Mutex<Ausgabe>>,
+    ctr: i64,
+    request_key: bool,
+    output: Arc<Mutex<Output>>,
 }
 
 // The session itself is thread-safe from Apple's side; the rest sits behind
@@ -345,12 +345,12 @@ pub struct Encoder {
 // worker thread.
 // SAFETY: the VTCompressionSession is documented as thread-safe, so moving it to another thread is
 // fine. The other raw pointer, `pixel`, is only touched through `&mut self` (encode/drop), and the
-// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Ausgabe>>`. The struct is not
+// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Output>>`. The struct is not
 // `Sync`, so there is never concurrent access from two threads.
 unsafe impl Send for Encoder {}
 
 // SAFETY: callback invoked by VideoToolbox on its own thread. `refcon` is the pointer to the
-// `Mutex<Ausgabe>` inside the Encoder's Arc (null is checked); the session is invalidated in Drop
+// `Mutex<Output>` inside the Encoder's Arc (null is checked); the session is invalidated in Drop
 // before that Arc is released, so the reference is valid whenever the callback runs. `probe` is a
 // live CMSampleBuffer owned by VideoToolbox for the duration of the call (null checked); `bb`, `fd`
 // and the parameter-set pointers belong to it and are only used inside the call. The slice over
@@ -368,10 +368,10 @@ unsafe extern "C" fn kodier_rueckruf(
     if refcon.is_null() {
         return;
     }
-    let ausgabe = &*(refcon as *const Mutex<Ausgabe>);
+    let output = &*(refcon as *const Mutex<Output>);
     if status != 0 || probe.is_null() {
-        if let Ok(mut a) = ausgabe.lock() {
-            a.fehler = Some(format!("Kodierer meldet {}", status));
+        if let Ok(mut a) = output.lock() {
+            a.error = Some(format!("Kodierer meldet {}", status));
         }
         return;
     }
@@ -415,18 +415,18 @@ unsafe extern "C" fn kodier_rueckruf(
         let fd = CMSampleBufferGetFormatDescription(probe);
         if !fd.is_null() {
             let mut kopf: Vec<u8> = Vec::new();
-            let mut anzahl = 0usize;
+            let mut item_count = 0usize;
             let (mut p, mut groesse, mut nal_len) = (std::ptr::null::<u8>(), 0usize, 0 as c_int);
             if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                 fd,
                 0,
                 &mut p,
                 &mut groesse,
-                &mut anzahl,
+                &mut item_count,
                 &mut nal_len,
             ) == 0
             {
-                for idx in 0..anzahl {
+                for idx in 0..item_count {
                     let (mut pp, mut gg) = (std::ptr::null::<u8>(), 0usize);
                     if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                         fd,
@@ -450,8 +450,8 @@ unsafe extern "C" fn kodier_rueckruf(
             }
         }
     }
-    if let Ok(mut a) = ausgabe.lock() {
-        a.fertig.push(Chunk {
+    if let Ok(mut a) = output.lock() {
+        a.done.push(Chunk {
             data: annexb,
             key: idr,
         });
@@ -465,11 +465,11 @@ impl Encoder {
         }
         // Gerade Kantenlaengen - alles andere mag kein 4:2:0.
         let (w, h) = (w & !1, h & !1);
-        let ausgabe = Arc::new(Mutex::new(Ausgabe::default()));
-        let refcon = Arc::as_ptr(&ausgabe) as *mut c_void;
+        let output = Arc::new(Mutex::new(Output::default()));
+        let refcon = Arc::as_ptr(&output) as *mut c_void;
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
         // SAFETY: all pointer arguments are valid for the call: the null allocator/dictionaries
-        // select the defaults, `refcon` is the address of the `Mutex<Ausgabe>` inside `ausgabe`
+        // select the defaults, `refcon` is the address of the `Mutex<Output>` inside `output`
         // (the Arc stored in the Encoder, which outlives the session because Drop invalidates the
         // session first), and `session` is a local out-slot that is checked for null afterwards.
         // `kodier_rueckruf` matches the callback signature.
@@ -561,9 +561,9 @@ impl Encoder {
             w,
             h,
             fps: fps.max(1),
-            zaehler: 0,
-            schluessel_anfordern: true,
-            ausgabe,
+            ctr: 0,
+            request_key: true,
+            output,
         })
     }
 
@@ -584,7 +584,7 @@ impl Encoder {
     }
 
     pub fn request_keyframe(&mut self) {
-        self.schluessel_anfordern = true;
+        self.request_key = true;
     }
 
     pub fn encode(&mut self, nv12: &[u8]) -> Result<Vec<Chunk>> {
@@ -622,7 +622,7 @@ impl Encoder {
                     );
                 }
             }
-            // UV-Ebene (halbe Hoehe, gleiche Breite)
+            // UV-Ebene (halbe Hoehe, gleiche Width)
             let uv = CVPixelBufferGetBaseAddressOfPlane(self.pixel, 1) as *mut u8;
             let uvs = CVPixelBufferGetBytesPerRowOfPlane(self.pixel, 1);
             if !uv.is_null() {
@@ -636,11 +636,11 @@ impl Encoder {
             }
             CVPixelBufferUnlockBaseAddress(self.pixel, 0);
 
-            let pts = CMTime::neu(self.zaehler, self.fps as i32);
-            let dauer = CMTime::neu(1, self.fps as i32);
-            self.zaehler += 1;
-            let props = if self.schluessel_anfordern {
-                self.schluessel_anfordern = false;
+            let pts = CMTime::neu(self.ctr, self.fps as i32);
+            let dur = CMTime::neu(1, self.fps as i32);
+            self.ctr += 1;
+            let props = if self.request_key {
+                self.request_key = false;
                 dict1(kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue)
             } else {
                 std::ptr::null()
@@ -650,7 +650,7 @@ impl Encoder {
                 self.session,
                 self.pixel,
                 pts,
-                dauer,
+                dur,
                 props,
                 std::ptr::null_mut(),
                 &mut info,
@@ -666,13 +666,13 @@ impl Encoder {
             VTCompressionSessionCompleteFrames(self.session, CMTime::ungueltig());
         }
         let mut a = self
-            .ausgabe
+            .output
             .lock()
             .map_err(|_| anyhow!("Kodierer-Ausgabe blockiert"))?;
-        if let Some(f) = a.fehler.take() {
+        if let Some(f) = a.error.take() {
             return Err(anyhow!(f));
         }
-        Ok(std::mem::take(&mut a.fertig))
+        Ok(std::mem::take(&mut a.done))
     }
 }
 
@@ -697,11 +697,11 @@ impl Drop for Encoder {
 
 #[derive(Default)]
 struct Bild {
-    breite: u32,
-    hoehe: u32,
+    width_px: u32,
+    height_px: u32,
     rgba: Vec<u8>,
     da: bool,
-    fehler: Option<String>,
+    error: Option<String>,
 }
 
 pub struct Decoder {
@@ -735,7 +735,7 @@ unsafe extern "C" fn dekodier_rueckruf(
     _info: u32,
     bild: CVImageBufferRef,
     _pts: CMTime,
-    _dauer: CMTime,
+    _duration: CMTime,
 ) {
     if refcon.is_null() {
         return;
@@ -744,7 +744,7 @@ unsafe extern "C" fn dekodier_rueckruf(
     if status != 0 || bild.is_null() {
         if let Ok(mut z) = ziel.lock() {
             if status != 0 {
-                z.fehler = Some(format!("Dekodierer meldet {}", status));
+                z.error = Some(format!("Dekodierer meldet {}", status));
             }
         }
         return;
@@ -754,7 +754,7 @@ unsafe extern "C" fn dekodier_rueckruf(
         && fmt != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
     {
         if let Ok(mut z) = ziel.lock() {
-            z.fehler = Some(format!("unerwartetes Pixelformat {:x}", fmt));
+            z.error = Some(format!("unerwartetes Pixelformat {:x}", fmt));
         }
         return;
     }
@@ -793,8 +793,8 @@ unsafe extern "C" fn dekodier_rueckruf(
         if let Ok(mut z) = ziel.lock() {
             let mut raus = std::mem::take(&mut z.rgba);
             if nv12_to_rgba(&nv12, w, h, stride, yh as u32, &mut raus) {
-                z.breite = w;
-                z.hoehe = h;
+                z.width_px = w;
+                z.height_px = h;
                 z.da = true;
             }
             z.rgba = raus;
@@ -836,14 +836,14 @@ impl Decoder {
     }
 
     /// Create a session as soon as SPS and PPS are known.
-    fn sitzung_bauen(&mut self) -> Result<()> {
+    fn build_session(&mut self) -> Result<()> {
         if !self.session.is_null() || self.sps.is_empty() || self.pps.is_empty() {
             return Ok(());
         }
         // SAFETY: `zeiger`/`groessen` point into `self.sps`/`self.pps` and local arrays that are
         // alive for the call (the SPS/PPS are copied by CoreMedia into the format description).
         // `fd` is a local out-slot that is checked for null. `rueckruf.refcon` is the address of
-        // the `Mutex<Bild>` in `self.bild`, which outlives the session because `sitzung_schliessen`
+        // the `Mutex<Bild>` in `self.bild`, which outlives the session because `close_session`
         // invalidates the session before the Arc is dropped. On failure `fd` is released once; on
         // success ownership of `fd` and `s` moves into `self`.
         unsafe {
@@ -895,13 +895,13 @@ impl Decoder {
                 7 => {
                     if self.sps != nal {
                         self.sps = nal.to_vec();
-                        self.sitzung_schliessen();
+                        self.close_session();
                     }
                 }
                 8 => {
                     if self.pps != nal {
                         self.pps = nal.to_vec();
-                        self.sitzung_schliessen();
+                        self.close_session();
                     }
                 }
                 // Filler and access unit delimiters do not interest the decoder.
@@ -912,7 +912,7 @@ impl Decoder {
                 }
             }
         }
-        self.sitzung_bauen()?;
+        self.build_session()?;
         if self.session.is_null() || avcc.is_empty() {
             return Ok(None);
         }
@@ -993,21 +993,21 @@ impl Decoder {
             .bild
             .lock()
             .map_err(|_| anyhow!("Dekodierer-Ausgabe blockiert"))?;
-        if let Some(f) = b.fehler.take() {
+        if let Some(f) = b.error.take() {
             return Err(anyhow!(f));
         }
         if !b.da {
             return Ok(None);
         }
         b.da = false;
-        self.w = b.breite;
-        self.h = b.hoehe;
+        self.w = b.width_px;
+        self.h = b.height_px;
         rgba.clear();
         rgba.extend_from_slice(&b.rgba);
-        Ok(Some((b.breite, b.hoehe)))
+        Ok(Some((b.width_px, b.height_px)))
     }
 
-    fn sitzung_schliessen(&mut self) {
+    fn close_session(&mut self) {
         // SAFETY: the session and format description are owned by this struct and each is released
         // at most once: both are reset to null right after, so a repeated call (or the one from
         // Drop) is a no-op. Invalidate stops the output callback before the `Arc<Mutex<Bild>>` that
@@ -1028,7 +1028,7 @@ impl Decoder {
 
 impl Drop for Decoder {
     fn drop(&mut self) {
-        self.sitzung_schliessen();
+        self.close_session();
     }
 }
 

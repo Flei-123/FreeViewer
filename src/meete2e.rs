@@ -299,7 +299,7 @@ impl Key {
 
     /// Decrypt one audio frame. None = not our format (also: v1), wrong key
     /// or tampered - in every case do NOT show it.
-    pub fn oeffnen(&self, spur: Spur, rahmen: &[u8]) -> Option<Vec<u8>> {
+    pub fn open(&self, spur: Spur, rahmen: &[u8]) -> Option<Vec<u8>> {
         if !ist_geschuetzt(rahmen) {
             return None;
         }
@@ -565,7 +565,7 @@ impl Key {
     pub fn open_h264_guard(&self, wache: &mut Wache, rahmen: &[u8]) -> Option<Vec<u8>> {
         let (klar, kopf) = self.open_h264_head(rahmen)?;
         match kopf {
-            Some((salz, zaehler)) if !wache.pruefen(&salz, zaehler) => None,
+            Some((salz, ctr)) if !wache.check(&salz, ctr) => None,
             _ => Some(klar),
         }
     }
@@ -688,9 +688,9 @@ struct Window {
 }
 
 impl Window {
-    fn pruefen(&mut self, zaehler: u32) -> bool {
-        if zaehler > self.hoechste {
-            let schritt = zaehler - self.hoechste;
+    fn check(&mut self, ctr: u32) -> bool {
+        if ctr > self.hoechste {
+            let schritt = ctr - self.hoechste;
             // The old highest becomes bit (schritt - 1). With a step of
             // exactly 64 that is bit 63 and the old bits fall out; a larger
             // step forgets everything.
@@ -699,10 +699,10 @@ impl Window {
                 64 => 1u64 << 63,
                 _ => 0,
             };
-            self.hoechste = zaehler;
+            self.hoechste = ctr;
             return true;
         }
-        let go_back = self.hoechste - zaehler;
+        let go_back = self.hoechste - ctr;
         if go_back == 0 || go_back > 64 {
             return false; // exactly the highest, or long out of the window
         }
@@ -729,15 +729,15 @@ pub struct Wache {
 
 impl Wache {
     /// True = new and fine. False = repeat or too old.
-    pub fn pruefen(&mut self, salz: &Salt, zaehler: u32) -> bool {
+    pub fn check(&mut self, salz: &Salt, ctr: u32) -> bool {
         if let Some((_, f)) = self.fenster.iter_mut().find(|(s, _)| s == salz) {
-            return f.pruefen(zaehler);
+            return f.check(ctr);
         }
         if self.fenster.len() >= GUARD_SALTS_MAX {
             self.fenster.remove(0);
         }
         let f = Window {
-            hoechste: zaehler,
+            hoechste: ctr,
             fenster: 0,
         };
         self.fenster.push((*salz, f));
@@ -817,7 +817,7 @@ mod tests {
     // ------------------------------------------------------ H.264 --------
 
     #[test]
-    fn h264_hin_und_zurueck() {
+    fn h264_round_trip() {
         let k = Key::neu();
         let f = beispielrahmen();
         let g = video(&k).schuetzen_h264(&f);
@@ -949,7 +949,7 @@ mod tests {
         assert!(ist_geschuetzt(&g));
         assert_eq!(ist_schluesselbild(&g), Some(true));
         assert_eq!(counter_from(&g), Some(0));
-        assert_eq!(k.oeffnen(Spur::Ton, &g).as_deref(), Some(&klar[..]));
+        assert_eq!(k.open(Spur::Ton, &g).as_deref(), Some(&klar[..]));
     }
 
     /// The core: the plaintext must NOT be in the frame.
@@ -967,7 +967,7 @@ mod tests {
         let a = Key::neu();
         let b = Key::neu();
         let g = audio(&a).schuetzen(false, b"content");
-        assert!(b.oeffnen(Spur::Ton, &g).is_none());
+        assert!(b.open(Spur::Ton, &g).is_none());
     }
 
     /// Audio and video keys are separate: an audio frame never passes as video.
@@ -975,8 +975,8 @@ mod tests {
     fn spuren_sind_getrennt() {
         let k = Key::neu();
         let g = audio(&k).schuetzen(false, b"sound");
-        assert!(k.oeffnen(Spur::Bild, &g).is_none());
-        assert!(k.oeffnen(Spur::Ton, &g).is_some());
+        assert!(k.open(Spur::Bild, &g).is_none());
+        assert!(k.open(Spur::Ton, &g).is_some());
     }
 
     /// Every change to the frame must be noticed - also in the CLEAR header
@@ -990,7 +990,7 @@ mod tests {
             let mut kaputt = g.clone();
             kaputt[stelle] ^= 0x01;
             assert!(
-                k.oeffnen(Spur::Ton, &kaputt).is_none(),
+                k.open(Spur::Ton, &kaputt).is_none(),
                 "change at position {} went unnoticed",
                 stelle
             );
@@ -1006,7 +1006,7 @@ mod tests {
                    0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         assert!(!ist_geschuetzt(&alt));
         assert_eq!(ist_schluesselbild(&alt), None);
-        assert!(k.oeffnen(Spur::Bild, &alt).is_none());
+        assert!(k.open(Spur::Bild, &alt).is_none());
     }
 
     /// v1 audio frames (marker 0xE2, 6 byte header) are recognised as OLD
@@ -1018,7 +1018,7 @@ mod tests {
         v1.extend((0..40u8).map(|i| i ^ 0x5a));
         assert!(ist_altes_format(&v1));
         assert!(!ist_geschuetzt(&v1));
-        assert!(k.oeffnen(Spur::Ton, &v1).is_none());
+        assert!(k.open(Spur::Ton, &v1).is_none());
         let neu = audio(&k).schuetzen(false, b"x");
         assert!(!ist_altes_format(&neu));
     }
@@ -1031,7 +1031,7 @@ mod tests {
         assert!(!t.contains('+') && !t.contains('/') && !t.contains('='), "not link safe: {}", t);
         let go_back = Key::aus_text(&t).expect("must come back");
         let g = audio(&k).schuetzen(false, b"probe");
-        assert_eq!(go_back.oeffnen(Spur::Ton, &g).as_deref(), Some(&b"probe"[..]));
+        assert_eq!(go_back.open(Spur::Ton, &g).as_deref(), Some(&b"probe"[..]));
     }
 
     #[test]
@@ -1044,10 +1044,10 @@ mod tests {
 
     #[test]
     fn base64_haelt_beliebige_daten_aus() {
-        for laenge in [1usize, 2, 3, 4, 31, 32, 33, 100] {
-            let daten: Vec<u8> = (0..laenge).map(|i| (i * 7 % 256) as u8).collect();
+        for length in [1usize, 2, 3, 4, 31, 32, 33, 100] {
+            let daten: Vec<u8> = (0..length).map(|i| (i * 7 % 256) as u8).collect();
             let t = base64_url(&daten);
-            assert_eq!(base64_url_roundtrip(&t).as_deref(), Some(&daten[..]), "length {}", laenge);
+            assert_eq!(base64_url_roundtrip(&t).as_deref(), Some(&daten[..]), "length {}", length);
         }
     }
 
@@ -1065,29 +1065,29 @@ mod tests {
     #[test]
     fn wache_laesst_neues_durch_und_wiederholungen_nicht() {
         let mut w = Wache::default();
-        assert!(w.pruefen(&SALT_A, 10));
-        assert!(w.pruefen(&SALT_A, 11));
-        assert!(!w.pruefen(&SALT_A, 11), "repeat let through");
-        assert!(!w.pruefen(&SALT_A, 10), "repeat let through");
+        assert!(w.check(&SALT_A, 10));
+        assert!(w.check(&SALT_A, 11));
+        assert!(!w.check(&SALT_A, 11), "repeat let through");
+        assert!(!w.check(&SALT_A, 10), "repeat let through");
         // The network may reorder: delivering a gap later is fine.
-        assert!(w.pruefen(&SALT_A, 13));
-        assert!(w.pruefen(&SALT_A, 12), "late packet wrongly dropped");
-        assert!(!w.pruefen(&SALT_A, 12));
+        assert!(w.check(&SALT_A, 13));
+        assert!(w.check(&SALT_A, 12), "late packet wrongly dropped");
+        assert!(!w.check(&SALT_A, 12));
         // 1 is still INSIDE the 64 window at highest = 13: legit late packet.
-        assert!(w.pruefen(&SALT_A, 1), "late packet inside the window wrongly dropped");
-        assert!(!w.pruefen(&SALT_A, 1), "same one let through twice");
+        assert!(w.check(&SALT_A, 1), "late packet inside the window wrongly dropped");
+        assert!(!w.check(&SALT_A, 1), "same one let through twice");
         // Only far outside the window it is refused.
-        assert!(w.pruefen(&SALT_A, 200));
-        assert!(!w.pruefen(&SALT_A, 13), "ancient frame (187 back) let through");
+        assert!(w.check(&SALT_A, 200));
+        assert!(!w.check(&SALT_A, 13), "ancient frame (187 back) let through");
     }
 
     #[test]
     fn wache_kommt_mit_grossen_spruengen_klar() {
         let mut w = Wache::default();
-        assert!(w.pruefen(&SALT_A, 1));
-        assert!(w.pruefen(&SALT_A, 1_000_000));
-        assert!(!w.pruefen(&SALT_A, 500), "ancient frame let through");
-        assert!(w.pruefen(&SALT_A, 1_000_001));
+        assert!(w.check(&SALT_A, 1));
+        assert!(w.check(&SALT_A, 1_000_000));
+        assert!(!w.check(&SALT_A, 500), "ancient frame let through");
+        assert!(w.check(&SALT_A, 1_000_001));
     }
 
     /// Every sender stream counts on its own: counter 5 of sender B is not a
@@ -1095,12 +1095,12 @@ mod tests {
     #[test]
     fn guard_keeps_one_window_per_sender() {
         let mut w = Wache::default();
-        assert!(w.pruefen(&SALT_A, 5));
-        assert!(w.pruefen(&SALT_B, 5));
-        assert!(!w.pruefen(&SALT_A, 5));
-        assert!(!w.pruefen(&SALT_B, 5));
-        assert!(w.pruefen(&SALT_B, 6));
-        assert!(w.pruefen(&SALT_A, 4)); // late, inside A's window
+        assert!(w.check(&SALT_A, 5));
+        assert!(w.check(&SALT_B, 5));
+        assert!(!w.check(&SALT_A, 5));
+        assert!(!w.check(&SALT_B, 5));
+        assert!(w.check(&SALT_B, 6));
+        assert!(w.check(&SALT_A, 4)); // late, inside A's window
     }
 
     #[test]
@@ -1108,8 +1108,8 @@ mod tests {
         let mut w = Wache::default();
         for i in 0..(GUARD_SALTS_MAX as u8 + 3) {
             let s: Salt = [i, 9, 9, 9, 9, 9, 9, 9];
-            assert!(w.pruefen(&s, 1));
-            assert!(!w.pruefen(&s, 1));
+            assert!(w.check(&s, 1));
+            assert!(!w.check(&s, 1));
         }
         assert!(w.fenster.len() <= GUARD_SALTS_MAX, "guard grows without limit");
     }
@@ -1152,13 +1152,13 @@ mod tests {
     fn nonce_never_repeats_across_senders_streams_and_rejoin() {
         let k = Key::neu();
         let rahmen = beispielrahmen();
-        let mut gesehen: HashSet<(Vec<u8>, [u8; 12])> = HashSet::new();
+        let mut seen: HashSet<(Vec<u8>, [u8; 12])> = HashSet::new();
         let mut nonces: HashSet<[u8; 12]> = HashSet::new();
         let mut n_pairs = 0usize;
         let mut ein = |p: (Vec<u8>, [u8; 12])| {
             n_pairs += 1;
             nonces.insert(p.1);
-            assert!(gesehen.insert(p), "(key, nonce) used twice");
+            assert!(seen.insert(p), "(key, nonce) used twice");
         };
 
         // Two rounds: "first join" and "rejoin" - every stream is created anew.
@@ -1182,7 +1182,7 @@ mod tests {
         }
         // 2 joins x 2 participants x 200 rounds x (1 audio + 2 NALs camera + 2 NALs screen)
         assert_eq!(n_pairs, 2 * 2 * 200 * 5, "unexpected number of pairs");
-        assert_eq!(gesehen.len(), n_pairs);
+        assert_eq!(seen.len(), n_pairs);
         // Even the bare nonce (without the key) must not repeat: defence in
         // depth if two streams ever shared a key.
         assert_eq!(nonces.len(), n_pairs, "a nonce repeated across streams");
@@ -1227,11 +1227,11 @@ mod tests {
         let next_frame = s.schuetzen(false, b"next");
         assert_eq!(counter_from(&next_frame), Some(0), "counter wrapped without a new salt");
         assert_ne!(salz_von(&next_frame).unwrap(), salt_before, "same salt after exhaustion");
-        assert_eq!(k.oeffnen(Spur::Ton, &next_frame).as_deref(), Some(&b"next"[..]));
+        assert_eq!(k.open(Spur::Ton, &next_frame).as_deref(), Some(&b"next"[..]));
         // And the receiving guard treats the new salt as a new stream.
         let mut w = Wache::default();
-        assert!(w.pruefen(&salt_before, u32::MAX));
-        assert!(w.pruefen(&salz_von(&next_frame).unwrap(), 0));
+        assert!(w.check(&salt_before, u32::MAX));
+        assert!(w.check(&salz_von(&next_frame).unwrap(), 0));
     }
 
     /// A receiver must not remember keys of frames that did not authenticate
@@ -1246,10 +1246,10 @@ mod tests {
         for i in 0..200u32 {
             let mut f = genuine.clone();
             f[2..6].copy_from_slice(&i.to_be_bytes()); // forged salt
-            assert!(receiver.oeffnen(Spur::Ton, &f).is_none());
+            assert!(receiver.open(Spur::Ton, &f).is_none());
         }
         assert_eq!(count(&receiver), 0, "unauthenticated salts were cached");
-        assert!(receiver.oeffnen(Spur::Ton, &genuine).is_some());
+        assert!(receiver.open(Spur::Ton, &genuine).is_some());
         assert_eq!(count(&receiver), 1);
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
             assert_eq!(got, frame, "audio vector {}", e["counter"]);
             // A fresh receiver (empty key cache) opens the reference frame.
             let rx = vector_key(&v);
-            assert_eq!(rx.oeffnen(Spur::Ton, &frame), Some(plain));
+            assert_eq!(rx.open(Spur::Ton, &frame), Some(plain));
         }
         for e in v["h264"].as_array().unwrap() {
             let plain = hex::decode(e["plain"].as_str().unwrap()).unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
         for c in v["guard"].as_array().unwrap() {
             let mut w = Wache::default();
             for (i, st) in c["steps"].as_array().unwrap().iter().enumerate() {
-                let got = w.pruefen(
+                let got = w.check(
                     &salz_hex(st["salt"].as_str().unwrap()),
                     st["counter"].as_u64().unwrap() as u32,
                 );
@@ -1424,9 +1424,9 @@ mod tests {
         // its replay was accepted.
         let mut w = Wache::default();
         let s = [7u8; SALT_LEN];
-        assert!(w.pruefen(&s, 0));
-        assert!(w.pruefen(&s, 64));
-        assert!(!w.pruefen(&s, 0), "replay of the old highest accepted");
+        assert!(w.check(&s, 0));
+        assert!(w.check(&s, 64));
+        assert!(!w.check(&s, 0), "replay of the old highest accepted");
     }
 
     #[test]

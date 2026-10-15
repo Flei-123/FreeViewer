@@ -889,7 +889,7 @@ struct MeetWin {
     /// joining the browser does not show them either.
     spks: Vec<String>,
     spk_sel: usize,
-    /// Bildschirme dieses Rechners (Name, Breite, Hoehe) - einmal eingelesen.
+    /// Bildschirme dieses Rechners (Name, Width, Hoehe) - einmal eingelesen.
     monitore: Vec<(String, u32, u32)>,
     /// Open program windows (id, title, program). Only re-read every
     /// one and a half seconds: EnumWindows asks the window manager and the process

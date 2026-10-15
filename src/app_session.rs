@@ -332,8 +332,8 @@ impl App {
             }
             let offen = self.bar_pinned
                 || self.bar_seen.elapsed() < Duration::from_millis(2500);
-            let breite = self.bar_w.max(120.0);
-            let links = (screen.width() - breite).max(0.0) * self.bar_x.clamp(0.0, 1.0);
+            let width_px = self.bar_w.max(120.0);
+            let links = (screen.width() - width_px).max(0.0) * self.bar_x.clamp(0.0, 1.0);
             let pos = egui::pos2(screen.left() + links, screen.top() + 2.0);
             let p = theme::palette();
 

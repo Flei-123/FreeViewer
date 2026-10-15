@@ -176,7 +176,7 @@ pub enum Ereignis {
         mid: String,
         peer: u64,
         art: String,
-        bildschirm: bool,
+        display: bool,
     },
     /// SDP offer/answer from the server. Only used from stage 2,
     /// but already passed on cleanly now instead of being discarded.
@@ -260,7 +260,7 @@ impl Session {
             an,
         });
     }
-    pub fn bildschirm(&self, an: bool) {
+    pub fn display(&self, an: bool) {
         let _ = self.befehle.send(Befehl::Display(an));
     }
     /// Report the own pointer position in the shared image (0..1). Only useful
@@ -754,7 +754,7 @@ fn verarbeiten(
                 mid: strf("mid"),
                 peer: u64f("peer"),
                 art: strf("kind"),
-                bildschirm: boolf("screen"),
+                display: boolf("screen"),
             });
         }
         "offer" | "answer" => {

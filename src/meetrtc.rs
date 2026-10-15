@@ -46,7 +46,7 @@ pub enum TonEreignis {
         quelle: u64,
         /// true = shared screen, false = camera. Without it camera
         /// and screen of the same participant would land in the same bucket.
-        bildschirm: bool,
+        display: bool,
         daten: Vec<u8>,
         schluesselbild: bool,
         /// Which video format the server sends ("H264", "VP8", ...).
@@ -158,9 +158,9 @@ impl Ton {
         self.spur_art(mid, peer, false);
     }
     /// Zuordnung samt Streamart nachtragen.
-    pub fn spur_art(&self, mid: &str, peer: u64, bildschirm: bool) {
+    pub fn spur_art(&self, mid: &str, peer: u64, display: bool) {
         if let Ok(mut m) = self.spuren.lock() {
-            m.insert(mid.to_string(), (peer, bildschirm));
+            m.insert(mid.to_string(), (peer, display));
         }
     }
     pub fn finish(&self) {
@@ -505,12 +505,12 @@ fn lauf(
                         Some(s) => s.schuetzen_h264(&daten),
                         None => daten,
                     };
-                    let laenge = daten.len() as u64;
+                    let length = daten.len() as u64;
                     if let Err(e) = w.write(p, wanduhr, zeit, daten) {
                         let _ = ev.send(TonEreignis::FriendError(format!("Bild senden: {}", e)));
                     } else if let Ok(mut z) = zahlen.lock() {
                         z.bild_gesendet += 1;
-                        z.bytes_raus += laenge;
+                        z.bytes_raus += length;
                     }
                     // 90 kHz: one frame at 30 frames/s is 3000 steps.
                     bild_zeit += 3000;
@@ -543,12 +543,12 @@ fn lauf(
                         Some(s) => s.schuetzen_h264(&daten),
                         None => daten,
                     };
-                    let laenge = daten.len() as u64;
+                    let length = daten.len() as u64;
                     if let Err(e) = w.write(p, wanduhr, zeit, daten) {
                         let _ = ev.send(TonEreignis::FriendError(format!("Bildschirm senden: {}", e)));
                     } else if let Ok(mut z) = zahlen.lock() {
                         z.screen_sent += 1;
-                        z.bytes_raus += laenge;
+                        z.bytes_raus += length;
                     }
                     screen_time += 3000;
                 }
@@ -590,7 +590,7 @@ fn lauf(
                         }
                     }
                     Event::MediaData(d) if d.pt.to_string() != "0" && ist_video(&rtc, d.mid) => {
-                        let (peer, bildschirm) = spuren
+                        let (peer, display) = spuren
                             .lock()
                             .ok()
                             .and_then(|m| m.get(&d.mid.to_string()).copied())
@@ -604,7 +604,7 @@ fn lauf(
                         // on the encrypted frame (NAL type 5
                         // stays readable) - so the key
                         // is not needed for that.
-                        let schluessel = ist_schluesselbild(&d.data);
+                        let is_keyframe = ist_schluesselbild(&d.data);
                         let inhalt: Vec<u8> = match &e2e {
                             Some(k) => match k.open_h264_guard(
                                 e2e_wachen.entry(d.mid.to_string()).or_default(),
@@ -623,10 +623,10 @@ fn lauf(
                         // As long as no key frame has come: politely but
                         // persistently request one (at most every second).
                         let mid_txt = d.mid.to_string();
-                        let gesehen = *has_key.get(&mid_txt).unwrap_or(&false);
-                        if schluessel {
+                        let seen = *has_key.get(&mid_txt).unwrap_or(&false);
+                        if is_keyframe {
                             has_key.insert(mid_txt.clone(), true);
-                        } else if !gesehen {
+                        } else if !seen {
                             let faellig = zuletzt_gefragt
                                 .get(&mid_txt)
                                 .map(|t| t.elapsed() >= Duration::from_millis(1000))
@@ -648,9 +648,9 @@ fn lauf(
                             .unwrap_or_else(|| "?".into());
                         let _ = ev.send(TonEreignis::Bild {
                             quelle: peer,
-                            bildschirm,
+                            display,
                             daten: inhalt,
-                            schluesselbild: schluessel,
+                            schluesselbild: is_keyframe,
                             codec,
                         });
                     }
@@ -676,8 +676,8 @@ fn lauf(
                                 let kopf = crate::meete2e::salz_von(&d.data)
                                     .zip(crate::meete2e::counter_from(&d.data));
                                 let wache = e2e_wachen.entry(d.mid.to_string()).or_default();
-                                match (kopf, k.oeffnen(crate::meete2e::Spur::Ton, &d.data)) {
-                                    (Some((salz, zz)), Some(klar)) if wache.pruefen(&salz, zz) => klar,
+                                match (kopf, k.open(crate::meete2e::Spur::Ton, &d.data)) {
+                                    (Some((salz, zz)), Some(klar)) if wache.check(&salz, zz) => klar,
                                     _ => {
                                         // A participant on the old, nonce-reusing
                                         // format: tell the user once per stream.

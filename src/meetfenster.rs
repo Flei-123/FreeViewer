@@ -522,7 +522,7 @@ fn ctl_klein(
     symbol: &str,
     wort: &str,
     state: Ctl,
-    zaehler: Option<u32>,
+    ctr: Option<u32>,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::click());
     let (grund, rand, vorn) = match state {
@@ -549,7 +549,7 @@ fn ctl_klein(
     mal.rect_stroke(rect, 9.0, egui::Stroke::new(1.0, rand), egui::StrokeKind::Inside);
     icons::image(symbol, 17.0, vorn)
         .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(17.0)));
-    if let Some(n) = zaehler {
+    if let Some(n) = ctr {
         if n > 0 {
             let text = if n > 9 { "9+".to_string() } else { n.to_string() };
             let mitte = pos2(rect.right() - 5.0, rect.top() + 5.0);
@@ -575,7 +575,7 @@ fn ctl(
     symbol: &str,
     wort: &str,
     state: Ctl,
-    zaehler: Option<u32>,
+    ctr: Option<u32>,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(74.0, 58.0), egui::Sense::click());
     let (grund, rand, vorn, wortfarbe) = match state {
@@ -626,7 +626,7 @@ fn ctl(
         egui::FontId::proportional(10.5),
         wortfarbe,
     );
-    if let Some(n) = zaehler {
+    if let Some(n) = ctr {
         if n > 0 {
             let text = if n > 99 { "99+".to_string() } else { n.to_string() };
             let mitte = pos2(rect.right() - 13.0, rect.top() + 11.0);
@@ -934,10 +934,10 @@ fn kachel_malen_zoom(
     };
     let galley = mal.layout_no_wrap(schild_text, font, f.p.text);
     let zeichen = (if k.is_muted { 1 } else { 0 } + if k.hand { 1 } else { 0 }) as f32;
-    let breite = (galley.size().x + 18.0 + zeichen * 19.0).min(rect.width() - 16.0);
+    let width_px = (galley.size().x + 18.0 + zeichen * 19.0).min(rect.width() - 16.0);
     let schild = Rect::from_min_size(
         pos2(rect.left() + 8.0, rect.bottom() - 8.0 - 24.0),
-        vec2(breite, 24.0),
+        vec2(width_px, 24.0),
     );
     // Semi-transparent like in the browser (rgba(5,7,12,.68)) - the image can still
     // be guessed underneath, the text is readable anyway.
@@ -1006,13 +1006,13 @@ pub fn beitritt_ui(
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(f.p.bg))
         .show(ctx, |ui| {
-            let breite = ui.available_width().min(600.0);
+            let width_px = ui.available_width().min(600.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     ui.add_space(((ui.available_height() - 560.0) * 0.5).max(10.0));
                     ui.vertical_centered(|ui| {
-                        ui.set_max_width(breite);
+                        ui.set_max_width(width_px);
                         egui::Frame::NONE
                             .fill(f.p.card)
                             .stroke(egui::Stroke::new(1.0, f.p.line))
@@ -1067,9 +1067,9 @@ fn beitritt_karte(
     ui.add_space(10.0);
 
     // ---- Self-preview 16:9 with level bar and two round buttons
-    let breite = ui.available_width();
-    let hoehe = (breite * 9.0 / 16.0).clamp(120.0, 320.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(breite, hoehe), egui::Sense::hover());
+    let width_px = ui.available_width();
+    let height_px = (width_px * 9.0 / 16.0).clamp(120.0, 320.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width_px, height_px), egui::Sense::hover());
     {
         let mal = ui.painter_at(rect);
         mal.rect_filled(rect, 14.0, f.tief);
@@ -1248,7 +1248,7 @@ fn feld_beschriftung(ui: &mut egui::Ui, f: &Farben, symbol: Option<&str>, text: 
     ui.add_space(2.0);
 }
 
-fn geraete_wahl(ui: &mut egui::Ui, id: &str, breite: f32, namen: &[String], wahl: &mut usize) {
+fn geraete_wahl(ui: &mut egui::Ui, id: &str, width_px: f32, namen: &[String], wahl: &mut usize) {
     let jetzt = if *wahl == 0 {
         "Standardgerät".to_string()
     } else {
@@ -1258,7 +1258,7 @@ fn geraete_wahl(ui: &mut egui::Ui, id: &str, breite: f32, namen: &[String], wahl
             .unwrap_or_else(|| "Standardgerät".to_string())
     };
     egui::ComboBox::from_id_salt(id)
-        .width(breite - 8.0)
+        .width(width_px - 8.0)
         .selected_text(egui::RichText::new(kurz(&jetzt, 30)).size(12.5))
         .show_ui(ui, |ui| {
             if ui.selectable_label(*wahl == 0, "Standardgerät").clicked() {
@@ -1300,10 +1300,10 @@ pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(f.p.bg))
         .show(ctx, |ui| {
-            let breite = ui.available_width().min(420.0);
+            let width_px = ui.available_width().min(420.0);
             ui.add_space((ui.available_height() * 0.5 - 120.0).max(12.0));
             ui.vertical_centered(|ui| {
-                ui.set_max_width(breite);
+                ui.set_max_width(width_px);
                 egui::Frame::NONE
                     .fill(f.p.card)
                     .stroke(egui::Stroke::new(1.0, f.p.line))
@@ -1802,11 +1802,11 @@ fn settings(
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-            let breite = 300.0;
+            let width_px = 300.0;
 
             feld_beschriftung(ui, f, Some("cam"), "Kamera");
             let mut cam = s.cam_sel;
-            geraete_wahl(ui, "set_cam", breite, &s.cams, &mut cam);
+            geraete_wahl(ui, "set_cam", width_px, &s.cams, &mut cam);
             if cam != s.cam_sel {
                 aktionen.push(Aktion::KameraGeraet(cam));
             }
@@ -1821,7 +1821,7 @@ fn settings(
 
             feld_beschriftung(ui, f, Some("mic"), "Mikrofon");
             let mut mic = s.mic_sel;
-            geraete_wahl(ui, "set_mic", breite, &s.mics, &mut mic);
+            geraete_wahl(ui, "set_mic", width_px, &s.mics, &mut mic);
             if mic != s.mic_sel {
                 aktionen.push(Aktion::MikroGeraet(mic));
             }
@@ -1829,7 +1829,7 @@ fn settings(
 
             feld_beschriftung(ui, f, Some("sound"), "Lautsprecher");
             let mut spk = s.spk_sel;
-            geraete_wahl(ui, "set_spk", breite, &s.spks, &mut spk);
+            geraete_wahl(ui, "set_spk", width_px, &s.spks, &mut spk);
             if spk != s.spk_sel {
                 aktionen.push(Aktion::LautsprecherGeraet(spk));
             }
@@ -1950,7 +1950,7 @@ fn settings(
                 // Without feedback the slider would be flying blind: here
                 // you see whether sound is currently let through or blocked
                 // and what the gate has calibrated to.
-                let (r, _) = ui.allocate_exact_size(vec2(breite, 10.0), egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(vec2(width_px, 10.0), egui::Sense::hover());
                 let mal = ui.painter();
                 mal.rect_filled(r, 5.0, f.p.card_hi);
                 let pegel = s.eigener_pegel.clamp(0.0, 1.0).sqrt();
@@ -2016,10 +2016,10 @@ fn seite(
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
-    let breite = (ctx.screen_rect().width() * 0.45).min(340.0).max(220.0);
+    let width_px = (ctx.screen_rect().width() * 0.45).min(340.0).max(220.0);
     egui::SidePanel::right("meet_seite")
         .resizable(false)
-        .exact_width(breite)
+        .exact_width(width_px)
         .frame(
             egui::Frame::NONE
                 .fill(f.p.card)
@@ -2074,9 +2074,9 @@ fn reiter_knopf(
     symbol: &str,
     wort: &str,
     aktiv: bool,
-    breite: f32,
+    width_px: f32,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(breite.max(40.0), 44.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width_px.max(40.0), 44.0), egui::Sense::click());
     let tint = if aktiv {
         f.p.accent
     } else if resp.hovered() {
@@ -2117,11 +2117,11 @@ fn reiter_chat(
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
-    let hoehe = ui.available_height();
+    let height_px = ui.available_height();
     let input_height = 52.0;
     egui::ScrollArea::vertical()
         .id_salt("meet_chat_log")
-        .max_height(hoehe - input_height)
+        .max_height(height_px - input_height)
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show(ui, |ui| {
@@ -2695,11 +2695,11 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
     let h = 28.0;
     let mal = ui.painter_at(rect);
     // Roughly estimate the width from the texts - accurate enough for a bar.
-    let breite = 30.0 + 54.0 + 30.0 + 14.0 + anker_text.chars().count() as f32 * 6.4 + 16.0
+    let width_px = 30.0 + 54.0 + 30.0 + 14.0 + anker_text.chars().count() as f32 * 6.4 + 16.0
         + if z.zoom > 1.0 { 62.0 + 110.0 } else { 0.0 };
     let leiste = Rect::from_min_size(
-        pos2(rect.right() - 10.0 - breite.min(rect.width() - 20.0), rect.top() + 10.0),
-        vec2(breite.min(rect.width() - 20.0), h),
+        pos2(rect.right() - 10.0 - width_px.min(rect.width() - 20.0), rect.top() + 10.0),
+        vec2(width_px.min(rect.width() - 20.0), h),
     );
     mal.rect_filled(
         leiste,
@@ -2865,16 +2865,16 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
             Kameraplatz::Seite => {
                 let k = kameras.len().max(1) as f32;
                 let voll = st.width() * 9.0 / 16.0;
-                let hoehe =
+                let height_px =
                     ((st.height() - lueck * (k - 1.0)) / k).min(voll).max(48.0);
-                let breite = (hoehe * 16.0 / 9.0).min(st.width());
+                let width_px = (height_px * 16.0 / 9.0).min(st.width());
                 for (i, kk) in kameras.iter().enumerate() {
                     let r = Rect::from_min_size(
                         pos2(
-                            st.center().x - breite / 2.0,
-                            st.top() + i as f32 * (hoehe + lueck),
+                            st.center().x - width_px / 2.0,
+                            st.top() + i as f32 * (height_px + lueck),
                         ),
-                        vec2(breite, hoehe),
+                        vec2(width_px, height_px),
                     );
                     if r.bottom() > st.bottom() + 2.0 {
                         break;
@@ -2883,12 +2883,12 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
                 }
             }
             Kameraplatz::Unten => {
-                let hoehe = st.height();
-                let breite = hoehe * 16.0 / 9.0;
+                let height_px = st.height();
+                let width_px = height_px * 16.0 / 9.0;
                 for (i, kk) in kameras.iter().enumerate() {
                     let r = Rect::from_min_size(
-                        pos2(st.left() + i as f32 * (breite + lueck), st.top()),
-                        vec2(breite, hoehe),
+                        pos2(st.left() + i as f32 * (width_px + lueck), st.top()),
+                        vec2(width_px, height_px),
                     );
                     if r.right() > st.right() + 2.0 {
                         break;
@@ -2904,8 +2904,8 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
 /// How many columns? Zoom and Meet try every column count and
 /// take the one where the single tile becomes LARGEST - with a fixed
 /// 16:9, so that no faces are cropped. Exactly that here.
-pub fn beste_aufteilung(area: Vec2, anzahl: usize) -> (usize, f32) {
-    if anzahl == 0 {
+pub fn beste_aufteilung(area: Vec2, item_count: usize) -> (usize, f32) {
+    if item_count == 0 {
         return (1, 0.0);
     }
     let lueck = 10.0;
@@ -2913,19 +2913,19 @@ pub fn beste_aufteilung(area: Vec2, anzahl: usize) -> (usize, f32) {
     let platz_b = area.x - rand;
     let platz_h = area.y - rand;
     // Alone in the meeting the own tile should not fill the whole area.
-    let grenze = if anzahl == 1 {
+    let grenze = if item_count == 1 {
         (area.x * 0.7).min(880.0)
     } else {
         f32::INFINITY
     };
     let (mut beste_spalten, mut best_width) = (1usize, 0.0f32);
-    for s in 1..=anzahl {
-        let zeilen = anzahl.div_ceil(s) as f32;
+    for s in 1..=item_count {
+        let zeilen = item_count.div_ceil(s) as f32;
         let from_width = (platz_b - lueck * (s as f32 - 1.0)) / s as f32;
         let from_height = ((platz_h - lueck * (zeilen - 1.0)) / zeilen) * (16.0 / 9.0);
-        let breite = from_width.min(from_height).min(grenze);
-        if breite > best_width {
-            best_width = breite;
+        let width_px = from_width.min(from_height).min(grenze);
+        if width_px > best_width {
+            best_width = width_px;
             beste_spalten = s;
         }
     }
@@ -2944,23 +2944,23 @@ fn raster(ui: &mut egui::Ui, area: Rect, kacheln: &[Kachel], b: &Bilder, f: &Far
         return;
     }
     let lueck = 10.0;
-    let (spalten, breite) = beste_aufteilung(area.size(), kacheln.len());
-    let hoehe = breite * 9.0 / 16.0;
+    let (spalten, width_px) = beste_aufteilung(area.size(), kacheln.len());
+    let height_px = width_px * 9.0 / 16.0;
     let zeilen = kacheln.len().div_ceil(spalten);
-    let gesamt_h = zeilen as f32 * hoehe + (zeilen as f32 - 1.0) * lueck;
+    let gesamt_h = zeilen as f32 * height_px + (zeilen as f32 - 1.0) * lueck;
     let mut y = area.center().y - gesamt_h / 2.0;
     let mut i = 0usize;
     for _ in 0..zeilen {
         let in_zeile = spalten.min(kacheln.len() - i);
-        let gesamt_b = in_zeile as f32 * breite + (in_zeile as f32 - 1.0) * lueck;
+        let gesamt_b = in_zeile as f32 * width_px + (in_zeile as f32 - 1.0) * lueck;
         let mut x = area.center().x - gesamt_b / 2.0;
         for _ in 0..in_zeile {
-            let r = Rect::from_min_size(pos2(x, y), vec2(breite, hoehe));
+            let r = Rect::from_min_size(pos2(x, y), vec2(width_px, height_px));
             kachel_malen(ui, r, &kacheln[i], tex_fuer(&kacheln[i], b), f);
-            x += breite + lueck;
+            x += width_px + lueck;
             i += 1;
         }
-        y += hoehe + lueck;
+        y += height_px + lueck;
     }
 }
 
@@ -3149,11 +3149,11 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
     }
     let lueck = 6.0;
     let n = zeigen.len();
-    let hoehe = ((oben.height() - lueck * (n as f32 + 1.0)) / n as f32).max(40.0);
+    let height_px = ((oben.height() - lueck * (n as f32 + 1.0)) / n as f32).max(40.0);
     for (i, k) in zeigen.iter().enumerate() {
         let r = Rect::from_min_size(
-            pos2(oben.left() + lueck, oben.top() + lueck + i as f32 * (hoehe + lueck)),
-            vec2(oben.width() - 2.0 * lueck, hoehe),
+            pos2(oben.left() + lueck, oben.top() + lueck + i as f32 * (height_px + lueck)),
+            vec2(oben.width() - 2.0 * lueck, height_px),
         );
         if r.bottom() > oben.bottom() {
             break;
@@ -3196,9 +3196,9 @@ pub fn beispiel_beitritt() -> Beitritt {
 /// window than the one the customer gets.
 pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     let namen = ["Justin", "Anna Berger", "Cem", "Dora", "Emil", "Frida"];
-    let mach = |anzahl: usize, with_screen: bool, warteraum: bool| {
+    let mach = |item_count: usize, with_screen: bool, warteraum: bool| {
         let mut leute = Vec::new();
-        for i in 0..anzahl {
+        for i in 0..item_count {
             leute.push(Person {
                 id: i as u64 + 1,
                 name: namen[i % namen.len()].to_string(),
@@ -3444,9 +3444,9 @@ mod tests {
     #[test]
     fn aufteilung_macht_kacheln_so_gross_wie_moeglich() {
         // 4 people on a wide area: 2x2 is better than 4x1.
-        let (spalten, breite) = beste_aufteilung(vec2(1200.0, 700.0), 4);
+        let (spalten, width_px) = beste_aufteilung(vec2(1200.0, 700.0), 4);
         assert_eq!(spalten, 2, "2x2 haette die groesseren Kacheln");
-        assert!(breite > 300.0, "Kachel zu klein: {}", breite);
+        assert!(width_px > 300.0, "Kachel zu klein: {}", width_px);
         // One alone gets at most 70 % of the width - otherwise it looks
         // like an error, not like a meeting.
         let (_, allein) = beste_aufteilung(vec2(1200.0, 700.0), 1);

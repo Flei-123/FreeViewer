@@ -129,16 +129,16 @@ pub(crate) fn cli_e2evektor() -> eframe::Result<()> {
         let g = k.seal_h264_at(&salt, 42, &f);
         println!("H264 42 {} {}", hex::encode(&f), hex::encode(&g));
     }
-    for (spur, name, zaehler, key, klar) in [
+    for (spur, name, ctr, key, klar) in [
         (meete2e::Spur::Ton, "ton", 0u32, false, "Hallo Ton"),
         (meete2e::Spur::Bild, "bild", 1, true, "Ein Schluesselbild"),
         (meete2e::Spur::Bild, "bild", 4294967295, false, "Zaehler am Anschlag"),
     ] {
-        let g = k.seal_audio_at(spur, &salt, zaehler, key, klar.as_bytes());
+        let g = k.seal_audio_at(spur, &salt, ctr, key, klar.as_bytes());
         println!(
             "VEKTOR {} {} {} {} {}",
             name,
-            zaehler,
+            ctr,
             key,
             hex::encode(klar.as_bytes()),
             hex::encode(&g)
@@ -169,7 +169,7 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
         zahl(i + 6, 1.0),
         zahl(i + 7, 1.0),
     );
-    let auf = match meetschirm::oeffnen(nr, 1920, 1080, 15) {
+    let auf = match meetschirm::open(nr, 1920, 1080, 15) {
         Ok(a) => a,
         Err(e) => {
             println!("SCHIRMSHOT FEHLER {}", e);
@@ -191,11 +191,11 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
     match letztes {
         Some(b) => {
             let mut rgba = Vec::new();
-            if h264::nv12_to_rgba(&b.nv12, b.breite, b.hoehe, b.breite as usize, b.hoehe, &mut rgba)
+            if h264::nv12_to_rgba(&b.nv12, b.width_px, b.height_px, b.width_px as usize, b.height_px, &mut rgba)
             {
-                match image::RgbaImage::from_raw(b.breite, b.hoehe, rgba) {
+                match image::RgbaImage::from_raw(b.width_px, b.height_px, rgba) {
                     Some(img) => match img.save(&file) {
-                        Ok(_) => println!("SCHIRMSHOT OK {} ({}x{})", file, b.breite, b.hoehe),
+                        Ok(_) => println!("SCHIRMSHOT OK {} ({}x{})", file, b.width_px, b.height_px),
                         Err(e) => println!("SCHIRMSHOT SCHREIBFEHLER {}", e),
                     },
                     None => println!("SCHIRMSHOT PUFFER PASST NICHT"),
@@ -204,7 +204,7 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
                 println!("SCHIRMSHOT NV12 UNVOLLSTAENDIG");
             }
         }
-        None => println!("SCHIRMSHOT KEIN BILD ({})", auf.fehler()),
+        None => println!("SCHIRMSHOT KEIN BILD ({})", auf.error()),
     }
     auf.stoppen();
     return Ok(());
@@ -213,18 +213,18 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
 // CAMERA DIAGNOSTICS: what does the device offer, which format do
 // we really get, what do the raw and final images look like. Only that lets a
 // color or crop error be PROVEN instead of guessed.
-//   freeviewer --camtest [breite hoehe fps] [ordner]
+//   freeviewer --camtest [width_px height_px fps] [dir]
 pub(crate) fn cli_camtest(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let zahl = |n: usize, vor: u32| -> u32 {
         args.get(n).and_then(|v| v.parse::<u32>().ok()).unwrap_or(vor)
     };
     let (w, h, fps) = (zahl(i + 1, 640), zahl(i + 2, 360), zahl(i + 3, 15));
-    let ordner = args
+    let dir = args
         .get(i + 4)
         .cloned()
         .unwrap_or_else(|| ".".to_string());
-    println!("{}", meetcam::diagnose(None, w, h, fps, &ordner));
+    println!("{}", meetcam::diagnose(None, w, h, fps, &dir));
     return Ok(());
 }
 
