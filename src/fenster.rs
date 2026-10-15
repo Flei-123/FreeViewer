@@ -309,6 +309,8 @@ mod win {
         hwnd: HWND,
         mem: HDC,
         bmp: HBITMAP,
+        /// Object that was selected in `mem` before our bitmap (re-selected before DeleteObject).
+        prev_obj: HGDIOBJ,
         bits: *mut u8,
         buf: Vec<u8>,
         w: u32,
@@ -337,6 +339,7 @@ mod win {
                     hwnd,
                     mem: HDC::default(),
                     bmp: HBITMAP::default(),
+                    prev_obj: HGDIOBJ::default(),
                     bits: std::ptr::null_mut(),
                     buf: Vec::new(),
                     w: 0,
@@ -392,7 +395,7 @@ mod win {
                     return Err(anyhow!("CreateDIBSection: {}", e));
                 }
             };
-            SelectObject(mem, HGDIOBJ(bmp.0));
+            self.prev_obj = SelectObject(mem, HGDIOBJ(bmp.0));
             self.mem = mem;
             self.bmp = bmp;
             self.bits = bits as *mut u8;
@@ -405,10 +408,13 @@ mod win {
         // SAFETY: caller contract: `&mut self` gives exclusive access, and the bitmap/DC are owned
         // by this struct. Each handle is checked with is_invalid() before use and reset right
         // after, so a second call is a no-op, and `bits` (which points into the freed section) is
-        // set to null. Known nit: the bitmap is still selected into `mem` when it is deleted, so
-        // DeleteObject can fail and leak the bitmap (see roadmap); no dangling use results.
+        // set to null. The bitmap is deselected from `mem` (previous object selected again)
+        // before DeleteObject, because GDI refuses to delete a bitmap that is selected in a DC.
         unsafe fn release_area(&mut self) {
             if !self.bmp.is_invalid() {
+                if !self.mem.is_invalid() {
+                    SelectObject(self.mem, self.prev_obj);
+                }
                 let _ = DeleteObject(HGDIOBJ(self.bmp.0));
                 self.bmp = HBITMAP::default();
             }

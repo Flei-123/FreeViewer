@@ -198,6 +198,8 @@ mod gdi {
         rop: ROP_CODE,
         mem: HDC,
         bmp: HBITMAP,
+        /// Bitmap that was selected in `mem` before ours (re-selected before DeleteObject).
+        prev_obj: HGDIOBJ,
         bits: *mut u8,
         buf: Vec<u8>,
         w: u32,
@@ -263,7 +265,7 @@ mod gdi {
                         return Err(anyhow!("CreateDIBSection: {}", e));
                     }
                 };
-                SelectObject(mem, HGDIOBJ(bmp.0));
+                let prev_obj = SelectObject(mem, HGDIOBJ(bmp.0));
 
                 let both = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
                 let mut chosen: Option<(HDC, bool, ROP_CODE)> = None;
@@ -307,6 +309,7 @@ mod gdi {
                             rop,
                             mem,
                             bmp,
+                            prev_obj,
                             bits: bits as *mut u8,
                             buf: vec![0u8; (w as usize) * (h as usize) * 4],
                             w,
@@ -317,6 +320,8 @@ mod gdi {
                         })
                     }
                     None => {
+                        // deselect our bitmap first, DeleteObject fails on a selected bitmap
+                        SelectObject(mem, prev_obj);
                         let _ = DeleteObject(HGDIOBJ(bmp.0));
                         let _ = DeleteDC(mem);
                         if !desktop_dc.is_invalid() {
@@ -409,9 +414,12 @@ mod gdi {
             // SAFETY: Drop runs once: `bmp`, `mem` and `screen` are the handles this struct owns
             // (created in `new_index`) and nothing uses them afterwards, including `bits`, which
             // points into the bitmap memory. `screen` is freed the way it was acquired (DeleteDC
-            // for CreateDC, ReleaseDC for GetDC). Return values are ignored on purpose; a failure
+            // for CreateDC, ReleaseDC for GetDC). The bitmap is deselected from `mem` (the previous
+            // object is selected again) before DeleteObject, because GDI refuses to delete a
+            // bitmap that is selected into a DC. Return values are ignored on purpose; a failure
             // here only leaks a GDI object.
             unsafe {
+                SelectObject(self.mem, self.prev_obj);
                 let _ = DeleteObject(HGDIOBJ(self.bmp.0));
                 let _ = DeleteDC(self.mem);
                 if self.owned {

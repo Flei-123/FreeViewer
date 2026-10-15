@@ -57,6 +57,8 @@ pub const PRAEFIX: &str = "ds:";
 // because Microsoft declared them "deprecated" - they are still shipped
 // with Windows 10 and 11, though, and there is no replacement that
 // could read DirectShow sources.
+/// FORMAT_VideoInfo: `pbFormat` holds a VIDEOINFOHEADER only for this format type.
+const FORMAT_VIDEO_INFO: GUID = GUID::from_u128(0x05589f80_c356_11ce_bf01_00aa0055595a);
 const CLSID_SAMPLE_GRABBER: GUID = GUID::from_u128(0xc1f400a0_3f08_11d3_9f0b_006008039e37);
 const CLSID_NULL_RENDERER: GUID = GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
 
@@ -137,11 +139,12 @@ unsafe fn mit_geraeten<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>)
 /// All DirectShow cameras. The id carries `PRAEFIX`.
 pub fn liste() -> Vec<Geraet> {
     let mut aus: Vec<Geraet> = Vec::new();
-    // SAFETY: CoInitializeEx is called first on this thread, so COM is usable for `mit_geraeten` (a
-    // repeated or failed init is harmless here). The closure only borrows the local `aus` and no
-    // raw pointer leaves the block.
+    // SAFETY: CoInitializeEx is called first on this thread, so COM is usable for `mit_geraeten`
+    // (a repeated init is harmless; a failed one is not paired with CoUninitialize). The closure
+    // only borrows the local `aus` and no raw pointer leaves the block; `mit_geraeten` has dropped
+    // all its interfaces when it returns, so COM can be released right after.
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let com_ok = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         mit_geraeten::<()>(|_, name, pfad| {
             aus.push(Geraet {
                 name: name.to_string(),
@@ -149,6 +152,9 @@ pub fn liste() -> Vec<Geraet> {
             });
             None
         });
+        if com_ok {
+            CoUninitialize();
+        }
     }
     aus
 }
@@ -169,10 +175,10 @@ pub fn schleife(
 ) {
     // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
     // CoUninitialize after `schleife_inner` has returned, so every COM interface created there (all
-    // locals of that function) is already dropped when COM is torn down. Known nit: CoUninitialize
-    // is also called when CoInitializeEx failed (see roadmap); it cannot fail on a fresh thread.
+    // locals of that function) is already dropped when COM is torn down. CoUninitialize is only
+    // called when CoInitializeEx succeeded (S_OK or S_FALSE), so the calls stay balanced.
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let com_ok = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         if let Err(e) = schleife_inner(id, zw, zh, fps, &tx, &neu, &ctr, &stop) {
             // If the start already failed, the caller has not received anything
             // yet - the message has to go to them, otherwise it looks as if
@@ -182,7 +188,9 @@ pub fn schleife(
                 *f = e;
             }
         }
-        CoUninitialize();
+        if com_ok {
+            CoUninitialize();
+        }
     }
 }
 
@@ -289,7 +297,10 @@ unsafe fn schleife_inner(
     sg.GetConnectedMediaType(&mut mt)
         .ok()
         .map_err(|e| format!("Format nicht lesbar: {}", e))?;
-    if mt.cbFormat < std::mem::size_of::<VIDEOINFOHEADER>() as u32 || mt.pbFormat.is_null() {
+    if mt.formattype != FORMAT_VIDEO_INFO
+        || mt.cbFormat < std::mem::size_of::<VIDEOINFOHEADER>() as u32
+        || mt.pbFormat.is_null()
+    {
         aufraeumen(&mut mt);
         return Err("Format ohne Bildkopf".into());
     }

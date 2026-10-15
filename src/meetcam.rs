@@ -702,11 +702,10 @@ mod win {
     ) {
         // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
         // CoUninitialize after `schleife_inner` has returned, so every COM interface created there
-        // (all locals of that function) has already been dropped when COM is torn down. Known nit:
-        // CoUninitialize also runs if CoInitializeEx failed (see roadmap); it cannot fail on a
-        // fresh thread.
+        // (all locals of that function) has already been dropped when COM is torn down.
+        // CoUninitialize is only called when CoInitializeEx succeeded (S_OK or S_FALSE).
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let com_ok = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
             let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &ctr, &stop, &error);
             if let Err(e) = r {
                 // If the start already failed, the caller has not yet received
@@ -716,7 +715,9 @@ mod win {
                     *f = e;
                 }
             }
-            CoUninitialize();
+            if com_ok {
+                CoUninitialize();
+            }
         }
     }
 
@@ -889,12 +890,15 @@ mod win {
     /// only be measured on the REAL device - guessing does not help here.
     pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, dir: &str) -> String {
         // SAFETY: COM is initialised on this thread first and uninitialised after `diagnose_inner`
-        // returned, which has dropped all its interfaces by then (same pattern as `schleife`); the
-        // call has no pointer arguments of its own.
+        // returned, which has dropped all its interfaces by then (same pattern as `schleife`);
+        // CoUninitialize only pairs a successful CoInitializeEx. The call has no pointer
+        // arguments of its own.
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let com_ok = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
             let r = diagnose_inner(id, zw, zh, fps, dir);
-            CoUninitialize();
+            if com_ok {
+                CoUninitialize();
+            }
             r
         }
     }

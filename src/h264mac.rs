@@ -150,6 +150,12 @@ extern "C" {
         length_total: *mut usize,
         daten: *mut *mut u8,
     ) -> OSStatus;
+    fn CMBlockBufferCopyDataBytes(
+        bb: CMBlockBufferRef,
+        offset: usize,
+        length: usize,
+        destination: *mut c_void,
+    ) -> OSStatus;
     fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
         fd: CMFormatDescriptionRef,
         index: usize,
@@ -354,9 +360,10 @@ unsafe impl Send for Encoder {}
 // before that Arc is released, so the reference is valid whenever the callback runs. `probe` is a
 // live CMSampleBuffer owned by VideoToolbox for the duration of the call (null checked); `bb`, `fd`
 // and the parameter-set pointers belong to it and are only used inside the call. The slice over
-// `zeiger` uses `gesamt` (total length) and therefore assumes a contiguous block buffer (`hier ==
-// gesamt`), which the encoder delivers in practice but the code does not verify (see roadmap). The
-// AVCC parser bounds-checks every length against the slice. Parameter-set pointers are checked for
+// `data_ptr` is only valid for `here_len` bytes (contiguous length at offset 0). If the block
+// buffer is not contiguous (`here_len < total_len`), the whole payload is copied into an owned Vec
+// with CMBlockBufferCopyDataBytes instead of slicing `total_len` bytes from the pointer. The AVCC
+// parser bounds-checks every length against the slice. Parameter-set pointers are checked for
 // null and non-zero size before they are turned into slices.
 unsafe extern "C" fn kodier_rueckruf(
     refcon: *mut c_void,
@@ -380,16 +387,27 @@ unsafe extern "C" fn kodier_rueckruf(
     if bb.is_null() {
         return;
     }
-    let (mut hier, mut gesamt, mut zeiger) = (0usize, 0usize, std::ptr::null_mut::<u8>());
-    if CMBlockBufferGetDataPointer(bb, 0, &mut hier, &mut gesamt, &mut zeiger) != 0 || zeiger.is_null()
+    let (mut here_len, mut total_len, mut data_ptr) = (0usize, 0usize, std::ptr::null_mut::<u8>());
+    if CMBlockBufferGetDataPointer(bb, 0, &mut here_len, &mut total_len, &mut data_ptr) != 0
+        || data_ptr.is_null()
     {
         return;
     }
-    let avcc = std::slice::from_raw_parts(zeiger, gesamt);
+    // Only `here_len` bytes behind `data_ptr` are guaranteed contiguous; never slice more than that.
+    let mut copy: Vec<u8> = Vec::new();
+    let avcc: &[u8] = if here_len >= total_len {
+        std::slice::from_raw_parts(data_ptr, total_len)
+    } else {
+        copy.resize(total_len, 0);
+        if CMBlockBufferCopyDataBytes(bb, 0, total_len, copy.as_mut_ptr() as *mut c_void) != 0 {
+            return;
+        }
+        &copy
+    };
 
     // 2) Rewrite to Annex-B (start code instead of length) - that is the
     //    format the rest of the program and str0m expect.
-    let mut annexb: Vec<u8> = Vec::with_capacity(gesamt + 64);
+    let mut annexb: Vec<u8> = Vec::with_capacity(total_len + 64);
     let mut idr = false;
     let mut i = 0usize;
     while i + 4 <= avcc.len() {

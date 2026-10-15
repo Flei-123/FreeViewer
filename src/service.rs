@@ -318,8 +318,8 @@ mod imp {
         // locals that outlive the ChangeServiceConfig2W calls, which copy the data and keep no
         // pointers. `SERVICE_DESCRIPTIONW.lpDescription` points into the mutable `descw`.
         // `fa.cActions` equals the length of `actions`. Handle `h` is closed once, `m` once, on the
-        // success path; the two `?` returns (scm, CreateServiceW) can leak a handle on failure but
-        // never use one after close.
+        // success path; if CreateServiceW fails, `m` is closed before the error is returned (the
+        // `scm` failure itself has no handle to close).
         unsafe {
             let m = scm(SC_MANAGER_ALL_ACCESS)?;
             let name = wide(SERVICE_NAME);
@@ -344,7 +344,7 @@ mod imp {
                     );
                     h
                 }
-                Err(_) => CreateServiceW(
+                Err(_) => match CreateServiceW(
                     m,
                     PCWSTR(name.as_ptr()),
                     PCWSTR(disp.as_ptr()),
@@ -358,7 +358,13 @@ mod imp {
                     PCWSTR::null(),
                     PCWSTR::null(),
                     PCWSTR::null(),
-                )?,
+                ) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = CloseServiceHandle(m);
+                        return Err(e.into());
+                    }
+                },
             };
 
             let mut descw = wide(DESCRIPTION);
@@ -422,12 +428,17 @@ mod imp {
         }
         // SAFETY: `name` is NUL-terminated and outlives OpenServiceW, `st` and `cur` are local out
         // values, and `h`/`m` are SCM handles opened here and not used after CloseServiceHandle.
-        // The early `?` returns before the closes can leak a handle on failure (never a use after
-        // close).
+        // Every error return (OpenServiceW, DeleteService) closes the handles opened so far first.
         unsafe {
             let m = scm(SC_MANAGER_ALL_ACCESS)?;
             let name = wide(SERVICE_NAME);
-            let h = OpenServiceW(m, PCWSTR(name.as_ptr()), SERVICE_ALL_ACCESS)?;
+            let h = match OpenServiceW(m, PCWSTR(name.as_ptr()), SERVICE_ALL_ACCESS) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = CloseServiceHandle(m);
+                    return Err(e.into());
+                }
+            };
             let mut st = SERVICE_STATUS::default();
             let _ = ControlService(h, SERVICE_CONTROL_STOP, &mut st);
             for _ in 0..30 {
@@ -438,9 +449,10 @@ mod imp {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            DeleteService(h)?;
+            let deleted = DeleteService(h);
             let _ = CloseServiceHandle(h);
             let _ = CloseServiceHandle(m);
+            deleted?;
         }
         // without the service somebody has to start us again after a login
         if !crate::autostart::enabled() {
@@ -608,6 +620,9 @@ mod imp {
     /// Handle and pid of the agent we started.
     static AGENT: AtomicIsize = AtomicIsize::new(0);
     static AGENT_PID: AtomicU32 = AtomicU32::new(0);
+    /// Serialises `agent_alive` / `kill_agent` / the store in `spawn_agent`, so a process handle
+    /// is never queried while another thread closes it.
+    static AGENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn status_handle() -> SERVICE_STATUS_HANDLE {
         SERVICE_STATUS_HANDLE(STATUS_HANDLE.load(Ordering::Relaxed) as *mut c_void)
@@ -786,15 +801,16 @@ mod imp {
     }
 
     fn agent_alive() -> bool {
+        let _guard = AGENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = AGENT.load(Ordering::Relaxed);
         if h == 0 {
             return false;
         }
         // SAFETY: the handle value comes from the `AGENT` atomic, which holds a process handle
         // returned by CreateProcessAsUserW or 0 (checked above); `code` is a local out value.
-        // `kill_agent` swaps the handle out and closes it, so a concurrent `kill_agent` from
-        // another thread could leave this call with an already closed handle value (the call then
-        // only fails or answers about a recycled handle; no memory is involved, see roadmap).
+        // `kill_agent` swaps the handle out and closes it while holding `AGENT_LOCK`, which this
+        // function holds for the whole query, so the handle cannot be closed (or recycled) under
+        // it.
         unsafe {
             let mut code = 0u32;
             if GetExitCodeProcess(HANDLE(h as *mut c_void), &mut code).is_err() {
@@ -819,6 +835,7 @@ mod imp {
     }
 
     pub fn kill_agent() {
+        let _guard = AGENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = AGENT.swap(0, Ordering::Relaxed);
         AGENT_PID.store(0, Ordering::Relaxed);
         if h == 0 {
@@ -875,6 +892,7 @@ mod imp {
         let _ = CloseHandle(token);
         r?;
         let _ = CloseHandle(pi.hThread);
+        let _guard = AGENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         AGENT.store(pi.hProcess.0 as isize, Ordering::Relaxed);
         AGENT_PID.store(pi.dwProcessId, Ordering::Relaxed);
         // silence the unused warning on si without dropping it too early
