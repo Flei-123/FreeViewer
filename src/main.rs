@@ -148,19 +148,19 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Installieren / Deinstallieren (kommt vom Knopf in den Einstellungen,
-    // der sich vorher per UAC Administrator-Rechte holt).
+    // Install / uninstall (comes from the button in the settings,
+    // which first gets administrator rights via UAC).
     if std::env::args().any(|a| a == "--install") {
         let with_service = std::env::args().any(|a| a == "--with-service");
         match setup::install(with_service) {
             Ok(()) => {
                 println!("installiert nach {}", setup::install_dir().display());
-                // die installierte Fassung als normaler Nutzer starten
+                // start the installed version as a normal user
                 let _ = std::process::Command::new("explorer.exe")
                     .arg(setup::installed_exe().as_os_str())
                     .spawn();
-                // die Quelle (z. B. Downloads\FreeViewer-Einrichtung.exe) wird
-                // nicht mehr gebraucht - kurz nach dem Beenden loeschen
+                // the source (e.g. Downloads\FreeViewer-Einrichtung.exe) is
+                // no longer needed - delete it shortly after exiting
                 if let Ok(cur) = std::env::current_exe() {
                     if cur != setup::installed_exe() {
                         let _ = std::process::Command::new("cmd")
@@ -183,7 +183,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if std::env::args().any(|a| a == "--uninstall") {
-        // --all nimmt auch Konfiguration und Identitaets-Sicherung mit
+        // --all also takes the configuration and identity backup along
         let alles = std::env::args().any(|a| a == "--all");
         let r = if alles {
             setup::uninstall_all()
@@ -223,11 +223,11 @@ fn main() -> eframe::Result<()> {
     // Draws every page once without a window:  freeviewer --uitest
     // egui can run headless, so a broken layout or a panic in the GUI shows
     // up in a build step instead of in front of the user.
-    // Kameraliste (Stufe 2d): welche Kameras sieht der Rechner?
+    // Camera list (stage 2d): which cameras does this machine see?
     //   freeviewer --kameraliste
-    // E2E-PRUEFVEKTOREN: dieselben Zahlen, die der Browser rechnen muss.
-    // Ohne diesen Abgleich merkt man erst im Meeting, dass Browser und
-    // Programm sich gegenseitig nur als Bildsalat sehen.
+    // E2E TEST VECTORS: the same numbers the browser has to compute.
+    // Without this comparison you only notice in the meeting that browser and
+    // program see each other as nothing but visual noise.
     //   freeviewer --e2evektor
     if std::env::args().any(|a| a == "--e2evektor") {
         let roh: [u8; 32] = std::array::from_fn(|i| (i * 7 % 251) as u8);
@@ -236,7 +236,7 @@ fn main() -> eframe::Result<()> {
         let salt: meete2e::Salt = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8];
         println!("SCHLUESSEL {}", k.als_text());
         println!("SALT {}", hex::encode(salt));
-        // H.264-Vektor: derselbe Rahmen, den der Browser rechnen muss.
+        // H.264 vector: the same frame the browser has to compute.
         {
             let mut f: Vec<u8> = Vec::new();
             f.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96, 0x54]);
@@ -266,10 +266,10 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // BILDSCHIRM-DIAGNOSE: ein Bild GENAU so aufnehmen, wie es ins Meeting
-    // geht (inklusive Zuschnitt und gemaltem Mauszeiger) und als PNG
-    // ablegen. Nur so laesst sich belegen, ob Menues und Zeiger wirklich
-    // mitkommen - im laufenden Meeting sieht man es nur, man misst es nicht.
+    // SCREEN DIAGNOSTICS: capture an image EXACTLY as it goes into the meeting
+    // (including crop and painted mouse pointer) and save it as PNG.
+    // Only that proves whether menus and pointer really make it
+    // through - in a running meeting you only see it, you don't measure it.
     //   freeviewer --schirmshot <datei.png> [schirm-nr] [wartesekunden] [x y b h]
     if let Some(i) = std::env::args().position(|a| a == "--schirmshot") {
         let args: Vec<String> = std::env::args().collect();
@@ -297,8 +297,8 @@ fn main() -> eframe::Result<()> {
         };
         println!("SCHIRMSHOT quelle={} ausschnitt={:?}", auf.name, teil);
         auf.bereich_setzen(teil);
-        // Ein paar Sekunden laufen lassen - so hat man Zeit, ein Menue zu
-        // oeffnen, und der Aufnehmer ist eingeschwungen.
+        // Run for a few seconds - that gives time to open a menu,
+        // and the capturer has settled.
         let ende = std::time::Instant::now() + std::time::Duration::from_secs(warte);
         let mut letztes = None;
         while std::time::Instant::now() < ende {
@@ -329,9 +329,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // KAMERA-DIAGNOSE: was bietet das Geraet an, welches Format bekommen
-    // wir wirklich, wie sehen Roh- und Endbild aus. Nur so laesst sich ein
-    // Farb- oder Zuschnittfehler BELEGEN statt zu raten.
+    // CAMERA DIAGNOSTICS: what does the device offer, which format do
+    // we really get, what do the raw and final images look like. Only that lets a
+    // color or crop error be PROVEN instead of guessed.
     //   freeviewer --camtest [breite hoehe fps] [ordner]
     if let Some(i) = std::env::args().position(|a| a == "--camtest") {
         let args: Vec<String> = std::env::args().collect();
@@ -356,15 +356,15 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // GENERALPROBE (vor dem Release): der Client macht ALLES gleichzeitig -
-    // Ton, Kamera, Bildschirm, Fernsteuerungs-Freigabe - und zwar ueber
-    // GENAU die Klasse, die auch das Fenster benutzt (NativMeet). So wird
-    // gemessen, was die App wirklich tut, nicht ein Sonderweg daneben.
+    // DRESS REHEARSAL (before the release): the client does EVERYTHING at once -
+    // audio, camera, screen, remote-control release - through
+    // EXACTLY the class the window also uses (NativMeet). This measures
+    // what the app really does, not a side path next to it.
     //   freeviewer --meetalles <raum> <passwort> [name] [sekunden]
     if let Some(i) = std::env::args().position(|a| a == "--meetalles") {
         let args: Vec<String> = std::env::args().collect();
-        // Optionaler Ende-zu-Ende-Schluessel als letztes Argument - damit
-        // laesst sich der native Client gegen den Browser gegenpruefen.
+        // Optional end-to-end key as the last argument - this
+        // lets the native client be cross-checked against the browser.
         let e2e_arg = args
             .iter()
             .skip(i + 1)
@@ -404,8 +404,8 @@ fn main() -> eframe::Result<()> {
         let (mut kamera_an, mut schirm_an, mut frei) = (false, false, false);
         while start.elapsed().as_secs() < dauer {
             m.pumpe();
-            // Der Reihe nach zuschalten, damit sich im Browser sehen laesst,
-            // WAS gerade dazukommt.
+            // Switch on one after another so that it is visible in the browser
+            // WHAT is being added.
             let s = start.elapsed().as_secs();
             if !kamera_an && s >= 3 {
                 kamera_an = true;
@@ -446,9 +446,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Steuertest (Stufe 4): gibt der native Client die Fernsteuerung frei,
-    // und meldet er, wenn ein anderer sie freigibt? Der Browser bekommt
-    // dadurch seinen "Steuern"-Knopf - und wir hier die Gegenprobe.
+    // Control test (stage 4): does the native client release remote control,
+    // and does it notice when someone else releases it? The browser gets
+    // its "Control" button from this - and we get the counter-check here.
     //   freeviewer --meetsteuer <raum> <passwort> [name] [sekunden] [fvid]
     if let Some(i) = std::env::args().position(|a| a == "--meetsteuer") {
         let args: Vec<String> = std::env::args().collect();
@@ -463,8 +463,8 @@ fn main() -> eframe::Result<()> {
             .get(i + 5)
             .cloned()
             .unwrap_or_else(|| "497628420".to_string());
-        // Absichtlich OHNE Nummer beitreten: so laesst sich messen, dass der
-        // Knopf beim anderen erst durch die Freigabe entsteht.
+        // Deliberately join WITHOUT a number: this measures that the
+        // button only appears for the other side through the release.
         let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
             Ok(s) => s,
             Err(e) => {
@@ -487,8 +487,8 @@ fn main() -> eframe::Result<()> {
                             if fvid.is_empty() { "-" } else { fvid.as_str() }
                         );
                     }
-                    // Im Test sofort einlassen - sonst steht der Browser
-                    // vor der Tuer und nichts laesst sich messen.
+                    // Admit immediately in the test - otherwise the browser stands
+                    // at the door and nothing can be measured.
                     meetsig::Ereignis::WarteDazu { peer, .. } => {
                         sig.warteraum("admit", Some(*peer))
                     }
@@ -501,10 +501,10 @@ fn main() -> eframe::Result<()> {
                 sig.fernsteuerung(true, &fvid);
                 println!("STEUERTEST FREIGEGEBEN {}", fvid);
             }
-            // Mitten im Lauf wieder zuruecknehmen: nur so laesst sich zeigen,
-            // dass der Knopf beim anderen auch WIEDER verschwindet - waeren
-            // wir dafuer rausgegangen, waere es kein Beweis, sondern nur das
-            // uebliche Aufraeumen.
+            // Take it back in the middle of the run: only this shows
+            // that the button also DISAPPEARS again for the other side - had
+            // we left for that, it would be no proof, just the
+            // usual cleanup.
             if freigegeben
                 && !zurueck
                 && start.elapsed().as_secs() >= dauer.saturating_sub(8).max(9)
@@ -537,8 +537,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Empfangstest (Stufe 3b): was kommt beim nativen Client AN - und wird
-    // Kamera sauber von Bildschirm getrennt?
+    // Receive test (stage 3b): what ARRIVES at the native client - and is
+    // the camera cleanly separated from the screen?
     //   freeviewer --meetempfang <raum> <passwort> [name] [sekunden]
     if let Some(i) = std::env::args().position(|a| a == "--meetempfang") {
         let args: Vec<String> = std::env::args().collect();
@@ -646,8 +646,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Bildschirmtest (Stufe 3): den ECHTEN Bildschirm als eigene Spur ins
-    // Meeting schicken - ohne Browser.
+    // Screen test (stage 3): send the REAL screen as its own track into the
+    // meeting - without a browser.
     //   freeviewer --meetschirm <raum> <passwort> [name] [sekunden] [schirm-nr]
     if let Some(i) = std::env::args().position(|a| a == "--meetschirm") {
         let args: Vec<String> = std::env::args().collect();
@@ -723,8 +723,8 @@ fn main() -> eframe::Result<()> {
                         println!("EREIGNIS Antwort eingespielt, Bildschirm angemeldet");
                     }
                     meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
-                    // Fehler NICHT verschlucken - sonst sieht man am Ende nur
-                    // "nichts gesendet" und raet, woran es lag.
+                    // Do NOT swallow errors - otherwise at the end you only see
+                    // "nothing sent" and guess what the cause was.
                     meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
                     meetsig::Ereignis::Fehler { code, text } => {
                         println!("EREIGNIS Fehler {}: {}", code, text)
@@ -850,8 +850,8 @@ fn main() -> eframe::Result<()> {
         let mut angeboten = false;
         let mut pakete: u64 = 0;
         let mut gesendet: u64 = 0;
-        // Zwei Messwerte, damit "es kam ein Bild" belegbar ist: mittlere
-        // Helligkeit (nicht schwarz) und Unterschied zum Vorbild (bewegt).
+        // Two measurements so that "a picture arrived" is provable: mean
+        // brightness (not black) and difference to the previous image (moving).
         let mut hell_summe = 0f64;
         let mut bewegung = 0f64;
         let mut vorbild: Vec<u8> = Vec::new();
@@ -886,7 +886,7 @@ fn main() -> eframe::Result<()> {
                     println!("EREIGNIS Ton verbunden");
                 }
             }
-            // 15 Bilder je Sekunde senden - das neueste, das die Kamera hat.
+            // Send 15 frames per second - the newest one the camera has.
             if std::time::Instant::now() >= naechstes {
                 naechstes += std::time::Duration::from_millis(66);
                 if let Some(b) = kam.neuestes() {
@@ -939,8 +939,8 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Bildtest (Stufe 2b): sendet ein bewegtes Testmuster als H.264 ins
-    // Meeting. Damit laesst sich die ganze Kette messen, ohne Kamera.
+    // Video test (stage 2b): sends a moving test pattern as H.264 into the
+    // meeting. This measures the whole chain without a camera.
     //   freeviewer --meetbild <raum> <passwort> [name] [sekunden]
     if let Some(i) = std::env::args().position(|a| a == "--meetbild") {
         let args: Vec<String> = std::env::args().collect();
@@ -1036,10 +1036,10 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Praxistest mit ECHTEN Geraeten (Stufe 1c):
+    // Practical test with REAL devices (stage 1c):
     //   freeviewer --meetmik <raum> <passwort> [name] [sekunden]
-    // Nimmt das Standardmikrofon, spielt die anderen ueber den Lautsprecher
-    // und schaltet die Echo-Unterdrueckung dazwischen.
+    // Takes the default microphone, plays the others through the speaker
+    // and switches the echo suppression in between.
     if let Some(i) = std::env::args().position(|a| a == "--meetmik") {
         let args: Vec<String> = std::env::args().collect();
         let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -1135,9 +1135,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Nativer TON-Test (Stufe 1b): beitreten, echte WebRTC-Verbindung zum
-    // Medienserver aufbauen und einen Testton senden bzw. den Ton der
-    // anderen messen.
+    // Native AUDIO test (stage 1b): join, build a real WebRTC connection to the
+    // media server and send a test tone or measure the audio of the
+    // others.
     //   freeviewer --meetton <raum> <passwort> [name] [sekunden]
     if let Some(i) = std::env::args().position(|a| a == "--meetton") {
         let args: Vec<String> = std::env::args().collect();
@@ -1226,10 +1226,10 @@ fn main() -> eframe::Result<()> {
                     }
                 }
             }
-            // Absichtlicher SCHWALL: stellt einen Haenger der Oberflaeche
-            // nach (Fenster ziehen, Kamera oeffnen). Vorher blieb der
-            // dadurch entstandene Rueckstau fuer immer als Verzoegerung
-            // stehen - mit FV_MEET_BURST=500 laesst sich genau das messen.
+            // Deliberate FLOOD: reproduces a UI hang
+            // (dragging the window, opening the camera). Previously the
+            // resulting backlog stayed forever as a delay -
+            // with FV_MEET_BURST=500 exactly that can be measured.
             if !geschwallt && start.elapsed().as_secs() >= 4 {
                 geschwallt = true;
                 if schwall > 0 {
@@ -1239,7 +1239,7 @@ fn main() -> eframe::Result<()> {
                     println!("SCHWALL {} Rahmen auf einmal eingespeist ({} ms Ton)", schwall, schwall * 20);
                 }
             }
-            // alle 20 ms ein Rahmen Testton (440 Hz)
+            // every 20 ms one frame of test tone (440 Hz)
             while std::time::Instant::now() >= naechster {
                 naechster += std::time::Duration::from_millis(20);
                 ton.senden(meetrtc::testton(&mut phase, 440.0));
@@ -1267,9 +1267,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Nativer Meeting-Test (Stufe 1, ohne Oberflaeche):
+    // Native meeting test (stage 1, without UI):
     //   freeviewer --meettest <raum> <passwort> [name] [sekunden]
-    // Tritt bei, meldet jedes Ereignis, schickt einen Chat und geht wieder.
+    // Joins, reports every event, sends a chat message and leaves again.
     if let Some(i) = std::env::args().position(|a| a == "--meettest") {
         let args: Vec<String> = std::env::args().collect();
         let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -1283,16 +1283,16 @@ fn main() -> eframe::Result<()> {
                 while start.elapsed().as_secs() < dauer {
                     for e in s.abholen() {
                         println!("EREIGNIS {:?}", e);
-                        // Im Test lassen wir Wartende sofort herein, damit sich
-                        // der Weg Browser -> Warteraum -> nativer Gastgeber
-                        // wirklich pruefen laesst.
+                        // In the test we let waiting people in immediately so that the path
+                        // browser -> waiting room -> native host
+                        // can really be checked.
                         if let meetsig::Ereignis::WarteDazu { peer, .. } = e {
                             s.warteraum("admit", Some(peer));
                         }
-                        // Kommt jemand herein, begruessen wir ihn - so laesst
-                        // sich pruefen, dass Chat auch WIRKLICH bei den
-                        // anderen ankommt (frueher Gesagtes wird nicht
-                        // nachgereicht, das ist Absicht des Servers).
+                        // When someone comes in, we greet them - this way one
+                        // can check that chat REALLY reaches the others
+                        // (earlier messages are not re-delivered,
+                        // that is intended by the server).
                         if let meetsig::Ereignis::Dazu(_) = e {
                             s.chat("Willkommen im nativen Meeting");
                         }
@@ -1362,8 +1362,8 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
-        // Die Sitzungsansicht braucht ein Bild und einmal beide Leisten:
-        // im Fenster und schwebend im Vollbild.
+        // The session view needs an image and both bars once:
+        // in the window and floating in fullscreen.
         shared.connected.store(true, Ordering::Relaxed);
         *shared.remote_size.lock().unwrap() = (1920, 1080);
         for (name, full) in [("Sitzung", false), ("Sitzung Vollbild", true)] {
@@ -1385,10 +1385,10 @@ fn main() -> eframe::Result<()> {
         }
         shared.connected.store(false, Ordering::Relaxed);
 
-        // ---- Das Meetingfenster. Beitritts-Schirm einmal ueber den echten
-        // Weg (mit Geraeteabfrage), das laufende Meeting ueber eine
-        // zusammengebaute `Sicht` - so bekommt man volle Buehne, Chat,
-        // Warteraum und Bildschirmfreigabe zu sehen, ohne Server und Kamera.
+        // ---- The meeting window. Join screen once via the real
+        // path (with device query), the running meeting via an assembled
+        // `Sicht` - this shows full stage, chat,
+        // waiting room and screen share without server and camera.
         app.headless = true;
         app.meet_win_open(meet::Meeting {
             id: "482-913-770".to_string(),
@@ -1405,7 +1405,7 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         };
         {
-            // Zweimal zeichnen: der erste Rahmen legt Texturen und Ids an.
+            // Draw twice: the first frame creates textures and ids.
             let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| app.meet_win_ui(ctx));
             let out = ctx.run(meetschirm(920.0, 640.0), |ctx| app.meet_win_ui(ctx));
             let shapes = out.shapes.len();
@@ -1414,7 +1414,7 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
-        // Warteraum und Beitritts-Schirm gehoeren mit auf den Pruefstand.
+        // Waiting room and join screen also belong in the test.
         {
             let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| {
                 meetfenster::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
@@ -1427,13 +1427,13 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
-        // Alle Beispielzustaende durchrendern - dieselben, die --meetdemo
-        // spaeter als echtes Bild zeigt.
+        // Render all example states - the same ones --meetdemo
+        // later shows as a real image.
         let bilder = meetfenster::pruefbilder(&ctx);
         for i in 0..meetfenster::BEISPIELE {
             let (name, sicht, mut z) = meetfenster::beispiel(i);
             let (b, h) = if name.starts_with("Info") { (560.0, 430.0) } else { (1100.0, 720.0) };
-            // Zweimal: der erste Rahmen legt Ids und Texturen an.
+            // Twice: the first frame creates ids and textures.
             let _ = ctx.run(meetschirm(b, h), |ctx| {
                 meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
             });
@@ -1446,9 +1446,9 @@ fn main() -> eframe::Result<()> {
                 ok = false;
             }
         }
-        // Das kleine Fenster (Bild im Bild) hat eigene Knoepfe - die muss
-        // der Test mitzeichnen, sonst faellt ein Fehler darin erst beim
-        // Nutzer auf, weil es nie im Hauptfenster erscheint.
+        // The small window (picture-in-picture) has its own buttons - the test
+        // has to draw them too, otherwise an error in there is only noticed by
+        // the user, because it never appears in the main window.
         let mut pipzahl = std::collections::HashMap::new();
         for (nr, selbst) in [(2usize, true), (2, false), (0, true), (0, false)] {
             let (_, sicht, _) = meetfenster::beispiel(nr);
@@ -1465,14 +1465,14 @@ fn main() -> eframe::Result<()> {
                 "Meet Bild-im-Bild (Beispiel {}, eigen {}): {} Formen gezeichnet",
                 nr, selbst, n
             );
-            // Vier runde Knoepfe und ein Hintergrund - darunter fehlt etwas.
+            // Four round buttons and a background - something is missing underneath.
             if n < 12 {
                 ok = false;
             }
             pipzahl.insert((nr, selbst), n);
         }
-        // Die eigene Kachel MUSS einen Unterschied machen - sonst waere der
-        // Schalter wirkungslos und niemand merkte es.
+        // The own tile MUST make a difference - otherwise the
+        // switch would have no effect and nobody would notice.
         for nr in [0usize, 2] {
             let (an, aus) = (pipzahl[&(nr, true)], pipzahl[&(nr, false)]);
             if an <= aus {
@@ -1487,9 +1487,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    // Abgleich mit dem Konto einmal von Hand:  freeviewer --synctest [token]
-    // Ohne Token wird der genommen, der in account.json steht. Zeigt genau,
-    // was hoch- und was zurueckkam - fuer Fehlersuche ohne Fenster.
+    // Sync with the account once by hand:  freeviewer --synctest [token]
+    // Without a token the one in account.json is used. Shows exactly
+    // what went up and what came back - for troubleshooting without a window.
     if std::env::args().any(|a| a == "--synctest") {
         let arg = std::env::args()
             .skip_while(|a| a != "--synctest")
@@ -1533,8 +1533,8 @@ fn main() -> eframe::Result<()> {
     // ---- the Windows service -------------------------------------------
     // "freeviewer --service" is what the service control manager starts.
     if std::env::args().any(|a| a == "--service") {
-        // Der Dienst spielt Updates selbst ein - er laeuft als SYSTEM und
-        // braucht dafuer keine Administrator-Nachfrage.
+        // The service installs updates itself - it runs as SYSTEM and
+        // needs no administrator prompt for that.
         #[cfg(windows)]
         update::service_watcher();
         if let Err(e) = service::run() {
@@ -1743,10 +1743,10 @@ fn main() -> eframe::Result<()> {
     // Two processes with the same identity would kick each other off the
     // relay, so the GUI keeps its hands off while the service does the job.
     let service_owns_host = !is_agent && service::running();
-    // Der Mac darf Host sein, sobald die Anwendung mit einer Developer-ID
-    // signiert ist - ohne die vergibt macOS 15 die noetigen Rechte nicht
-    // dauerhaft (bei jedem Selbst-Update waeren sie wieder weg). Wir starten
-    // den Host trotzdem und sagen dem Nutzer, welche zwei Haken er braucht.
+    // The Mac may be host once the application is signed with a Developer ID
+    // - without it macOS 15 does not grant the necessary permissions
+    // permanently (they would be gone again with every self-update). We start
+    // the host anyway and tell the user which two checkmarks they need.
     if !viewer_only && !service_owns_host {
         let host_shared = shared.clone();
         let host_secret = secret.clone();
@@ -1768,10 +1768,10 @@ fn main() -> eframe::Result<()> {
         shared.set_host_status("Der Dienst betreibt den Host - auch am Anmeldebildschirm");
     }
     if !is_agent && !viewer_only {
-        // ID und Passwort vom Dienst-Agenten uebernehmen, sobald er sie
-        // veroeffentlicht - egal ob der Dienst schon beim Start lief oder
-        // die Oberflaeche erst spaeter ersetzt wurde. Nur frische Angaben
-        // (< 90 s) gelten, damit eine alte state.json nichts ueberschreibt.
+        // Take over ID and password from the service agent as soon as it
+        // publishes them - regardless of whether the service was already running at start or
+        // the UI was replaced only later. Only fresh values
+        // (< 90 s) count, so that an old state.json does not overwrite anything.
         let sh = shared.clone();
         std::thread::spawn(move || loop {
             if let Some(p) = service::published() {
@@ -2013,15 +2013,15 @@ fn main() -> eframe::Result<()> {
     }
 
     vinput::init(shared.clone());
-    // Ist der Dienst installiert, macht ER das Update (als SYSTEM, ohne
-    // Nachfrage). Oberflaeche und Agent sehen dann nur nach und melden es -
-    // sonst fragten beide staendig nach Administrator-Rechten.
+    // If the service is installed, IT does the update (as SYSTEM, without
+    // a prompt). UI and agent then only check and report it -
+    // otherwise both would constantly ask for administrator rights.
     update::watcher(shared.clone(), !service::installed());
 
-    // Bild der eigenen Oberflaeche:
+    // Image of the own UI:
     //   freeviewer --shot C:\bild.jpg [--view start|devices|settings] [--demo]
-    // Die App zeichnet sich selbst und speichert das Ergebnis - das klappt auch
-    // dann, wenn der Bildschirm gesperrt ist und ein Fensterfoto nur weiss waere.
+    // The app draws itself and saves the result - this also works
+    // when the screen is locked and a window photo would be just white.
     if let Some(i) = std::env::args().position(|a| a == "--shot") {
         let path = std::env::args()
             .nth(i + 1)
@@ -2091,11 +2091,11 @@ fn main() -> eframe::Result<()> {
                     };
                 }
                 if let Some(mi) = std::env::args().position(|a| a == "--meetshot") {
-                    // Das eigene Meeting-Fenster oeffnen und DAVON das Bild.
-                    // Mit "--meetshot bild.jpg RAUM PASS" wird wirklich
-                    // beigetreten - dann zeigt das Bild das echte Meeting und
-                    // nicht nur den Beitritts-Schirm.
-                    // Aufruf:  --shot bild.jpg --meetshot [RAUM PASS]
+                    // Open the own meeting window and take the image OF THAT.
+                    // With "--meetshot bild.jpg RAUM PASS" it really
+                    // joins - then the image shows the real meeting and
+                    // not just the join screen.
+                    // Usage:  --shot bild.jpg --meetshot [RAUM PASS]
                     let a2 = std::env::args().nth(mi + 1).unwrap_or_default();
                     let a3 = std::env::args().nth(mi + 2).unwrap_or_default();
                     let echt = a2.contains('-') && !a3.is_empty();
@@ -2107,17 +2107,17 @@ fn main() -> eframe::Result<()> {
                         e2e: String::new(),
                     });
                     app.meet_shot_join = echt;
-                    // Mit echtem Beitritt muss die Verbindung erst stehen.
+                    // With a real join the connection has to be up first.
                     app.shot_warte = if echt { 900 } else { 60 };
-                    // shot MUSS mitgesetzt sein - der Bildmacher haengt daran.
+                    // shot MUST be set as well - the image maker depends on it.
                     app.shot = Some(std::path::PathBuf::from(path.clone()));
                     app.meet_shot = Some(std::path::PathBuf::from(path));
                 } else {
                     app.shot = Some(std::path::PathBuf::from(path));
                 }
-                // --shotwait N: Bild erst nach N Bildern - so laesst sich
-                // auch ein Zustand fotografieren, der ein paar Sekunden
-                // braucht (z. B. "Relay nicht erreichbar").
+                // --shotwait N: take the image only after N frames - this lets
+                // a state be photographed that needs a few seconds
+                // (e.g. "relay not reachable").
                 if let Some(n) = std::env::args()
                     .skip_while(|a| a != "--shotwait")
                     .nth(1)
@@ -2133,17 +2133,17 @@ fn main() -> eframe::Result<()> {
     // Started by the autostart entry (or by the service): no window in the
     // user's face, only the tray icon. The host runs either way.
     let start_hidden = std::env::args().any(|a| a == "--tray" || a == "--background");
-    // Kam eine freeviewer://-Adresse mit? Dann in den Briefkasten legen -
-    // egal ob diese Fassung sie selbst abholt oder die schon laufende.
+    // Did a freeviewer:// address come along? Then put it in the mailbox -
+    // regardless of whether this version picks it up itself or the already running one.
     if let Some(url) = std::env::args().find(|a| link::is_ours(a)) {
         if link::parse(&url).is_some() {
             link::drop_in(&url);
         }
     }
 
-    // Frisch aus dem Browser geladen? Dann steckt der Einrichtungs-Auftrag
-    // (Code + Wunschname) am Ende der Datei - das Geraet richtet sich selbst
-    // ein, sobald die Oberflaeche ihre ID kennt.
+    // Freshly downloaded from the browser? Then the setup job
+    // (code + desired name) sits at the end of the file - the device sets itself
+    // up as soon as the UI knows its ID.
     let embedded = if setup::running_installed() {
         None
     } else {
@@ -2151,30 +2151,30 @@ fn main() -> eframe::Result<()> {
     };
 
     // A second window of the same user is pointless - bring the first one to
-    // the front instead. Der Dienst-Agent zaehlt nicht als zweites Fenster,
-    // er laeuft bewusst neben der Oberflaeche.
+    // the front instead. The service agent does not count as a second window,
+    // it deliberately runs next to the UI.
     if !tray::claim_single_instance(is_agent) {
         if !is_agent {
             println!("{} laeuft bereits - Fenster nach vorne geholt.", crate::brand::NAME);
         }
         return Ok(());
     }
-    // Das Schema fuer diesen Nutzer eintragen (portabel, ohne Adminrechte).
-    // Bei der richtigen Installation kommt zusaetzlich der maschinenweite
-    // Eintrag dazu.
+    // Register the scheme for this user (portable, without admin rights).
+    // In a proper installation the machine-wide entry
+    // is added as well.
     if !link::points_here() {
         let _ = link::register(false);
     }
     autostart::refresh();
     if is_agent {
-        // Nach einem Update: stand vorher ein Fenster offen, wird es hier
-        // wieder geoeffnet. Der Dienst kann das nicht selbst - er sitzt in
-        // Sitzung 0 und wuerde auf einem unsichtbaren Desktop landen.
+        // After an update: if a window was open before, it is reopened
+        // here. The service cannot do that itself - it sits in
+        // session 0 and would end up on an invisible desktop.
         update::gui_wieder_oeffnen();
     }
     if is_agent {
-        // Zwei gleiche Tablett-Symbole (Agent + Oberflaeche) taugen nichts:
-        // der Agent zeigt seins nur, solange keine Oberflaeche laeuft.
+        // Two identical tray icons (agent + UI) are useless:
+        // the agent shows its own only while no UI is running.
         let tray_shared = shared.clone();
         std::thread::spawn(move || loop {
             if tray::gui_running() {
@@ -2188,15 +2188,15 @@ fn main() -> eframe::Result<()> {
         });
     } else {
         tray::start(shared.clone());
-        // Dem Dienst (Sitzung 0) mitteilen, dass hier ein Fenster steht.
-        // Ohne diese Marke weiss er nach dem Update nicht, ob er die
-        // Oberflaeche wieder oeffnen soll.
+        // Tell the service (session 0) that a window is open here.
+        // Without this marker it does not know after the update whether it should
+        // reopen the UI.
         update::gui_marke_pflegen();
     }
 
-    // FV_RENDERER=dx erzwingt DirectX von Anfang an (fuer die Hotline:
-    // wer weiss, dass sein Rechner kein OpenGL hat, spart sich die zwei
-    // Fehlversuche). Alles andere geht den normalen Weg.
+    // FV_RENDERER=dx forces DirectX from the start (for the hotline:
+    // anyone who knows their machine has no OpenGL saves themselves the two
+    // failed attempts). Anything else takes the normal path.
     let dx_erzwungen = std::env::var("FV_RENDERER")
         .map(|v| {
             let v = v.to_lowercase();
@@ -2218,9 +2218,9 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    // Zweiter Anlauf ohne Hardwarebeschleunigung: manche Server haben zwar
-    // OpenGL, aber keinen Hardware-Kontext. Lieber langsam zeichnen als gar
-    // nicht starten.
+    // Second attempt without hardware acceleration: some servers do have
+    // OpenGL, but no hardware context. Better to draw slowly than not
+    // start at all.
     let shared2 = shared.clone();
     let shared3 = shared.clone();
     let shared4 = shared.clone();
@@ -2230,9 +2230,9 @@ fn main() -> eframe::Result<()> {
         install_theme(&cc.egui_ctx);
         Ok(Box::new(App::new(shared, start_hidden, embedded.clone())) as Box<dyn eframe::App>)
     };
-    // Der Wachhund: `run_native` haengt auf Rechnern ohne brauchbare
-    // Grafikausgabe, statt einen Fehler zurueckzugeben - ein Rueckgabewert,
-    // der nie kommt, laesst sich nicht auswerten.
+    // The watchdog: `run_native` hangs on machines without usable
+    // graphics output instead of returning an error - a return value
+    // that never comes cannot be evaluated.
     {
         let wach = shared3.clone();
         std::thread::spawn(move || {
@@ -2246,10 +2246,10 @@ fn main() -> eframe::Result<()> {
             if BILD_GEZEICHNET.load(Ordering::Relaxed) {
                 return;
             }
-            // Die Anlaeufe (OpenGL, OpenGL ohne Beschleunigung, DirectX)
-            // melden sich selbst, wenn sie alle durch sind - dann kuemmert
-            // sich der Hauptpfad um die Meldung. Der Wachhund ist NUR fuer
-            // den Fall da, dass `run_native` haengt und nie zurueckkommt.
+            // The attempts (OpenGL, OpenGL without acceleration, DirectX)
+            // report themselves when they are all through - then the main path
+            // takes care of the message. The watchdog is ONLY there for
+            // the case that `run_native` hangs and never returns.
             if ANLAEUFE_FERTIG.load(Ordering::Relaxed) {
                 return;
             }
@@ -2302,20 +2302,20 @@ fn main() -> eframe::Result<()> {
         Err(e2) => e2,
     };
 
-    // DRITTER ANLAUF: DIRECTX STATT OPENGL.
+    // THIRD ATTEMPT: DIRECTX INSTEAD OF OPENGL.
     //
-    // Genau hier lag der Kundenfall vom 20.08.2026 (start.log:
-    // "egui_glow requires opengl 2.0+"). Windows bringt von sich aus NUR
-    // OpenGL 1.1 mit (der "GDI Generic"-Renderer) - auf Servern, in
-    // Remotedesktop-Sitzungen und in virtuellen Maschinen ohne
-    // Grafiktreiber ist das alles, was es gibt. Beide OpenGL-Anlaeufe
-    // muessen dort scheitern, auch der ohne Hardwarebeschleunigung:
-    // "keine Beschleunigung" heisst bei OpenGL trotzdem OpenGL.
+    // This is exactly where the customer case of 20.08.2026 lay (start.log:
+    // "egui_glow requires opengl 2.0+"). Windows ships ONLY
+    // OpenGL 1.1 by itself (the "GDI Generic" renderer) - on servers, in
+    // remote desktop sessions and in virtual machines without a
+    // graphics driver that is all there is. Both OpenGL attempts
+    // must fail there, also the one without hardware acceleration:
+    // "no acceleration" still means OpenGL.
     //
-    // Direct3D ist die Windows-eigene Schnittstelle und IMMER da: fehlt
-    // eine echte Grafikkarte, springt Microsofts eigener Software-
-    // Rasterizer WARP ein ("Microsoft Basic Render Driver"). Deshalb
-    // zeichnet dieser Anlauf auch auf einer nackten VM ein Fenster.
+    // Direct3D is the Windows-native interface and is ALWAYS there: if
+    // there is no real graphics card, Microsoft's own software
+    // rasterizer WARP steps in ("Microsoft Basic Render Driver"). That is why
+    // this attempt draws a window even on a bare VM.
     capture::log_line(&format!(
         "OpenGL geht nicht ({}) - dritter Anlauf mit DirectX (wgpu)",
         e2
@@ -2341,8 +2341,8 @@ fn main() -> eframe::Result<()> {
     match dritt {
         Ok(()) => Ok(()),
         Err(e3) => {
-            // Kein Fenster - aber der Rechner soll trotzdem erreichbar sein.
-            // Auf einem Server ist genau das der eigentliche Zweck.
+            // No window - but the machine should still be reachable.
+            // On a server that is exactly the actual purpose.
             ANLAEUFE_FERTIG.store(true, Ordering::Relaxed);
             start_fehler_melden(&format!(
                 "{} | ohne Hardwarebeschleunigung: {} | DirectX: {}",
@@ -2353,8 +2353,8 @@ fn main() -> eframe::Result<()> {
     }
 }
 
-/// Der Host laeuft schon in eigenen Faeden - hier wird nur gewartet und
-/// protokolliert, damit der Prozess am Leben bleibt.
+/// The host already runs in its own threads - here we only wait and
+/// log so that the process stays alive.
 fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
     capture::log_line("Oberflaeche geht nicht - laufe als Host ohne Fenster weiter");
     let mut zuletzt = String::new();
@@ -2371,20 +2371,20 @@ fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
     }
 }
 
-/// Wurde schon mindestens ein Bild gezeichnet? Daran haengt der Wachhund:
-/// ohne dieses Lebenszeichen ist die Oberflaeche nicht gestartet.
+/// Has at least one frame been drawn yet? The watchdog depends on this:
+/// without this sign of life the UI has not started.
 static BILD_GEZEICHNET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Sind alle Anlaeufe (OpenGL, OpenGL ohne Beschleunigung, DirectX) durch?
-/// Dann meldet der Hauptpfad den Fehler - der Wachhund haelt sich raus.
+/// Are all attempts (OpenGL, OpenGL without acceleration, DirectX) through?
+/// Then the main path reports the error - the watchdog stays out.
 static ANLAEUFE_FERTIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Warum der Start schiefging - fuer Menschen lesbar.
+/// Why the start went wrong - readable for humans.
 ///
-/// Der haeufigste Fall ist ein Rechner ohne brauchbare Grafikausgabe:
-/// Windows-Server mit "Microsoft Basic Display Adapter", eine RDP-Sitzung
-/// ohne Grafikweiterleitung, oder ein Rechner ohne Grafiktreiber. Dort
-/// scheitert der OpenGL-Kontext, den die Oberflaeche braucht.
+/// The most common case is a machine without usable graphics output:
+/// Windows Server with "Microsoft Basic Display Adapter", an RDP session
+/// without graphics redirection, or a machine without a graphics driver. There
+/// the OpenGL context the UI needs fails.
 fn start_fehler_text(e: &str) -> String {
     let low = e.to_lowercase();
     let grund = if low.contains("opengl")
@@ -2416,7 +2416,7 @@ fn start_fehler_text(e: &str) -> String {
     )
 }
 
-/// Schreibt den Fehler ins Log und zeigt ihn als Fenster.
+/// Writes the error to the log and shows it as a window.
 fn start_fehler_melden(e: &str) {
     let text = start_fehler_text(e);
     let pfad = ident::config_dir().join("start.log");
@@ -2440,7 +2440,7 @@ fn start_fehler_melden(e: &str) {
     fehlerfenster(&text);
 }
 
-/// Datum und Uhrzeit ohne zusaetzliche Kiste - fuer eine Logzeile reicht das.
+/// Date and time without an extra crate - enough for a log line.
 fn chrono_zeit() -> String {
     let jetzt = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2487,13 +2487,13 @@ struct App {
     pw_fixed: bool,
     /// Everyone we connected to before.
     book: partners::Book,
-    /// Freundesliste samt Abgleich mit dem Relay. Erst beim ersten Blick
-    /// auf die Seite gestartet - wer sie nie oeffnet, soll auch keinen
-    /// Hintergrundverkehr erzeugen.
+    /// Friends list including sync with the relay. Only started on the first
+    /// look at the page - whoever never opens it should not
+    /// cause background traffic either.
     freunde: Option<std::sync::Arc<freunde::Dienst>>,
     /// Eingabefeld "FreeViewer-Nummer des Freundes".
     freunde_id: String,
-    /// Letzte Rueckmeldung zum Freunde-System (Fehler oder Erfolg).
+    /// Last feedback on the friends system (error or success).
     freunde_meldung: String,
     /// Store the password of the next connection?
     remember_pw: bool,
@@ -2525,19 +2525,19 @@ struct App {
     selected: Option<String>,
     /// Who is online right now (asked at the relay).
     presence: Arc<presence::Watch>,
-    /// --shot: wohin das Bild der eigenen Oberflaeche geschrieben wird.
+    /// --shot: where the image of the own UI is written to.
     shot: Option<std::path::PathBuf>,
-    /// --meetshot: dasselbe fuer das eigene Meeting-Fenster (Testhaken).
+    /// --meetshot: the same for the own meeting window.
     meet_shot: Option<std::path::PathBuf>,
-    /// Framezaehler und Scharfschaltung des Meetshots.
+    /// Frame counter and arming of the meetshot.
     meet_shot_n: u32,
     meet_shot_arm: u32,
     /// --meetshot mit Raum/Passwort: automatisch beitreten.
     meet_shot_join: bool,
-    /// Nach wie vielen Rahmen das Bild gemacht wird (Beitritt braucht Zeit).
+    /// After how many frames the image is taken (joining takes time).
     shot_warte: u32,
-    /// Gezeichnete Frames seit dem Start im --shot-Modus.
-    /// Gewaehltes Aussehen (Vorlage, Akzent, Groesse, Rundung).
+    /// Frames drawn since the start in --shot mode.
+    /// Chosen look (template, accent, size, rounding).
     look: theme::Appearance,
     /// Gewaehlter Bereich in den Einstellungen.
     stab: SettingsTab,
@@ -2545,20 +2545,20 @@ struct App {
     fb_bug: bool,
     fb_text: String,
     fb_contact: String,
-    /// Geraeteliste: gewaehlter Ordner und offenes Bearbeiten-Feld.
+    /// Device list: selected folder and open edit field.
     folder: String,
     /// Offenes "Geraet hinzufuegen"-Fenster.
     add_dev: Option<AddDev>,
     edit_dev: Option<DevEdit>,
-    /// Wann die Titelleiste zuletzt eingefaerbt wurde.
+    /// When the title bar was last colored.
     caption_tick: std::time::Instant,
     shot_n: u32,
     /// Feste Passwoerter dieses Rechners (Einstellungen -> Zugriff).
     pw_list: Vec<pwlist::Entry>,
-    /// Eingabefelder fuer einen neuen Eintrag.
+    /// Input fields for a new entry.
     pw_new: String,
     pw_new_label: String,
-    /// Welcher Eintrag gerade im Klartext zu sehen ist.
+    /// Which entry is currently visible in plain text.
     pw_show: Option<usize>,
     /// Session password on the start page: shown in clear text?
     pw_visible: bool,
@@ -2573,70 +2573,70 @@ struct App {
     last_ask: bool,
     /// A change that would replace the permanent password waits for a yes.
     pw_overwrite: Option<PwOverwrite>,
-    /// Soll beim Installieren gleich der Dienst mit eingerichtet werden?
+    /// Should the service be set up right away during installation?
     install_service: bool,
-    /// Wann zuletzt im Briefkasten nachgesehen wurde.
+    /// When the mailbox was last checked.
     link_check: std::time::Instant,
-    /// Meet: Eingaben und was der Server zuletzt gesagt hat.
+    /// Meet: inputs and what the server said last.
     meet_title: String,
-    /// Haken "Ende-zu-Ende verschluesseln" beim Anlegen. Standard aus:
-    /// mit Haken kommt nur herein, wer einen aktuellen Stand hat.
+    /// Checkbox "end-to-end encrypt" when creating. Off by default:
+    /// with the checkbox only someone with a current version can join.
     meet_e2e: bool,
     meet_id: String,
     meet_pw: String,
     meet_last: Option<meet::Meeting>,
     meet_list: Arc<std::sync::Mutex<Vec<meet::Meeting>>>,
-    /// Wie oft die Titelleiste des Meetingfensters schon nachgefaerbt wurde.
+    /// How often the title bar of the meeting window has been recolored.
     meet_chrome: u32,
     meet_busy: Arc<std::sync::atomic::AtomicBool>,
     meet_err: Arc<std::sync::Mutex<String>>,
     meet_loaded: bool,
-    /// Beim Beitritt anbieten, dass andere diesen PC steuern duerfen.
+    /// Offer at joining that others may control this PC.
     meet_offer_control: bool,
-    /// Das eigene Meet-Fenster (Zoom-Ablauf in einem separaten Viewport).
+    /// The own Meet window (Zoom flow in a separate viewport).
     meet_win: MeetWin,
     /// Natives Meeting (Stufe 1: Ton, Chat, Warteraum) - laeuft ohne Browser.
     nativ_meet: Option<meetui::NativMeet>,
     /// Bildkacheln des nativen Meetings: Teilnehmer -> (Stand, Textur).
     nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
-    /// Geteilte Bildschirme: Teilnehmer -> (Stand, Textur). Eigener Speicher,
-    /// weil ein Teilnehmer Kamera UND Bildschirm gleichzeitig schickt.
+    /// Shared screens: participant -> (state, texture). Own storage,
+    /// because a participant sends camera AND screen at the same time.
     nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
-    /// Ob im letzten Bild schon geteilt wurde - daran haengt das
-    /// automatische Minimieren und das kleine Fenster.
+    /// Whether sharing was already active in the last frame - the
+    /// automatic minimizing and the small window depend on it.
     meet_teilt_war: bool,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
-    /// Das eigene GETEILTE Bild - damit man selbst sieht, was man teilt.
+    /// The own SHARED image - so that you see yourself what you share.
     nativ_eigen_schirm: Option<(u64, egui::TextureHandle)>,
-    /// Kamera und Mikrofon VOR dem Beitritt (Selbstvorschau, Pegel).
+    /// Camera and microphone BEFORE joining (self preview, level).
     vorprobe: meetui::Vorprobe,
-    /// Was nur die Oberflaeche angeht: Seitenleiste, Reiter, Kameraplatz.
+    /// What only concerns the UI: sidebar, tabs, camera slot.
     meet_z: meetfenster::Fensterzustand,
-    /// Wie viele Chatzeilen der Nutzer schon gesehen hat (Zaehler am Knopf).
+    /// How many chat lines the user has already seen (counter on the button).
     meet_gelesen: usize,
-    /// Wann die Kamera NACH dem Beitritt anlaufen darf. Die Vorschau haelt
-    /// das Geraet bis zum Beitritt fest; unter Windows braucht die Kamera
-    /// einen Moment, bis sie wieder frei ist - sofort neu oeffnen scheitert.
+    /// When the camera may start AFTER joining. The preview holds
+    /// the device until joining; on Windows the camera needs
+    /// a moment until it is free again - reopening immediately fails.
     meet_kam_start: Option<std::time::Instant>,
-    /// Kein echtes Fenstersystem (--uitest): dann keine Extra-Fenster oeffnen.
+    /// No real window system (--uitest): then do not open extra windows.
     headless: bool,
-    /// --meetdemo N: statt der Oberflaeche einen Beispielzustand des
-    /// Meetings zeichnen. Nur dafuer da, echte Bilder machen zu koennen -
-    /// der Bauserver hat weder Kamera noch zweiten Teilnehmer.
+    /// --meetdemo N: draw an example state of the meeting instead of the
+    /// UI. Only there to be able to make real images -
+    /// the build server has neither a camera nor a second participant.
     meet_demo: Option<usize>,
-    /// Vollbild wie in der Windows-Fernverbindung: kein Fensterrahmen, die
-    /// Bedienleiste schwebt ueber dem Bild und laesst sich verschieben.
+    /// Fullscreen like in the Windows remote connection: no window frame, the
+    /// control bar floats over the image and can be moved.
     full: bool,
-    /// Wo die schwebende Leiste steht (0 = ganz links, 1 = ganz rechts).
+    /// Where the floating bar sits (0 = far left, 1 = far right).
     bar_x: f32,
-    /// Wie breit sie zuletzt war (fuer die Positionsrechnung).
+    /// How wide it was last (for the position calculation).
     bar_w: f32,
-    /// Angeheftet = bleibt immer sichtbar, sonst zieht sie sich zurueck.
+    /// Pinned = always stays visible, otherwise it retracts.
     bar_pinned: bool,
-    /// Wann die Leiste zuletzt beachtet wurde (fuer das Zurueckziehen).
+    /// When the bar was last noticed (for retracting).
     bar_seen: std::time::Instant,
-    /// Wann das letzte Bild ankam - fuer den Hinweis "kein Bild".
+    /// When the last image arrived - for the "no image" hint.
     frame_at: std::time::Instant,
     /// Konto: angemeldete Sitzung, Eingabefelder, Zustand des Abgleichs.
     acc: Option<account::Session>,
@@ -2646,10 +2646,10 @@ struct App {
     acc_busy: Arc<std::sync::atomic::AtomicBool>,
     acc_out: Arc<std::sync::Mutex<Option<account::SyncOut>>>,
     acc_next: std::time::Instant,
-    /// Einrichten-Tab: Einmal-Links fuer neue Geraete.
+    /// Setup tab: one-time links for new devices.
     dep_pw: String,
     dep_hint_name: String,
-    /// Wie viele Geraete sich mit einem Link einrichten duerfen (1-25).
+    /// How many devices may be set up with one link (1-25).
     dep_count: u32,
     dep_link: String,
     dep_msg: String,
@@ -2661,25 +2661,25 @@ struct App {
     dep_next: std::time::Instant,
     /// Einrichtungs-Dialog (freeviewer://setup/<code>).
     setup_dlg: Option<SetupDlg>,
-    /// Passwort-Nachfrage vor dem Verbinden (Partner-ID).
+    /// Password prompt before connecting (partner ID).
     pw_ask: Option<String>,
-    /// Sicherheits-Frage vor dem Deinstallieren.
+    /// Safety question before uninstalling.
     uninstall_ask: bool,
-    /// Lizenz: Eingabefeld, Meldung und ob das Fenster auf ist (nur X-Remote).
+    /// License: input field, message and whether the window is open (X-Remote only).
     #[cfg(feature = "license")]
     lic_key: String,
     #[cfg(feature = "license")]
     lic_msg: String,
     #[cfg(feature = "license")]
     lic_show: bool,
-    /// Einrichtungs-Auftrag aus dem Browser-Download (Code, Wunschname) -
-    /// wartet auf die eigene ID, dann geht alles von selbst.
+    /// Setup job from the browser download (code, desired name) -
+    /// waits for the own ID, then everything happens by itself.
     auto_setup: Option<(String, String)>,
-    /// Wann zuletzt nach dem Update-Laeuft-Merker gesehen wurde.
+    /// When the update-is-running marker was last checked.
     upd_flag_at: std::time::Instant,
-    /// Steht der Merker gerade? (fuer das Lade-Fenster)
+    /// Is the marker currently set? (for the loading window)
     upd_running: bool,
-    /// Tongeraete, einmal eingelesen (die Abfrage kostet Zeit).
+    /// Audio devices, read once (the query takes time).
     snd_in: Vec<String>,
     snd_out: Vec<String>,
     snd_default: (String, String),
@@ -2798,7 +2798,7 @@ impl App {
             setup_dlg: None,
             pw_ask: None,
             uninstall_ask: false,
-            // Ohne gueltige Lizenz beim Start einmal danach fragen.
+            // Ask for a license once at start if there is no valid one.
             #[cfg(feature = "license")]
             lic_key: String::new(),
             #[cfg(feature = "license")]
@@ -2972,8 +2972,8 @@ impl App {
         }
     }
 
-    /// Wartet eine freeviewer://-Adresse? Hoechstens einmal pro Sekunde
-    /// nachsehen - die Oberflaeche zeichnet viel oefter.
+    /// Is a freeviewer:// address waiting? Check at most once per second
+    /// - the UI draws much more often.
     fn handle_link(&mut self, ctx: &egui::Context) {
         if self.link_check.elapsed() < Duration::from_millis(900) {
             return;
@@ -2992,8 +2992,8 @@ impl App {
                 self.connect_to(&id);
             }
             link::Action::Setup(code) => {
-                // Einmal-Link vom Besitzer: diesen Rechner einrichten und
-                // anschliessend richtig installieren (mit Dienst).
+                // One-time link from the owner: set this machine up and
+                // then install it properly (with service).
                 self.setup_dlg = Some(SetupDlg {
                     code,
                     name: presence::machine_name(),
@@ -3004,9 +3004,9 @@ impl App {
                 self.view = View::Meet;
                 self.meet_id = room.clone();
                 self.meet_pw = pass.clone();
-                // Einladungslinks landen jetzt im eigenen Meeting-Fenster
-                // (Geraete waehlen, Einladung kopieren), nicht mehr sofort
-                // im Browser.
+                // Invitation links now land in the own meeting window
+                // (choose devices, copy invitation), no longer immediately
+                // in the browser.
                 self.meet_win_open(meet::Meeting {
                     id: room.clone(),
                     titel: String::new(),
@@ -3020,8 +3020,8 @@ impl App {
 
     /// Files dropped onto the window go to the other side of the session.
     fn handle_drops(&mut self, ctx: &egui::Context) {
-        // Solange etwas ueber dem Fenster haengt: zeigen, dass hier abgelegt
-        // werden darf. Ohne das raet man, ob Ziehen und Ablegen geht.
+        // As long as something hovers over the window: show that dropping
+        // is allowed here. Without it you guess whether drag and drop works.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let p = theme::palette();
             let screen = ctx.content_rect();
@@ -3158,7 +3158,7 @@ impl App {
         });
     }
 
-    /// Zeile fuer die Selbstaktualisierung.
+    /// Row for the self-update.
     fn update_ui(&mut self, ui: &mut egui::Ui) {
         let pending = self.shared.update.lock().unwrap().clone();
         let status = self.shared.update_status.lock().unwrap().clone();
@@ -3197,7 +3197,7 @@ impl App {
             ui.add_space(4.0);
             if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
                 if dienst {
-                    // der Dienst spielt ein - als SYSTEM, ohne Nachfrage
+                    // the service installs it - as SYSTEM, without a prompt
                     update::bitte_dienst();
                     self.shared
                         .set_update_status(i18n::t("upd.by_service"));
@@ -3245,10 +3245,10 @@ impl App {
 
     // ----------------------------------------------------------- Oberflaeche
 
-    /// Kopfzeile mit den drei Bereichen.
+    /// Header with the three areas.
     // ----------------------------------------------------------- Oberfläche
 
-    /// Kopfzeile: Marke links, die drei Bereiche als Pillen, Status rechts.
+    /// Header: brand on the left, the three areas as pills, status on the right.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let my_id = self.shared.my_id.lock().unwrap().clone();
         let online = !my_id.is_empty();
@@ -3266,8 +3266,8 @@ impl App {
                 );
             });
             ui.add_space(10.0);
-            // Der Zaehler an "Freunde" ist wichtig: eine Freundschafts-
-            // anfrage, die niemand sieht, ist keine Anfrage.
+            // The counter on "Friends" matters: a friend
+            // request nobody sees is not a request.
             let offen = self
                 .freunde
                 .as_ref()
@@ -3324,9 +3324,9 @@ impl App {
 
         }
     }
-    /// Startseite: links dieser PC, rechts der Weg nach draußen.
-    /// Startseite: links dieser PC, rechts der Weg nach draußen. Bewusst
-    /// wenig Text - was erklärt werden muss, steht im Tooltip.
+    /// Start page: this PC on the left, the way out on the right.
+    /// Start page: this PC on the left, the way out on the right. Deliberately
+    /// little text - what needs explaining is in the tooltip.
     fn start_view(&mut self, ui: &mut egui::Ui) {
         let my_id = self.shared.my_id.lock().unwrap().clone();
         let host_status = self.shared.host_status.lock().unwrap().clone();
@@ -3364,8 +3364,8 @@ impl App {
 
                 ui.add_space(8.0);
                 label_small(ui, i18n::t("start.password"));
-                // Das Sitzungspasswort wird gewuerfelt, nicht getippt. Feste
-                // Passwoerter stehen in den Einstellungen unter "Zugriff".
+                // The session password is rolled by dice, not typed. Fixed
+                // passwords are in the settings under "Zugriff".
                 let pw_now = self.shared.password.lock().unwrap().clone();
                 if self.pw_visible {
                     match self.pw_visible_at {
@@ -3578,10 +3578,10 @@ impl App {
                 }
             }
 
-            // ------------------------------------------------- Freunde
-            // Kurzfassung der Freundesliste: wer online ist, ist einen
-            // Klick entfernt. Die ganze Seite liegt in der Leiste links -
-            // hier steht nur, was man auf der Startseite wirklich braucht.
+            // ------------------------------------------------- Friends
+            // Short version of the friends list: whoever is online is one
+            // click away. The whole page is in the bar on the left -
+            // here is only what you really need on the start page.
             {
                 let dienst = self.freunde.clone();
                 let liste = dienst.as_ref().map(|d| d.liste()).unwrap_or_default();
@@ -3672,8 +3672,8 @@ impl App {
         }
     }
 
-    /// Mikrofon und Ton als zwei Symbolschalter - im Dashboard und in der
-    /// Sitzungsleiste dieselbe Bedienung.
+    /// Microphone and audio as two icon switches - the same controls in the dashboard and in the
+    /// session bar.
     fn voice_buttons(&mut self, ui: &mut egui::Ui, size: f32) {
         let v = self.shared.voice.clone();
         let mic = v.mic.load(Ordering::Relaxed);
@@ -3710,12 +3710,12 @@ impl App {
         }
     }
 
-    /// Verbindet mit einem Eintrag aus der Liste.
-    /// Ist das die eigene ID? Dann bringt eine Verbindung nichts - der
-    /// Bildschirm wuerde sich selbst zeigen, bis nichts mehr geht.
-    /// Wie ein Geraet in der Liste heisst. Eigener Name schlaegt alles;
-    /// sonst nimmt die Liste den Namen, den der Rechner selbst beim Relay
-    /// hinterlegt hat ("Flei-ONE") - eine nackte Nummer sagt niemandem etwas.
+    /// Connects to an entry from the list.
+    /// Is this the own ID? Then a connection is pointless - the
+    /// screen would show itself until nothing works anymore.
+    /// What a device is called in the list. Own name beats everything;
+    /// otherwise the list takes the name the machine itself registered
+    /// at the relay ("Flei-ONE") - a bare number tells nobody anything.
     fn dev_label(&self, e: &partners::Partner) -> String {
         if !e.name.trim().is_empty() {
             return e.name.clone();
@@ -3744,21 +3744,21 @@ impl App {
         self.partner_pw = self.book.password(id).unwrap_or_default();
         self.selected = Some(id.to_string());
         if self.partner_pw.is_empty() {
-            // Kein gespeichertes Passwort: nicht still auf "Anfrage"
-            // umschalten - erst nach dem Passwort fragen. Wer keins weiss,
-            // kann im Dialog immer noch eine Anfrage schicken.
+            // No saved password: do not silently switch to "request"
+            // - ask for the password first. Whoever does not know one
+            // can still send a request in the dialog.
             self.pw_ask = Some(id.to_string());
         } else {
             self.start_session();
         }
     }
 
-    /// Schmale Symbolspalte links - die drei Bereiche des Programms.
+    /// Narrow icon column on the left - the three areas of the program.
     fn rail(&mut self, ctx: &egui::Context) {
         let p = theme::palette();
-        // Frueher war die Leiste im hellen Modus komplett im Akzent gefaerbt -
-        // die weissen Symbole sind darin verschwunden. Jetzt ist sie immer
-        // eine ruhige Flaeche, gefaerbt wird nur, was gerade gewaehlt ist.
+        // Previously the bar was completely tinted in the accent color in light mode -
+        // the white icons disappeared in it. Now it is always
+        // a calm surface, only what is currently selected gets tinted.
         let rail_bg = p.card;
         egui::SidePanel::left("fv_rail")
             .exact_width(56.0)
@@ -3772,10 +3772,10 @@ impl App {
                 ui.vertical_centered(|ui| {
                     logo(ui);
                     ui.add_space(10.0);
-                    // Der Freunde-Dienst laeuft ab jetzt vom ersten Bild an.
-                    // Frueher startete er erst beim Oeffnen der Seite - eine
-                    // Freundschaftsanfrage, die niemand sieht, weil das
-                    // Programm gar nicht danach fragt, ist keine Anfrage.
+                    // The friends service now runs from the first frame on.
+                    // Previously it only started when the page was opened - a
+                    // friend request nobody sees because the
+                    // program never asks for it is not a request.
                     let fd = self.freunde_dienst();
                     let offen = fd.eingehende().len() + fd.einladungen().len();
                     for (v, name, tip) in [
@@ -3786,9 +3786,9 @@ impl App {
                         (View::Settings, "settings", i18n::t("nav.settings")),
                     ] {
                         let sel = self.view == v;
-                        // Erst die Flaeche belegen, dann selbst zeichnen: nur so
-                        // reagiert JEDER Knopf auf die Maus und nicht bloss der,
-                        // auf dem man gerade steht.
+                        // First claim the area, then draw yourself: only this way
+                        // does EVERY button react to the mouse and not just the one
+                        // you are standing on.
                         let (rect, r) =
                             ui.allocate_exact_size(egui::vec2(38.0, 34.0), egui::Sense::click());
                         let hov = r.hovered();
@@ -3803,7 +3803,7 @@ impl App {
                             ui.painter().rect_filled(rect, 9.0, fill);
                         }
                         if sel {
-                            // schmaler Balken links: zeigt die Seite auch ohne Farbe
+                            // narrow bar on the left: shows the page even without color
                             ui.painter().rect_filled(
                                 egui::Rect::from_min_size(
                                     egui::pos2(rect.min.x - 7.0, rect.center().y - 9.0),
@@ -3821,8 +3821,8 @@ impl App {
                             p.muted
                         };
                         ui.put(rect, icons::image(name, 19.0, fg));
-                        // Offene Anfragen als Punkt am Symbol - sichtbar,
-                        // ohne dass man die Seite oeffnen muss.
+                        // Open requests as a dot on the icon - visible
+                        // without having to open the page.
                         let mut tip = tip.to_string();
                         if v == View::Freunde && offen > 0 {
                             ui.painter().circle_filled(
@@ -3842,9 +3842,9 @@ impl App {
             });
     }
 
-    /// Konferenzen. Das Verzeichnis liegt auf dem Meet-Server, darum laufen
-    /// alle Abfragen in einem eigenen Faden - eine haengende Leitung darf die
-    /// Oberflaeche nicht einfrieren.
+    /// Conferences. The directory lives on the Meet server, so all
+    /// queries run in their own thread - a hanging line must not freeze the
+    /// UI.
     fn meet_refresh(&mut self) {
         if self.meet_busy.load(Ordering::Relaxed) {
             return;
@@ -4013,8 +4013,8 @@ impl App {
                     );
                 }
                 for m in list.iter() {
-                    // Die GANZE Zeile ist anklickbar, nicht nur der kleine
-                    // Pfeil rechts - und zeigt das auch mit dem Zeigefinger.
+                    // The WHOLE row is clickable, not just the small
+                    // arrow on the right - and it shows that with the pointing hand.
                     let zeile = ui.horizontal(|ui| {
                         dot(ui, true);
                         ui.label(
@@ -4051,33 +4051,33 @@ impl App {
         });
     }
 
-    /// Oeffnet das eigene Meeting-Fenster fuer dieses Meeting (Zoom-Ablauf:
-    /// erst Geraete pruefen und Einladung kopieren, dann beitreten).
+    /// Opens the own meeting window for this meeting (Zoom flow:
+    /// first check devices and copy invitation, then join).
     fn meet_win_open(&mut self, m: meet::Meeting) {
         self.meet_chrome = 0;
-        // In die EIGENE Liste aufnehmen. Die Uebersicht kommt nicht mehr vom
-        // Server (der zeigte sie jedem Fremden) - jeder Rechner fuehrt seine
-        // eigene.
+        // Add to the OWN list. The overview no longer comes from the
+        // server (it showed it to every stranger) - each machine keeps its
+        // own.
         meet::merken(&m);
         self.meet_win.offen = true;
         if self.meet_win.name.trim().is_empty() {
-            // Vorschlag: der Rechnername - so heisst man im Browser auch.
+            // Suggestion: the machine name - that is how you are called in the browser too.
             self.meet_win.name = presence::device_name();
         }
         self.meet_win.beigetreten = false;
         self.meet_win.toast = None;
         self.meet_win.meeting = Some(m);
         self.meet_win.tn.lock().unwrap().clear();
-        // Gleich einmal nachsehen, wer schon da ist.
+        // Check right away who is already there.
         self.meet_win.tn_next = std::time::Instant::now();
-        // Die Titelleiste des Meetingfensters nachfaerben. Es entsteht erst
-        // ein paar Rahmen nach dem Oeffnen - einmal reicht also nicht.
+        // Recolor the title bar of the meeting window. It only appears
+        // a few frames after opening - so once is not enough.
         if self.meet_chrome < 30 {
             self.meet_chrome += 1;
             chrome::paint_from_theme();
         }
-        // Bildschirme sind sofort da (reine Systemabfrage) - die brauchen
-        // wir, um bei mehreren zu FRAGEN, welcher geteilt werden soll.
+        // Screens are available immediately (pure system query) - we need them
+        // to ASK which one should be shared when there are several.
         self.meet_win.monitore = meetschirm::liste()
             .into_iter()
             .map(|m| (m.name, m.breite, m.hoehe))
@@ -4095,9 +4095,9 @@ impl App {
             let slot = self.meet_win.geraete.clone();
             std::thread::spawn(move || {
                 let (mics, mut cams) = meet::geraete();
-                // Fuer die Auswahl IM Meeting zaehlen die Namen, die der
-                // Kamera-Oeffner selbst kennt (Media Foundation). Die
-                // PnP-Liste ist nur ein Rueckfall, wenn die leer bleibt.
+                // For the selection IN the meeting, the names the camera
+                // opener itself knows count (Media Foundation). The
+                // PnP list is only a fallback if that stays empty.
                 let echte = crate::meetcam::liste();
                 if !echte.is_empty() {
                     cams = echte.into_iter().map(|g| g.name).collect();
@@ -4108,8 +4108,8 @@ impl App {
         }
     }
 
-    /// Teilnehmerliste nachladen - alle 5 s, in einem Hintergrundfaden,
-    /// damit eine haengende Leitung das Fenster nicht einfriert.
+    /// Reload the participant list - every 5 s, in a background thread,
+    /// so that a hanging line does not freeze the window.
     fn meet_win_poll(&mut self) {
         if !self.meet_win.offen
             || self.meet_win.tn_busy.load(Ordering::Relaxed)
@@ -4122,7 +4122,7 @@ impl App {
             None => return,
         };
         if pass.is_empty() {
-            // Ohne Passwort verraet der Server die Liste nicht.
+            // Without a password the server does not reveal the list.
             return;
         }
         self.meet_win.tn_busy.store(true, Ordering::Relaxed);
@@ -4137,23 +4137,23 @@ impl App {
         });
     }
 
-    /// Das eigene Meeting-Fenster - so wie der FreeMeet-Browser-Client.
+    /// The own meeting window - just like the FreeMeet browser client.
     ///
-    /// Vor dem Beitritt steht die mittige Karte mit lebender Selbstvorschau,
-    /// danach das Meeting: Marken oben, Buehne in der Mitte, Seitenleiste
-    /// rechts, Steuerleiste unten. GEZEICHNET wird in `meetfenster` - hier
-    /// wird nur zusammengetragen, was es braucht, und ausgefuehrt, was der
-    /// Nutzer angeklickt hat. Diese Trennung ist der Grund, warum sich jede
-    /// Ansicht in `--uitest` ohne Server, Kamera und Soundkarte durchrendern
-    /// laesst.
-    /// Meetingfenster zu = Meeting verlassen.
+    /// Before joining there is the centered card with live self preview,
+    /// afterwards the meeting: marks on top, stage in the middle, sidebar
+    /// on the right, control bar at the bottom. DRAWING happens in `meetfenster` - here
+    /// we only gather what it needs and execute what the
+    /// user clicked. This separation is the reason why every
+    /// view can be rendered through in `--uitest` without server,
+    /// camera and sound card.
+    /// Meeting window closed = leave the meeting.
     ///
-    /// WARUM nicht nur `offen = false`: das Fenster haelt echte Geraete.
-    /// Vorher lief nach dem Schliessen die Kamera weiter (Leuchte an) und
-    /// der Server hielt uns weiter fuer anwesend - genau das, was Justin
-    /// gemeldet hat. Das Kreuz muss dasselbe tun wie "Verlassen".
+    /// WHY not just `offen = false`: the window holds real devices.
+    /// Previously the camera kept running after closing (light on) and
+    /// the server kept considering us present - exactly what Justin
+    /// reported. The cross must do the same as "Leave".
     fn meet_win_schliessen(&mut self) {
-        // Die Vorschau vor dem Beitritt haelt Kamera UND Mikrofon.
+        // The preview before joining holds camera AND microphone.
         self.vorprobe.aus();
         if let Some(n) = self.nativ_meet.take() {
             n.verlassen();
@@ -4164,13 +4164,13 @@ impl App {
         self.meet_win.beigetreten = false;
         self.meet_win.nativ_start = false;
         self.meet_kam_start = None;
-        // Auch das kleine Fenster muss zu, sonst bleibt es allein stehen.
+        // The small window must close too, otherwise it is left standing alone.
         self.meet_z = meetfenster::Fensterzustand::default();
         self.meet_win.offen = false;
     }
 
     fn meet_win_ui(&mut self, ctx: &egui::Context) {
-        // Geraeteliste uebernehmen, sobald der Hintergrundfaden fertig ist.
+        // Take over the device list as soon as the background thread is done.
         if !self.meet_win.geraete_da {
             if let Some((mics, cams, spks)) = self.meet_win.geraete.lock().unwrap().clone() {
                 self.meet_win.mics = mics;
@@ -4192,11 +4192,11 @@ impl App {
         self.meet_toast(ctx);
     }
 
-    /// Der Schirm vor dem Beitritt (`#vorbereiten` im Browser).
+    /// The screen before joining (`#vorbereiten` in the browser).
     fn meet_beitritt_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
-        // Kamera und Mikrofon der Vorschau dem Wunsch nachfuehren. Nur bei
-        // ECHTER Aenderung anfassen - sonst wuerde ein Geraetefehler jedes
-        // Bild einen neuen Oeffnungsversuch ausloesen.
+        // Bring camera and microphone of the preview in line with the wish. Only touch on
+        // a REAL change - otherwise a device error would trigger a new
+        // open attempt every frame.
         let will_kamera = !self.meet_win.ohne_video;
         if will_kamera != self.vorprobe.wunsch_kamera {
             self.vorprobe.kamera(will_kamera);
@@ -4212,7 +4212,7 @@ impl App {
         }
         self.vorprobe.pumpe();
 
-        // Vorschaubild in eine Textur giessen (nur wenn es ein neues gibt).
+        // Pour the preview image into a texture (only if there is a new one).
         match self.vorprobe.eigen.as_ref() {
             Some((w, h, px)) => {
                 let stand = self.vorprobe.stand;
@@ -4268,9 +4268,9 @@ impl App {
             None => {}
         }
 
-        // Beitreten passiert ERST nachdem der Rahmen gezeichnet ist: die
-        // Vorschau muss die Kamera vorher loslassen, sonst bekommt das
-        // Meeting sie nicht.
+        // Joining happens only AFTER the frame is drawn: the
+        // preview has to release the camera first, otherwise the
+        // meeting does not get it.
         if std::mem::take(&mut self.meet_win.nativ_start) {
             self.vorprobe.aus();
             self.nativ_eigen = None;
@@ -4294,8 +4294,8 @@ impl App {
                 self.meet_offer_control,
                 mic,
                 None,
-                // Ende-zu-Ende: der Schluessel steht im Meeting (aus dem
-                // Link oder beim Anlegen gewuerfelt). Leer = wie bisher.
+                // End-to-end: the key is set in the meeting (from the
+                // link or rolled when creating). Empty = as before.
                 if m.e2e.trim().is_empty() { None } else { Some(m.e2e.clone()) },
             ) {
                 Ok(mut n) => {
@@ -4320,12 +4320,12 @@ impl App {
         }
     }
 
-    /// Das laufende Meeting.
+    /// The running meeting.
     fn meet_lauf_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
         let sicht: meetfenster::Sicht;
         let bilder: meetfenster::Bilder;
-        // Wessen Bildschirm gerade gross zu sehen ist - danach richtet sich,
-        // wem wir unseren Zoomwunsch schicken.
+        // Whose screen is currently seen large - this determines
+        // who we send our zoom request to.
         let mut haupt_schirm_peer: Option<u64> = None;
         {
             let n = match self.nativ_meet.as_mut() {
@@ -4333,8 +4333,8 @@ impl App {
                 None => return,
             };
             n.pumpe();
-            // Kamera erst jetzt anwerfen - die Vorschau hat sie gerade
-            // losgelassen und braucht dafuer einen Augenblick.
+            // Start the camera only now - the preview has just
+            // released it and needs a moment for that.
             if let Some(wann) = self.meet_kam_start {
                 if std::time::Instant::now() >= wann {
                     self.meet_kam_start = None;
@@ -4342,14 +4342,14 @@ impl App {
                 }
             }
             let z = n.zustand();
-            // Nur beim Bildermachen (--meetshot): Wartende gleich hereinlassen.
-            // Sonst saehe man auf dem Beweisbild nie einen zweiten Teilnehmer.
+            // Only when taking images (--meetshot): let waiting people in right away.
+            // Otherwise you would never see a second participant in the proof image.
             if self.meet_shot_join && !z.wartende.is_empty() {
                 n.alle_einlassen();
             }
             let zahlen = n.zahlen();
 
-            // ---- Texturen nachladen (nur bei wirklich neuem Bild)
+            // ---- Reload textures (only for a really new image)
             match n.eigen.as_ref() {
                 Some((w, h, px)) => {
                     let frisch = self
@@ -4405,8 +4405,8 @@ impl App {
             }
             self.nativ_schirme
                 .retain(|k, _| n.schirme.bilder.contains_key(k));
-            // Das eigene geteilte Bild. Ohne diese Kachel sieht man beim
-            // Teilen ueberhaupt nichts - der Knopf wirkt dann wirkungslos.
+            // The own shared image. Without this tile you see nothing
+            // at all when sharing - the button then seems to have no effect.
             match n.eigen_schirm.as_ref() {
                 Some((w, h, px)) => {
                     let frisch = self
@@ -4474,7 +4474,7 @@ impl App {
                     eigen: *von == z.ich,
                 })
                 .collect();
-            // Chat gilt als gelesen, solange die Seitenleiste ihn zeigt.
+            // Chat counts as read as long as the sidebar shows it.
             if self.meet_z.seite_offen && self.meet_z.reiter == meetfenster::Reiter::Chat {
                 self.meet_gelesen = chat.len();
             }
@@ -4504,21 +4504,21 @@ impl App {
                 String::new()
             };
             let tippen: Vec<String> = n.tippen.iter().map(|id| n.name_von(*id)).collect();
-            // Der Servertext zum Warteraum steht in der letzten Meldung.
+            // The server text about the waiting room is in the last message.
             let warte_text = if z.im_warteraum { n.meldung.clone() } else { String::new() };
             let mut schirme: Vec<(u64, String)> = self
                 .nativ_schirme
                 .keys()
                 .map(|id| (*id, n.name_von(*id)))
                 .collect();
-            // Die EIGENE Freigabe gehoert auch auf die Buehne - wie im
-            // Browser. Sonst klickt man "Bildschirm" und sieht nichts.
+            // The OWN share belongs on the stage too - like in the
+            // browser. Otherwise you click "Screen" and see nothing.
             if n.schirm_an && self.nativ_eigen_schirm.is_some() {
                 schirme.push((z.ich, "Du".to_string()));
             }
 
             let ton_namen = n.ton_namen();
-            // Wessen Bildschirm ist der Hauptinhalt? Der erste fremde.
+            // Whose screen is the main content? The first foreign one.
             let schirm_haupt: Option<u64> = schirme
                 .iter()
                 .map(|(id, _)| *id)
@@ -4541,9 +4541,9 @@ impl App {
                 } else {
                     meetfenster::Ton::Warn
                 },
-                // Gruen nur, wenn WIRKLICH verschluesselt wird - also ein
-                // Schluessel da ist. Eine gruene Marke ohne Verschluesselung
-                // waere die schlimmste Sorte Luege.
+                // Green only if encryption is REALLY happening - i.e. a
+                // key exists. A green mark without encryption
+                // would be the worst kind of lie.
                 e2e: n.e2e_an,
                 bandbreite,
                 leute,
@@ -4575,18 +4575,18 @@ impl App {
                 kamera_name: n.kamera_name(),
                 ton_ein: ton_namen.0,
                 ton_aus: ton_namen.1,
-                // Zeiger DESSEN, dessen Bildschirm gerade gross zu sehen ist.
-                // Ist es der EIGENE, kommt nichts ueber das Netz zurueck -
-                // dann direkt nachsehen.
+                // Pointer OF THE ONE whose screen is currently seen large.
+                // If it is the OWN one, nothing comes back over the network -
+                // then look it up directly.
                 teiler_zeiger: match schirm_haupt {
                     Some(p) if p == z.ich => n.eigener_zeiger(),
                     Some(p) => n.zeiger_des_teilers(p),
                     None => None,
                 },
-                // Dasselbe beim Ausschnitt: die eigene Bekanntgabe geht nur
-                // an die anderen. Wer die eigene Freigabe ansieht, muss den
-                // Zuschnitt trotzdem kennen - sonst wird DOPPELT gezoomt und
-                // das Bild wird ab etwa 140 % schwarz.
+                // Same for the crop: the own announcement only goes
+                // to the others. Whoever looks at the own share must still know the
+                // crop - otherwise it is zoomed TWICE and
+                // the image turns black from about 140 %.
                 schirm_bereich: match schirm_haupt {
                     Some(p) if p == z.ich => Some(n.schirm_bereich),
                     Some(p) => n.bereich_des_teilers(p),
@@ -4629,9 +4629,9 @@ impl App {
             };
         }
 
-        // Vor der Tuer: der Warteschirm statt eines leeren Raums. Ohne ihn
-        // saesse der Gast vor einer schwarzen Flaeche und haelt das Programm
-        // fuer kaputt - genau der Fall, der bei der Probe aufgefallen ist.
+        // At the door: the waiting screen instead of an empty room. Without it
+        // the guest would sit in front of a black area and think the program
+        // is broken - exactly the case noticed during the rehearsal.
         if sicht.im_warteraum {
             if meetfenster::warteschirm_ui(ctx, &sicht.titel, &sicht.warte_text) {
                 if let Some(n) = self.nativ_meet.take() {
@@ -4643,13 +4643,13 @@ impl App {
             return;
         }
         let mut aktionen = meetfenster::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
-        // Bild im Bild: eigenes kleines Fenster, das oben bleibt - sonst
-        // sieht man beim Teilen des eigenen Bildschirms niemanden mehr.
+        // Picture-in-picture: own small window that stays on top - otherwise
+        // you see nobody anymore when sharing your own screen.
         if self.meet_z.pip && !self.headless {
             let mut zu = false;
-            // Der Schalter liegt im Fensterzustand, die Schliesse aber im
-            // Viewport-Rueckruf - deshalb hier eine Kopie, die danach
-            // zurueckgeschrieben wird (sonst liehe sich `self` doppelt aus).
+            // The switch lives in the window state, but the close is in the
+            // viewport callback - hence a copy here that is written back
+            // afterwards (otherwise `self` would be borrowed twice).
             let mut selbst = self.meet_z.pip_selbst;
             let mut pip_aktionen: Vec<meetfenster::Aktion> = Vec::new();
             ctx.show_viewport_immediate(
@@ -4668,8 +4668,8 @@ impl App {
                     if pctx.input(|i| i.viewport().close_requested()) {
                         zu = true;
                     }
-                    // Das kleine Fenster zeigt dieselben Bilder - es darf
-                    // nicht das langsamere von beiden sein.
+                    // The small window shows the same images - it must
+                    // not be the slower of the two.
                     pctx.request_repaint_after(Duration::from_millis(33));
                 },
             );
@@ -4680,9 +4680,9 @@ impl App {
             }
         }
 
-        // Dem Sender sagen, welchen Ausschnitt wir ansehen. Er schneidet dann
-        // genau den aus seiner nativen Aufnahme - gleiche Bandbreite, aber
-        // echte Bildpunkte. Ohne diese Meldung bliebe es beim Hochrechnen.
+        // Tell the sender which crop we are looking at. It then cuts
+        // exactly that from its native capture - same bandwidth, but
+        // real pixels. Without this message it would stay with upscaling.
         if let (Some(p), Some(n)) = (haupt_schirm_peer, self.nativ_meet.as_mut()) {
             let f = self.meet_z.zoomfenster;
             let zoomt = self.meet_z.zoom > 1.001;
@@ -4691,9 +4691,9 @@ impl App {
 
         let mut steuern_zu: Option<(String, String)> = None;
         let mut verlassen = false;
-        // Scheitert das Teilen, MUSS das sichtbar werden. Frueher stand es
-        // nur im Info-Reiter - fuer den Nutzer sah es aus, als passiere
-        // ueberhaupt nichts.
+        // If sharing fails, it MUST become visible. Previously it was
+        // only in the info tab - for the user it looked as if nothing
+        // happened at all.
         let mut schirm_fehler: Option<String> = None;
         for a in aktionen {
             let n = match self.nativ_meet.as_mut() {
@@ -4786,8 +4786,8 @@ impl App {
                     n.ton_waehlen(mik, spk);
                 }
                 meetfenster::Aktion::GeraeteNeuLesen => {
-                    // Neu einlesen laeuft wieder im Hintergrund - die
-                    // PnP-Abfrage dauert unter Windows fast eine Sekunde.
+                    // Re-reading runs in the background again - the
+                    // PnP query takes almost a second on Windows.
                     self.meet_win.geraete_da = false;
                     *self.meet_win.geraete.lock().unwrap() = None;
                     let slot = self.meet_win.geraete.clone();
@@ -4813,17 +4813,17 @@ impl App {
         if let Some(m) = schirm_fehler {
             self.meet_win.toast = Some((m, std::time::Instant::now()));
         }
-        // Beim Start der Freigabe: kleines Fenster auf, grosses Fenster
-        // aus dem Weg. Sonst teilt man sein eigenes Meetingfenster mit -
-        // der beruehmte Spiegelkabinett-Effekt - und sieht selbst niemanden
-        // mehr. Beim Beenden geht beides zurueck, aber NUR wenn wir es
-        // auch selbst veranlasst haben.
+        // When sharing starts: small window opens, large window
+        // gets out of the way. Otherwise you share your own meeting window -
+        // the famous hall-of-mirrors effect - and see nobody
+        // yourself anymore. When it ends both are restored, but ONLY if we
+        // caused it ourselves.
         //
-        // WICHTIG: das grosse Fenster wird nur minimiert, nicht versteckt.
-        // Damit das kleine Fenster (ein Unterfenster desselben Programms)
-        // weiterlaeuft, wird waehrend der Freigabe ausdruecklich weiter
-        // neu gezeichnet - ein minimiertes Fenster bekommt von Windows
-        // sonst keine Zeichenauftraege mehr.
+        // IMPORTANT: the large window is only minimized, not hidden.
+        // So that the small window (a child window of the same program)
+        // keeps running, drawing explicitly continues during the share
+        // - Windows otherwise sends no draw requests to a
+        // minimized window.
         let teilt_jetzt = self.nativ_meet.as_ref().map(|n| n.schirm_an).unwrap_or(false);
         if teilt_jetzt != self.meet_teilt_war {
             self.meet_teilt_war = teilt_jetzt;
@@ -4854,8 +4854,8 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
         if let Some((fvid, wer)) = steuern_zu {
-            // Aus dem Meeting heraus direkt in die Sitzung: Hauptfenster nach
-            // vorn, Start-Seite, verbinden.
+            // From the meeting directly into the session: main window to the
+            // front, start page, connect.
             self.view = View::Start;
             self.hint = i18n::tf("link.control", &partners::pretty_id(&fvid));
             self.meet_win.toast = Some((format!("Steuere {}", wer), std::time::Instant::now()));
@@ -4871,8 +4871,8 @@ impl App {
             self.meet_win.beigetreten = false;
             self.meet_z.pip = false;
             self.meet_z.pip_auto = false;
-            // Wer waehrend der Freigabe auflegt, saesse sonst vor einem
-            // minimierten Fenster und wuesste nicht, wohin das Programm ist.
+            // Whoever hangs up during the share would otherwise sit in front of a
+            // minimized window and not know where the program went.
             if self.meet_z.minimiert_auto {
                 self.meet_z.minimiert_auto = false;
                 if !self.headless {
@@ -4885,11 +4885,11 @@ impl App {
         }
     }
 
-    /// Bild der eigenen Oberflaeche machen und beenden (--shot).
+    /// Take an image of the own UI and exit (--shot).
     fn shot_ui(&mut self, ctx: &egui::Context) {
 if let Some(path) = self.shot.clone() {
             self.shot_n += 1;
-            // Sobald die Geraeteliste da ist, den Beitritt ausloesen.
+            // As soon as the device list is there, trigger the join.
             if self.meet_shot_join && self.meet_shot_arm == 0 && self.meet_win.geraete_da {
                 self.meet_shot_arm = self.shot_n;
                 self.meet_win.nativ_start = true;
@@ -4919,12 +4919,12 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Nur fuer Bilder: einen Beispielzustand des Meetings zeichnen
-    /// (`--meetdemo N --shot datei.jpg`). Ohne diesen Weg gaebe es nie ein
-    /// echtes Bild der Buehne - der Bauserver hat weder Kamera noch zweiten
-    /// Teilnehmer.
+    /// Only for images: draw an example state of the meeting
+    /// (`--meetdemo N --shot datei.jpg`). Without this path there would never be a
+    /// real image of the stage - the build server has neither a camera nor a second
+    /// participant.
     fn meet_demo_ui(&mut self, ctx: &egui::Context, nr: usize) {
-        // BEISPIELE+1: der Warteschirm.
+        // EXAMPLES+1: the waiting screen.
         if nr == meetfenster::BEISPIELE + 1 {
             meetfenster::warteschirm_ui(
                 ctx,
@@ -4933,7 +4933,7 @@ if let Some(path) = self.shot.clone() {
             );
             return;
         }
-        // Ab BEISPIELE: der Beitritts-Schirm.
+        // From EXAMPLES: the join screen.
         if nr >= meetfenster::BEISPIELE {
             let bilder = meetfenster::pruefbilder(ctx);
             let mut b = meetfenster::beispiel_beitritt();
@@ -5019,8 +5019,8 @@ if let Some(path) = self.shot.clone() {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Der Zustand kommt aus der Leitung selbst, nicht aus
-                        // "wir hatten mal eine Nummer": 0 verbinde, 1 bereit,
+                        // The state comes from the line itself, not from
+                        // "we once had a number": 0 connecting, 1 ready,
                         // 2 offline.
                         let zustand = self.shared.net_state();
                         let online = online && zustand == 1;
@@ -5048,20 +5048,20 @@ if let Some(path) = self.shot.clone() {
             });
     }
 
-    /// Geräte: links die Ordner, in der Mitte die Liste, rechts das gewählte
-    /// Gerät mit allem, was man daran einstellen kann.
-    /// Den Freunde-Dienst holen (und beim ersten Mal starten).
+    /// Devices: folders on the left, the list in the middle, on the right the selected
+    /// device with everything you can set on it.
+    /// Fetch the friends service (and start it the first time).
     ///
-    /// Warum nicht schon beim Programmstart: das kostet alle 20 Sekunden
-    /// eine Anfrage an den Relay. Wer die Seite nie oeffnet, soll damit
-    /// auch nicht belastet werden.
+    /// Why not already at program start: that costs a request to the relay
+    /// every 20 seconds. Whoever never opens the page should not
+    /// be burdened with it either.
     fn freunde_dienst(&mut self) -> std::sync::Arc<freunde::Dienst> {
         if let Some(d) = &self.freunde {
             return d.clone();
         }
         let d = freunde::Dienst::vom_geraet(self.shared.relay_url.clone());
-        // Mit Konto ist die Liste geraeteuebergreifend, ohne Konto lokal -
-        // beides muss gehen, deshalb ist das Zeichen nur eine Zugabe.
+        // With an account the list works across devices, without an account it is local -
+        // both must work, so the symbol is only an extra.
         if let Some(sess) = &self.acc {
             d.konto_setzen(Some(&sess.token));
         }
@@ -5070,20 +5070,20 @@ if let Some(path) = self.shot.clone() {
         d
     }
 
-    /// Freunde: anfragen, bestaetigen, und dann mit EINEM Klick ins
-    /// Meeting oder in die Fernwartung.
+    /// Friends: request, confirm, and then with ONE click into the
+    /// meeting or into remote maintenance.
     ///
-    /// WARUM beidseitig: eine Freundschaft, die einer allein herstellen
-    /// kann, ist keine - sie waere nur eine Liste, in die sich jeder selbst
-    /// eintraegt. Der Relay setzt das durch, nicht dieses Fenster.
+    /// WHY mutual: a friendship that one side can establish alone
+    /// is none - it would just be a list everybody enters themselves into.
+    /// The relay enforces this, not this window.
     fn freunde_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         let d = self.freunde_dienst();
         while let Some(m) = d.meldung() {
-            // Nur die Meldungen zeigen, die den Nutzer wirklich angehen.
+            // Show only the messages that really concern the user.
             self.freunde_meldung = match m {
-                // Der Abgleich laeuft alle 20 Sekunden - daraus jedes Mal
-                // eine Meldung zu machen waere reines Rauschen.
+                // The sync runs every 20 seconds - turning each one into
+                // a message would be pure noise.
                 freunde::Meldung::Abgeglichen { .. } => continue,
                 freunde::Meldung::Angefragt(w) => {
                     format!("Anfrage an {} ist raus.", w)
@@ -5114,7 +5114,7 @@ if let Some(path) = self.shot.clone() {
 
         let mut verbinden: Option<String> = None;
         let mut meeting_mit: Option<freunde::Freund> = None;
-        // Einladungen, die ein Freund geschickt hat: (Nummer, Adresse, true = beitreten)
+        // Invitations a friend has sent: (number, address, true = join)
         let mut einladung_aktion: Option<(String, String, bool)> = None;
 
         ui.horizontal(|ui| {
@@ -5145,8 +5145,8 @@ if let Some(path) = self.shot.clone() {
         );
         ui.add_space(10.0);
 
-        // ------------------------------------------------ Meeting-Einladungen
-        // Ein Freund hat per Knopf ein Meeting angelegt und uns eingeladen.
+        // ------------------------------------------------ Meeting invitations
+        // A friend created a meeting by button and invited us.
         for e in d.einladungen() {
             egui::Frame::NONE
                 .fill(p.card)
@@ -5303,7 +5303,7 @@ if let Some(path) = self.shot.clone() {
             ui.add_space(10.0);
         }
 
-        // ------------------------------------------------ die Liste
+        // ------------------------------------------------ the list
         let liste = d.liste();
         label_small(ui, "Deine Freunde");
         if liste.is_empty() {
@@ -5334,8 +5334,8 @@ if let Some(path) = self.shot.clone() {
                                 ui.label(
                                     egui::RichText::new(fr.anzeige()).size(13.0).color(p.text),
                                 );
-                                // Mit Konto: @Name, dann der PC (bei mehreren
-                                // "+N"), sonst "kein FreeViewer-PC".
+                                // With an account: @name, then the PC (with several
+                                // "+N"), otherwise "no FreeViewer PC".
                                 let mut unter: Vec<String> = Vec::new();
                                 if !fr.handle.is_empty() && fr.name.trim() != format!("@{}", fr.handle) {
                                     unter.push(format!("@{}", fr.handle));
@@ -5381,9 +5381,9 @@ if let Some(path) = self.shot.clone() {
                                             self.freunde_meldung = format!("{}", e);
                                         }
                                     }
-                                    // Nur anbieten, was auch wirklich geht:
-                                    // eine Fernwartung zu einem offline
-                                    // Rechner waere ein Knopf ins Leere.
+                                    // Only offer what actually works:
+                                    // remote maintenance to an offline
+                                    // machine would be a button into nothing.
                                     ui.add_enabled_ui(fr.erreichbar(), |ui| {
                                         if ui
                                             .button("Fernwartung")
@@ -5415,8 +5415,8 @@ if let Some(path) = self.shot.clone() {
         }
         if let Some((id, link, beitreten)) = einladung_aktion {
             if beitreten {
-                // Nur die Meeting-Seite dieser Marke aufmachen - nie eine beliebige
-                // Adresse, die ein Freund (oder ein Fremder in seinem Namen) schickt.
+                // Only open the meeting page of this brand - never an arbitrary
+                // address a friend (or a stranger in their name) sends.
                 if freunde::einladung_link_ok(&link, &meet::base()) {
                     match meet::open_window(&link) {
                         Ok(()) => {
@@ -5438,13 +5438,13 @@ if let Some(path) = self.shot.clone() {
             let wer = fr.anzeige();
             match meet::create(&format!("Mit {}", wer), false) {
                 Ok(m) => {
-                    // Der Link liegt IMMER in der Zwischenablage: klappt die
-                    // Zustellung nicht (alter Relay, Freund ohne PC), bleibt dieser Weg.
+                    // The link is ALWAYS in the clipboard: if delivery
+                    // fails (old relay, friend without a PC), this way remains.
                     let link = meet::invite(&m);
                     ui.ctx().copy_text(link);
                     meet::merken(&m);
-                    // Zum Relay geht nur die nackte Adresse - und nur ohne
-                    // Ende-zu-Ende-Schluessel (der darf den Relay nie sehen).
+                    // Only the bare address goes to the relay - and only without an
+                    // end-to-end key (the relay must never see that).
                     let relay_link = if m.e2e.is_empty() {
                         Some(meet::join_url(&m.id, &m.passwort))
                     } else {
@@ -5480,8 +5480,8 @@ if let Some(path) = self.shot.clone() {
         let all = self.book.sorted();
         self.presence
             .watch(all.iter().map(|x| x.id.clone()).collect());
-        // Fuzzy: Gross-/Kleinschreibung und Trennzeichen sind egal -
-        // "flei one" findet "FLEI-ONE", "497 628" findet die ID.
+        // Fuzzy: case and separators do not matter -
+        // "flei one" finds "FLEI-ONE", "497 628" finds the ID.
         let q = partners::search_norm(&self.search);
         let folder = self.folder.clone();
         let hit = |x: &partners::Partner| {
@@ -5557,9 +5557,9 @@ if let Some(path) = self.shot.clone() {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_ghost(ui, "plus", i18n::t("dev.add_tip")).clicked() {
-                            // Was im Suchfeld steht ist meistens genau die ID,
-                            // die hinzugefuegt werden soll - also uebernehmen
-                            // und den Rest im Fenster ausfuellen lassen.
+                            // What is in the search field is usually exactly the ID
+                            // that should be added - so take it over
+                            // and let the rest be filled in in the window.
                             let id: String =
                                 self.search.chars().filter(|c| c.is_ascii_digit()).collect();
                             self.add_dev = Some(AddDev {
@@ -6007,10 +6007,10 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// "Geraet hinzufuegen": ein kleines Fenster mit allem, was ein Eintrag
-    /// braucht. Vorher tat der Plus-Knopf nur dann etwas, wenn zufaellig
-    /// schon eine vollstaendige ID im Suchfeld stand - fuer jeden anderen
-    /// war er kaputt.
+    /// "Add device": a small window with everything an entry
+    /// needs. Previously the plus button only did something if a complete
+    /// ID happened to be in the search field - for everyone else
+    /// it was broken.
     fn add_dev_ui(&mut self, ctx: &egui::Context) {
         let Some(mut e) = self.add_dev.clone() else {
             return;
@@ -6116,7 +6116,7 @@ if let Some(path) = self.shot.clone() {
         self.add_dev = Some(e);
     }
 
-    /// Einstellungen: links die Bereiche, rechts der gewählte Bereich.
+    /// Settings: the areas on the left, the selected area on the right.
     fn settings_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         ui.horizontal_top(|ui| {
@@ -6134,8 +6134,8 @@ if let Some(path) = self.shot.clone() {
                     (SettingsTab::About, "eye", i18n::t("set.about")),
                 ] {
                     let sel = self.stab == tab;
-                    // selbst zeichnen, sonst schluckt die feste Fuellung des
-                    // egui-Knopfes jede Reaktion auf die Maus
+                    // draw it yourself, otherwise the fixed fill of the
+                    // egui button swallows every reaction to the mouse
                     let (rect, r) =
                         ui.allocate_exact_size(egui::vec2(166.0, 32.0), egui::Sense::click());
                     let hov = r.hovered();
@@ -6200,8 +6200,8 @@ if let Some(path) = self.shot.clone() {
     fn set_general(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             label_small(ui, i18n::t("set.name"));
-            // Leer heisst: es steht noch nichts eigenes drin - dann zeigen wir
-            // den Rechnernamen, so wie ihn auch die Gegenseite sieht.
+            // Empty means: nothing of its own is entered yet - then we show
+            // the machine name, just as the other side sees it too.
             let mut name = {
                 let mut n = self.shared.device_name.lock().unwrap().clone();
                 if n.trim().is_empty() {
@@ -6295,8 +6295,8 @@ if let Some(path) = self.shot.clone() {
                     )
                     .on_hover_text(i18n::t("set.service_tip"));
                 } else {
-                    // Reparieren: Dateien frisch drueber (bleibt ohne
-                    // zusaetzliche Frage, die Rechte hat man schon gegeben)
+                    // Repair: files freshly on top (stays without an
+                    // additional question, the rights have already been given)
                     if ghost_button(ui, i18n::t("set.repair")).clicked() {
                         let flags = if self.service_on {
                             "--install --with-service"
@@ -6370,8 +6370,8 @@ if let Some(path) = self.shot.clone() {
         self.pw_card(ui);
     }
 
-    /// Feste Passwoerter: beliebig viele, immer als Punkte, mit Bezeichnung -
-    /// wie ein Array im Unity-Inspector.
+    /// Fixed passwords: any number, always as dots, with a label -
+    /// like an array in the Unity inspector.
     fn pw_card(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         label_small(ui, i18n::t("set.pw_perm"));
@@ -6524,8 +6524,8 @@ if let Some(path) = self.shot.clone() {
         });
     }
 
-    /// Einstellungen -> Konto. Ohne Anmeldung laeuft alles wie bisher; mit
-    /// Anmeldung liegt die Geraeteliste zusaetzlich beim FleiTec-Konto.
+    /// Settings -> Account. Without login everything works as before; with
+    /// login the device list additionally lives with the FleiTec account.
     fn set_account(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         self.take_sync_result();
@@ -6616,7 +6616,7 @@ if let Some(path) = self.shot.clone() {
         });
     }
 
-    /// Anmelden im Hintergrund - die Oberflaeche darf dabei nicht stehen.
+    /// Log in in the background - the UI must not stall meanwhile.
     fn do_login(&mut self) {
         let relay = self.shared.relay_url.clone();
         let user = self.acc_user.trim().to_string();
@@ -6683,7 +6683,7 @@ if let Some(path) = self.shot.clone() {
                 self.acc_msg = i18n::t("acc.expired").to_string();
             }
             account::SyncOut::LoggedIn(user) => {
-                // Anmeldung geklappt - die Sitzung liegt schon auf der Platte
+                // Login worked - the session is already on disk
                 self.acc = account::load();
                 self.acc_msg = i18n::tf("acc.hello", &user);
                 self.acc_user.clear();
@@ -6745,7 +6745,7 @@ if let Some(path) = self.shot.clone() {
             ui.horizontal(|ui| {
                 let mut unbegrenzt = self.dep_count == 0;
                 if unbegrenzt {
-                    // eine graue "0" waere verwirrend - lieber das Zeichen
+                    // a gray "0" would be confusing - better the symbol
                     ui.label(
                         egui::RichText::new("∞")
                             .size(19.0)
@@ -6794,7 +6794,7 @@ if let Some(path) = self.shot.clone() {
         ui.add_space(10.0);
         label_small(ui, i18n::t("dep.status"));
         card(ui, |ui| {
-            // Solange der Tab offen ist: alle 5 s in den Posteingang sehen.
+            // As long as the tab is open: check the inbox every 5 s.
             if std::time::Instant::now() >= self.dep_next
                 && !self.acc_busy.load(Ordering::Relaxed)
             {
@@ -6853,8 +6853,8 @@ if let Some(path) = self.shot.clone() {
                     ui.label(
                         egui::RichText::new(zeile).size(12.0).color(p.muted),
                     );
-                    // Der Link steht daneben (nicht darunter) - mit Kopieren
-                    // und Widerrufen direkt in derselben Zeile.
+                    // The link sits next to it (not below) - with copy
+                    // and revoke right in the same row.
                     let web = account::setup_web_link(&pend.code);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_ghost(ui, "trash", i18n::t("dep.revoke_tip")).clicked() {
@@ -6882,7 +6882,7 @@ if let Some(path) = self.shot.clone() {
                     sess.token.clone(),
                     code,
                 );
-                // gleich neu lesen, damit die Zeile verschwindet
+                // re-read right away so that the row disappears
                 self.dep_next = std::time::Instant::now();
             }
             let claimed = self.dep_claimed.clone();
@@ -6907,15 +6907,15 @@ if let Some(path) = self.shot.clone() {
         });
     }
 
-    /// Ergebnisse der Einrichtungs-Hintergrundlaeufe abholen.
+    /// Collect the results of the setup background runs.
     fn take_setup_result(&mut self) {
         let res = self.dep_out.lock().unwrap().take();
         let Some(res) = res else { return };
         match res {
             account::SetupOut::Created { link, web, .. } => {
                 self.dep_link = if web.is_empty() { link } else { web };
-                // frisch erzeugt = sofort in der Zwischenablage, ohne dass
-                // jemand danach noch einen Knopf sucht
+                // freshly created = immediately in the clipboard, without
+                // anyone having to look for a button afterwards
                 if let Ok(mut cb) = arboard::Clipboard::new() {
                     let _ = cb.set_text(self.dep_link.clone());
                 }
@@ -6952,8 +6952,8 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Sicherheits-Frage vor dem Deinstallieren - direkt in der App, ohne
-    /// den Umweg ueber "Apps & Features".
+    /// Safety question before uninstalling - right in the app, without
+    /// the detour via "Apps & Features".
     fn uninstall_modal(&mut self, ctx: &egui::Context) {
         if !self.uninstall_ask {
             return;
@@ -7009,9 +7009,9 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Lizenz-Fenster (nur X-Remote): Schluessel eingeben, pruefen, ablegen.
-    /// Ohne gueltige Lizenz erscheint es bei jedem Start einmal - wegklicken
-    /// geht, das Programm laeuft vorerst weiter (weiche Einfuehrung).
+    /// License window (X-Remote only): enter key, verify, store.
+    /// Without a valid license it appears once at every start - dismissing it
+    /// works, the program keeps running for now (soft introduction).
     #[cfg(feature = "license")]
     fn license_modal(&mut self, ctx: &egui::Context) {
         if !self.lic_show {
@@ -7074,8 +7074,8 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Lade-Fenster waehrend der Dienst ein Update einspielt. Danach werden
-    /// alle Teile beendet und der Dienst startet mit dem frischen Stand neu.
+    /// Loading window while the service installs an update. Afterwards
+    /// all parts are terminated and the service restarts with the fresh state.
     fn update_modal(&mut self, ctx: &egui::Context) {
         if self.upd_flag_at.elapsed() > Duration::from_millis(500) {
             self.upd_flag_at = std::time::Instant::now();
@@ -7109,9 +7109,9 @@ if let Some(path) = self.shot.clone() {
             });
     }
 
-    /// Passwort-Nachfrage: "Verbinden" heisst direkt verbinden. Ohne
-    /// gespeichertes Passwort fragt dieser Dialog nach - die Anfrage beim
-    /// Gegenueber (klopfen) ist hier eine bewusste zweite Option.
+    /// Password prompt: "Connect" means connect directly. Without a
+    /// saved password this dialog asks for it - the request to the
+    /// other side (knocking) is a deliberate second option here.
     fn pw_ask_ui(&mut self, ctx: &egui::Context) {
         let Some(id) = self.pw_ask.clone() else {
             return;
@@ -7182,8 +7182,8 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Einrichtungs-Dialog: dieses Geraet per Einmal-Code einrichten und
-    /// danach installieren (mit Dienst).
+    /// Setup dialog: set this device up with a one-time code and
+    /// then install (with service).
     fn setup_dialog_ui(&mut self, ctx: &egui::Context) {
         let Some(dlg) = self.setup_dlg.as_mut() else {
             return;
@@ -7209,13 +7209,13 @@ if let Some(path) = self.shot.clone() {
                     }
                     dlg.owner = if r.owner.is_empty() { r.name_hint } else { r.owner };
                     dlg.done = true;
-                    // Installation mit Dienst - fragt einmal nach Admin-Rechten
+                    // Installation with service - asks once for admin rights
                     if !setup::running_installed() {
                         match service::elevate("--install --with-service") {
                             Ok(()) if dlg.auto => {
-                                // Die heruntergeladene Datei hat ausgespielt:
-                                // die installierte Fassung uebernimmt - diese
-                                // hier darf sich beenden (und wird geloescht).
+                                // The downloaded file has served its purpose:
+                                // the installed version takes over - this one
+                                // may exit (and is deleted).
                                 std::thread::spawn(|| {
                                     std::thread::sleep(std::time::Duration::from_millis(1500));
                                     std::process::exit(0);
@@ -7232,7 +7232,7 @@ if let Some(path) = self.shot.clone() {
         let mut offen = true;
         let mut los = false;
         let mut weg = false;
-        // Aus dem Browser-Download: kein weiterer Klick noetig.
+        // From the browser download: no further click needed.
         if dlg.auto && !dlg.done && dlg.err.is_empty() && !dlg.busy.load(Ordering::Relaxed) {
             los = true;
         }
@@ -7356,8 +7356,8 @@ if let Some(path) = self.shot.clone() {
     fn set_audio(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         let mut look = self.look.clone();
-        // Die Geraeteliste einmal holen - cpal fragt dafuer Windows, das
-        // kostet je nach Treiber ein paar Millisekunden.
+        // Fetch the device list once - cpal asks Windows for this, which
+        // costs a few milliseconds depending on the driver.
         if self.snd_in.is_empty() && self.snd_out.is_empty() {
             self.snd_in = audio::input_devices();
             self.snd_out = audio::output_devices();
@@ -7555,8 +7555,8 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Update-Karte: Version, Suchen, Automatik.
-    /// Rueckmeldung: Fehler oder Idee, direkt aus dem Programm.
+    /// Update card: version, search, automatic.
+    /// Feedback: bug or idea, straight from the program.
     fn set_feedback(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
         card(ui, |ui| {
@@ -7653,8 +7653,8 @@ if let Some(path) = self.shot.clone() {
         self.license_card(ui);
     }
 
-    /// Lizenz-Karte in den Einstellungen: Stand anzeigen, Schluessel
-    /// eingeben oder entfernen (nur X-Remote).
+    /// License card in the settings: show status, enter or
+    /// remove key (X-Remote only).
     #[cfg(feature = "license")]
     fn license_card(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
@@ -7695,7 +7695,7 @@ if let Some(path) = self.shot.clone() {
         });
     }
 
-    /// Aussehen übernehmen: speichern, Stil neu bauen, Titelleiste nachziehen.
+    /// Apply look: save, rebuild style, adjust title bar.
     fn apply_look(&mut self, ctx: &egui::Context, a: theme::Appearance) {
         self.look = a.clone();
         theme::save(&a);
@@ -7848,9 +7848,9 @@ if let Some(path) = self.shot.clone() {
         ctx.request_repaint_after(Duration::from_millis(250));
     }
 
-    /// Was in der Bedienleiste angeklickt wurde. Die Leiste gibt es zweimal
-    /// (oben im Fenster und schwebend im Vollbild), den Inhalt aber nur
-    /// einmal - deshalb sammelt sie ihre Wuensche hier ein.
+    /// What was clicked in the control bar. The bar exists twice
+    /// (on top in the window and floating in fullscreen), but the content only
+    /// once - so it collects its wishes here.
     fn session_bar(&mut self, ui: &mut egui::Ui, a: &mut BarActs, kompakt: bool) {
         let stats = *self.shared.stats.lock().unwrap();
         let game = self.shared.game_mode();
@@ -7923,13 +7923,13 @@ if let Some(path) = self.shot.clone() {
                 });
         }
 
-        // Aufloesung des fernen Bildschirms - der Host stellt um und setzt
-        // am Sitzungsende die vorherige wieder.
+        // Resolution of the remote screen - the host switches and restores
+        // the previous one at the end of the session.
         ui.separator();
         {
             let (rw, rh) = *self.shared.remote_size.lock().unwrap();
-            // Was der ferne Bildschirm wirklich kann (sagt der Host); solange
-            // nichts da ist, die gaengigen Stufen.
+            // What the remote screen can really do (the host says); as long as
+            // there is nothing, the common steps.
             let modi = {
                 let l = self.shared.remote_resolutions.lock().unwrap().clone();
                 if l.is_empty() {
@@ -8004,7 +8004,7 @@ if let Some(path) = self.shot.clone() {
         });
 
         ui.separator();
-        // Vollbild an/aus - im Vollbild zusaetzlich das Anheften
+        // Fullscreen on/off - in fullscreen additionally the pinning
         let (icon, tip) = if self.full {
             ("shrink", i18n::t("sess.full_off"))
         } else {
@@ -8070,8 +8070,8 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Vollbild ein- und ausschalten. Im Vollbild verschwindet der Rahmen von
-    /// Windows komplett - genau wie bei der Windows-Fernverbindung.
+    /// Switch fullscreen on and off. In fullscreen the Windows frame
+    /// disappears completely - just like in the Windows remote connection.
     fn set_full(&mut self, ctx: &egui::Context, on: bool) {
         if self.full == on {
             return;
@@ -8084,8 +8084,8 @@ if let Some(path) = self.shot.clone() {
     fn session_ui(&mut self, ctx: &egui::Context) {
         let mut a = BarActs::default();
 
-        // F11 schaltet das Vollbild - die Taste wird hier verbraucht, damit
-        // sie nicht auch noch auf dem anderen Rechner landet.
+        // F11 toggles fullscreen - the key is consumed here so that
+        // it does not also land on the other machine.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             a.toggle_full = true;
         }
@@ -8093,8 +8093,8 @@ if let Some(path) = self.shot.clone() {
         if self.full {
             // ---- schwebende Leiste (Windows-Fernverbindung laesst gruessen)
             let screen = ctx.screen_rect();
-            // Wie bei der Windows-Fernverbindung: die Leiste kommt zurueck,
-            // sobald die Maus den oberen Bildschirmrand beruehrt.
+            // Like in the Windows remote connection: the bar comes back
+            // as soon as the mouse touches the top edge of the screen.
             let pointer_top = ctx
                 .input(|i| i.pointer.hover_pos())
                 .map(|p| p.y <= screen.top() + 3.0)
@@ -8109,9 +8109,9 @@ if let Some(path) = self.shot.clone() {
             let pos = egui::pos2(screen.left() + links, screen.top() + 2.0);
             let p = theme::palette();
 
-            // Ausgeblendet heisst ausgeblendet: kein Griff, kein Schatten,
-            // nichts. Der obere Bildschirmrand ist der Schalter - genau wie
-            // bei der Windows-Fernverbindung.
+            // Hidden means hidden: no handle, no shadow,
+            // nothing. The top edge of the screen is the switch - just like
+            // in the Windows remote connection.
             if offen {
                 let area = egui::Area::new(egui::Id::new("fv_fullbar"))
                     .order(egui::Order::Foreground)
@@ -8205,8 +8205,8 @@ if let Some(path) = self.shot.clone() {
                 }
             });
 
-        // Kein neues Bild seit ein paar Sekunden? Dann sagen wir, woran es
-        // fast immer liegt, statt nur "0 fps" anzuzeigen.
+        // No new image for a few seconds? Then we say what it
+        // almost always comes down to, instead of just showing "0 fps".
         if self.frame_at.elapsed() > Duration::from_secs(4) {
             let p = theme::palette();
             egui::Area::new(egui::Id::new("fv_stall"))
@@ -8312,9 +8312,9 @@ if let Some(path) = self.shot.clone() {
 
     /// Keeps the pointer lock in sync with focus and clicks.
     fn update_grab(&mut self, ctx: &egui::Context, rect: egui::Rect, game: bool, clicked: bool) {
-        // Die Tastatur wird in BEIDEN Betriebsarten komplett uebernommen -
-        // Windows-Taste, Alt+Tab, Alt+F4 gehen dann an den anderen Rechner
-        // und nicht mehr an das eigene Windows. Rechte Strg holt sie zurueck.
+        // The keyboard is fully taken over in BOTH modes -
+        // Windows key, Alt+Tab, Alt+F4 then go to the other machine
+        // and no longer to the own Windows. Right Ctrl brings it back.
         vinput::set_relative(game);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if !focused {
@@ -8516,18 +8516,18 @@ fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Lebenszeichen fuer den Wachhund: die Oberflaeche zeichnet.
+        // Sign of life for the watchdog: the UI is drawing.
         BILD_GEZEICHNET.store(true, Ordering::Relaxed);
         if let Some(n) = self.meet_demo {
             self.meet_demo_ui(ctx, n);
             self.shot_ui(ctx);
             return;
         }
-        // Ohne staendiges Neuzeichnen im Elternfenster bekommt das
-        // Meetingfenster keine Rahmen - und --meetshot wartet ewig.
-        // Fuer das Bild wird das Meetingfenster ins HAUPTfenster gezeichnet.
-        // Ein eigenes Unterfenster liefert beim Bildbefehl nichts zurueck -
-        // gemessen: der Screenshot-Ereignis kam dort nie an.
+        // Without constant redrawing in the parent window the
+        // meeting window gets no frames - and --meetshot waits forever.
+        // For the image the meeting window is drawn into the MAIN window.
+        // A separate child window returns nothing on the image command -
+        // measured: the screenshot event never arrived there.
         if self.meet_shot.is_some() {
             self.meet_win_ui(ctx);
             self.shot_ui(ctx);
@@ -8538,8 +8538,8 @@ impl eframe::App for App {
             chrome::paint_from_theme();
         }
         self.tray_ui(ctx);
-        // Einrichtungs-Auftrag aus dem Browser-Download: sobald der Host
-        // seine ID vom Relay hat, geht alles von selbst (kein Koppeln).
+        // Setup job from the browser download: as soon as the host
+        // has its ID from the relay, everything happens by itself (no pairing).
         if let Some((code, name)) = self.auto_setup.clone() {
             let fertige_id = !self.shared.my_id.lock().unwrap().is_empty();
             if fertige_id {
@@ -8565,17 +8565,17 @@ impl eframe::App for App {
         self.pw_ask_ui(ctx);
         self.setup_dialog_ui(ctx);
         self.pull_frame(ctx);
-        // eframe setzt beim Start (und wenn Windows zwischen hell und dunkel
-        // wechselt) sein eigenes Aussehen durch - dann fehlen zum Beispiel die
-        // Raender der Eingabefelder. Also nachsehen und gegebenenfalls unser
-        // Aussehen wieder aufsetzen.
+        // eframe imposes its own look at start (and when Windows switches between
+        // light and dark) - then, for example, the borders of the input fields
+        // are missing. So check and, if necessary, put our
+        // look back on.
         if !theme::style_is_ours(ctx) {
             let look = self.look.clone();
             theme::apply(ctx, &look);
         }
         self.handle_drops(ctx);
         self.handle_link(ctx);
-        // Konto: Ergebnisse abholen und alle zwei Minuten leise abgleichen
+        // Account: collect results and quietly sync every two minutes
         self.take_sync_result();
         if self.acc.is_some()
             && !self.acc_busy.load(Ordering::Relaxed)
@@ -8607,14 +8607,14 @@ impl eframe::App for App {
             if vinput::is_active() {
                 vinput::set_active(false);
             }
-            // Das Vollbild gehoerte dem Sitzungsfenster, das gerade zugeht -
-            // hier nur noch den Merker zuruecksetzen, das Hauptfenster war nie
-            // im Vollbild.
+            // Fullscreen belonged to the session window that is just closing -
+            // only reset the marker here, the main window was never
+            // in fullscreen.
             self.full = false;
         }
 
-        // Das Hauptfenster bleibt immer das Hauptfenster: Geraete, Meet und
-        // Einstellungen sind auch waehrend einer laufenden Sitzung bedienbar.
+        // The main window always stays the main window: devices, Meet and
+        // settings are usable even during a running session.
         paint_background(ctx);
         self.rail(ctx);
         self.header(ctx);
@@ -8625,7 +8625,7 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(16, 10)),
             )
             .show(ctx, |ui| {
-                // Inhalt nicht ueber die ganze Breite ziehen
+                // Do not stretch the content across the whole width
                 let full = ui.available_width();
                 let w = full.min(CONTENT_MAX);
                 let pad = ((full - w) / 2.0).max(0.0);
@@ -8640,9 +8640,9 @@ impl eframe::App for App {
         self.add_dev_ui(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
 
-        // Die Sitzung laeuft in einem eigenen Betriebssystem-Fenster. Damit
-        // bleibt das Hauptfenster benutzbar (zweite Sitzung aufmachen, Datei
-        // suchen), und Vollbild betrifft nur den entfernten Bildschirm.
+        // The session runs in its own operating system window. This way
+        // the main window stays usable (open a second session, search a
+        // file), and fullscreen only affects the remote screen.
         if connected {
             let title = match self.shared.host_peer.lock().unwrap().clone() {
                 s if s.is_empty() => i18n::t("sess.window").to_string(),
@@ -8663,9 +8663,9 @@ impl eframe::App for App {
                     .with_inner_size([1280.0, 800.0])
                     .with_min_inner_size([480.0, 320.0]),
                 |vctx, _class| {
-                    // Ablegen muss HIER gelesen werden - das Sitzungsfenster
-                    // hat einen eigenen Eingang, das Hauptfenster bekam die
-                    // Dateien nie zu sehen.
+                    // Dropping must be read HERE - the session window
+                    // has its own input, the main window never got to
+                    // see the files.
                     self.handle_drops(vctx);
                     self.session_ui(vctx);
                     if vctx.input(|i| i.viewport().close_requested()) {
@@ -8679,9 +8679,9 @@ impl eframe::App for App {
             }
         }
 
-        // Das Meeting bekommt wie die Fernsitzung ein eigenes Fenster:
-        // Vorbereitung, Einladung und Teilnehmerliste laufen neben dem
-        // Hauptfenster her, nicht als Karteikarte darin.
+        // Like the remote session, the meeting gets its own window:
+        // preparation, invitation and participant list run next to the
+        // main window, not as a tab inside it.
         if self.meet_win.offen {
             let mut closed = false;
             ctx.show_viewport_immediate(
@@ -8696,12 +8696,12 @@ impl eframe::App for App {
                     if vctx.input(|i| i.viewport().close_requested()) {
                         closed = true;
                     }
-                    // WARUM zwei Takte: 150 ms waren eine harte Obergrenze
-                    // von rund 7 Bildern je Sekunde - egal wie schnell die
-                    // Kamera lieferte, das Fenster zeichnete nicht oefter.
-                    // Genau das hat Justin als "schlechte Bildrate" gesehen.
-                    // Im Gespraech also fluessig zeichnen; auf dem
-                    // Beitritts-Schirm reicht wenig, da bewegt sich kaum was.
+                    // WHY two beats: 150 ms were a hard upper limit
+                    // of about 7 frames per second - no matter how fast the
+                    // camera delivered, the window did not draw more often.
+                    // Justin saw exactly that as "bad frame rate".
+                    // So draw smoothly in a conversation; on the
+                    // join screen little is enough, hardly anything moves there.
                     vctx.request_repaint_after(Duration::from_millis(if im_gespraech {
                         16
                     } else {
@@ -8714,7 +8714,7 @@ impl eframe::App for App {
             }
         }
 
-        // --shot: ein paar Frames zeichnen lassen, dann ein Bild anfordern
+        // --shot: let a few frames be drawn, then request an image
         self.shot_ui(ctx);
     }
 }
@@ -8728,8 +8728,8 @@ enum View {
     Meet,
     Start,
     Devices,
-    /// Freunde: beidseitig bestaetigt, danach ein Klick zu Meeting oder
-    /// Fernwartung.
+    /// Friends: confirmed by both sides, then one click to meeting or
+    /// remote maintenance.
     Freunde,
     Settings,
 }
@@ -8738,12 +8738,12 @@ enum View {
 struct MeetWin {
     offen: bool,
     meeting: Option<meet::Meeting>,
-    /// Der Browser mit Bild und Ton laeuft bereits.
+    /// The browser with image and sound is already running.
     beigetreten: bool,
-    /// Wunsch "beitreten" aus dem grossen Knopf - wird eine Zeile weiter
-    /// unten in eine echte native Sitzung umgesetzt.
+    /// Request "join" from the big button - converted one line further
+    /// down into a real native session.
     nativ_start: bool,
-    /// Geraetenamen, wie das System sie meldet (Mikrofone, Kameras).
+    /// Device names as the system reports them (microphones, cameras).
     mics: Vec<String>,
     cams: Vec<String>,
     /// 0 = Browser-Standard, sonst Index+1 in mics/cams.
@@ -8751,30 +8751,30 @@ struct MeetWin {
     cam_sel: usize,
     stumm: bool,
     ohne_video: bool,
-    /// Einmalig im Hintergrund eingelesen (die Abfrage dauert einen Moment).
+    /// Read once in the background (the query takes a moment).
     #[allow(clippy::type_complexity)]
     geraete: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>, Vec<String>)>>>,
     geraete_geladen: bool,
     geraete_da: bool,
-    /// Lautsprecher - nur fuer die Einstellungen IM Meeting; vor dem
-    /// Beitritt zeigt der Browser sie auch nicht.
+    /// Speakers - only for the settings IN the meeting; before
+    /// joining the browser does not show them either.
     spks: Vec<String>,
     spk_sel: usize,
     /// Bildschirme dieses Rechners (Name, Breite, Hoehe) - einmal eingelesen.
     monitore: Vec<(String, u32, u32)>,
-    /// Offene Programmfenster (Kennung, Titel, Programm). Wird nur alle
-    /// anderthalb Sekunden neu eingelesen: EnumWindows fragt fuer JEDES
-    /// Fenster die Fensterverwaltung und den Prozess - das jede Bildrate
-    /// zu tun waere Verschwendung.
+    /// Open program windows (id, title, program). Only re-read every
+    /// one and a half seconds: EnumWindows asks the window manager and the process
+    /// for EVERY window - doing that at every frame rate
+    /// would be a waste.
     fenster: Vec<(isize, String, String)>,
     fenster_naechste: std::time::Instant,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
     tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
     tn_busy: Arc<std::sync::atomic::AtomicBool>,
     tn_next: std::time::Instant,
-    /// Kurzer Hinweis im Fenster ("Link kopiert") und wann er kam.
+    /// Short hint in the window ("Link copied") and when it came.
     toast: Option<(String, std::time::Instant)>,
-    /// Anzeigename im Meeting (Feld "Dein Name" auf dem Beitritts-Schirm).
+    /// Display name in the meeting (field "Dein Name" on the join screen).
     name: String,
 }
 
@@ -8814,14 +8814,14 @@ struct BarActs {
     disconnect: bool,
     mode: Option<u8>,
     monitor: Option<u8>,
-    /// Gewuenschte Aufloesung auf dem Host (Breite, Hoehe).
+    /// Desired resolution on the host (width, height).
     res: Option<(u32, u32)>,
     special: Option<u8>,
     pick: bool,
     open_dir: bool,
     toggle_full: bool,
     toggle_pin: bool,
-    /// Wie weit der Griff der schwebenden Leiste gezogen wurde.
+    /// How far the handle of the floating bar was dragged.
     drag: f32,
 }
 
@@ -8829,18 +8829,18 @@ fn game_mode(shared: &Arc<Shared>) -> bool {
     shared.game_mode()
 }
 
-/// Was im "Geraet hinzufuegen"-Fenster steht, solange es offen ist.
+/// What is in the "Add device" window while it is open.
 #[derive(Clone, Default)]
 struct AddDev {
     id: String,
     name: String,
     folder: String,
     password: String,
-    /// Warum das Hinzufuegen gerade nicht geht.
+    /// Why adding is currently not possible.
     err: String,
 }
 
-/// Was im Bearbeiten-Feld eines Geraetes steht, solange es offen ist.
+/// What is in the edit field of a device while it is open.
 #[derive(Clone, Default)]
 struct DevEdit {
     id: String,
@@ -8865,7 +8865,7 @@ enum PwOverwrite {
 struct SetupDlg {
     code: String,
     name: String,
-    /// Aus dem Browser-Download: sofort einrichten, ohne noch einmal zu fragen.
+    /// From the browser download: set up immediately, without asking again.
     auto: bool,
     busy: Arc<std::sync::atomic::AtomicBool>,
     out: Arc<std::sync::Mutex<Option<Result<account::SetupClaimReply, String>>>>,
@@ -8874,7 +8874,7 @@ struct SetupDlg {
     done: bool,
 }
 
-/// Bereiche innerhalb der Einstellungen.
+/// Areas within the settings.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
@@ -8888,25 +8888,25 @@ enum SettingsTab {
 }
 
 
-/// Breite, ab der der Inhalt nicht weiter auseinandergezogen wird.
+/// Width beyond which the content is not stretched further.
 const CONTENT_MAX: f32 = 1180.0;
 /// How long the start page password stays readable after clicking the eye.
 const PW_REVEAL_SECS: Duration = Duration::from_secs(10);
 
-/// Schriften. Auf Windows sieht die mitgelieferte Segoe UI richtig aus, auf
-/// dem Mac die System-Schrift, unter Linux DejaVu/Noto. Findet sich nichts,
-/// bleibt die in egui eingebaute Schrift.
+/// Fonts. On Windows the bundled Segoe UI looks right, on
+/// the Mac the system font, on Linux DejaVu/Noto. If nothing is found,
+/// the font built into egui remains.
 ///
-/// WICHTIG: Die Familie "head" MUSS am Ende immer mit mindestens einer
-/// Schrift belegt sein. Bis v0.26.1 wurde sie nur angelegt, wenn eine
-/// Windows-Datei gefunden wurde - auf Mac und Linux war sie leer und egui
-/// brach beim ersten Zeichnen einer Überschrift ab
+/// IMPORTANT: The family "head" MUST always be assigned at least one
+/// font at the end. Up to v0.26.1 it was only created if a
+/// Windows file was found - on Mac and Linux it was empty and egui
+/// aborted on the first drawing of a heading
 /// ("FontFamily::Name(\"head\") is not bound to any fonts").
-/// Genau das war der Absturz "X-Remote quit unexpectedly" auf dem Mac.
+/// That was exactly the crash "X-Remote quit unexpectedly" on the Mac.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Kandidaten pro Betriebssystem, in der Reihenfolge der Vorliebe.
+    // Candidates per operating system, in order of preference.
     #[cfg(windows)]
     let (regular, bold): (&[&str], &[&str]) = (
         &["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/SegUIVar.ttf"],
@@ -8967,9 +8967,9 @@ fn install_fonts(ctx: &egui::Context) {
             .insert(0, b.to_owned());
     }
 
-    // Die Überschriften-Familie bekommt IMMER einen Inhalt: erst die fette
-    // Schrift (falls gefunden), danach die komplette Liste der normalen
-    // Schriften als Rückfallebene. Damit kann sie nie leer sein.
+    // The heading family ALWAYS gets content: first the bold
+    // font (if found), then the complete list of normal
+    // fonts as a fallback. This way it can never be empty.
     let fallback = fonts
         .families
         .get(&egui::FontFamily::Proportional)
@@ -8992,22 +8992,22 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Kräftige Schrift für Überschriften, sonst die normale.
+/// Bold font for headings, otherwise the normal one.
 fn head_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("head".into()))
 }
 
 fn install_theme(ctx: &egui::Context) {
     install_fonts(ctx);
-    // SVG-Symbole: der Bildlader von egui_extras rastert sie in der Groesse,
-    // in der sie gebraucht werden.
+    // SVG icons: the image loader of egui_extras rasterizes them at the size
+    // in which they are needed.
     egui_extras::install_image_loaders(ctx);
     let look = theme::load();
     i18n::set_lang(&look.lang);
     theme::apply(ctx, &look);
 }
-/// Farbnebel und feines Raster hinter allem - derselbe Trick wie auf
-/// fleitec-Seiten, nur eben gemalt statt per CSS.
+/// Color haze and fine grid behind everything - the same trick as on
+/// fleitec pages, just painted instead of via CSS.
 fn paint_background(ctx: &egui::Context) {
     let painter = ctx.layer_painter(egui::LayerId::background());
     let r = ctx.screen_rect();
@@ -9030,7 +9030,7 @@ fn paint_background(ctx: &egui::Context) {
         }
     }
 
-    // 64px-Raster, das nach unten ausblendet
+    // 64px grid that fades out downwards
     let step = 64.0;
     let mut y = r.top();
     while y < r.bottom() {
@@ -9055,8 +9055,8 @@ fn paint_background(ctx: &egui::Context) {
 
 /// Marke oben links: abgerundetes Quadrat mit Auge.
 fn logo(ui: &mut egui::Ui) {
-    // Das echte FreeViewer-Logo - dasselbe Bild wie auf der Webseite und als
-    // Fenstersymbol. Einmal als Textur laden, danach nur noch malen.
+    // The real FreeViewer logo - the same image as on the website and as the
+    // window icon. Load once as a texture, afterwards just paint.
     let id = egui::Id::new("fv_logo_tex");
     let tex = ui
         .ctx()
@@ -9079,7 +9079,7 @@ fn logo(ui: &mut egui::Ui) {
     ui.image((tex.id(), egui::vec2(34.0, 34.0)));
 }
 
-/// Reiter in der Kopfzeile.
+/// Tab in the header.
 fn tab(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     let label = egui::RichText::new(text)
         .size(13.5)
@@ -9096,7 +9096,7 @@ fn tab(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
     ui.add(btn)
 }
 
-/// Überschrift über einer Karte.
+/// Heading above a card.
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
@@ -9106,13 +9106,13 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(3.0);
 }
 
-/// Kleine graue Beschriftung über einem Feld.
+/// Small gray label above a field.
 fn label_small(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(11.5).color(theme::muted()));
     ui.add_space(2.0);
 }
 
-/// Dünne Trennlinie innerhalb einer Karte.
+/// Thin divider line inside a card.
 fn divider(ui: &mut egui::Ui) {
     let r = ui.available_rect_before_wrap();
     ui.painter().hline(
@@ -9123,7 +9123,7 @@ fn divider(ui: &mut egui::Ui) {
     ui.add_space(1.0);
 }
 
-/// Eine Karte im Hausstil.
+/// A card in the house style.
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::group(ui.style())
         .fill(theme::card())
@@ -9137,7 +9137,7 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// Der eine blaue Knopf.
+/// The one blue button.
 fn accent_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     let btn = egui::Button::new(
         egui::RichText::new(text)
@@ -9170,7 +9170,7 @@ fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ))
 }
 
-/// Grüner oder grauer Punkt vor einem Gerät.
+/// Green or gray dot in front of a device.
 fn dot(ui: &mut egui::Ui, online: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let c = if online { theme::green() } else { theme::muted().gamma_multiply(0.55) };
@@ -9203,7 +9203,7 @@ fn status_pill(ui: &mut egui::Ui, ok: bool, text: &str) {
         });
 }
 
-/// „Schlüssel   Wert“-Zeile in der Info-Karte.
+/// "Key   Value" row in the info card.
 fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(key).color(theme::muted()).size(11.5));
@@ -9220,8 +9220,8 @@ fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
 
 /// Fenstersymbol: dasselbe Auge wie im Infobereich, 32x32 RGBA.
 fn app_icon() -> egui::IconData {
-    // Dieselbe Zeichnung, die auch in der EXE steckt (siehe build.rs), damit
-    // Fenster, Taskleiste, Startmenue und Explorer dasselbe zeigen.
+    // The same drawing that is also in the EXE (see build.rs), so that
+    // window, taskbar, start menu and Explorer show the same thing.
     const RAW: &[u8] = include_bytes!("../assets/icon.png");
     match image::load_from_memory(RAW) {
         Ok(img) => {
@@ -9241,7 +9241,7 @@ fn app_icon() -> egui::IconData {
     }
 }
 
-/// Speichert ein Bild der Oberflaeche als JPEG (fuer --shot).
+/// Saves an image of the UI as JPEG (for --shot).
 fn save_shot(img: &egui::ColorImage, path: &std::path::Path) {
     use image::ImageEncoder;
     let [w, h] = img.size;
@@ -9263,7 +9263,7 @@ fn save_shot(img: &egui::ColorImage, path: &std::path::Path) {
 
 // ------------------------------------------------------------ kleine Helfer
 
-/// Symbolknopf ohne Rahmen - Hover und Druck kommen aus der Palette.
+/// Icon button without a frame - hover and press come from the palette.
 fn zeigefinger(r: egui::Response) -> egui::Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -9286,7 +9286,7 @@ fn icon_ghost(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
     zeigefinger(r).on_hover_text(tip)
 }
 
-/// Ein- und ausschaltbarer Symbolknopf (Mikrofon, Ton).
+/// Icon button that can be toggled (microphone, audio).
 fn icon_toggle(ui: &mut egui::Ui, icon: &str, on: bool, size: f32, tip: &str) -> egui::Response {
     let col = if on { theme::accent() } else { theme::muted() };
     let r = ui
@@ -9310,7 +9310,7 @@ fn icon_toggle(ui: &mut egui::Ui, icon: &str, on: bool, size: f32, tip: &str) ->
     zeigefinger(r).on_hover_text(tip)
 }
 
-/// Zwei kleine Pegelbalken: raus und rein.
+/// Two small level bars: out and in.
 fn level_bar(ui: &mut egui::Ui, out: u32, inn: u32) {
     let p = theme::palette();
     for (val, col) in [(out, p.accent), (inn, p.green)] {
@@ -9328,7 +9328,7 @@ fn level_bar(ui: &mut egui::Ui, out: u32, inn: u32) {
     }
 }
 
-/// Monitor oder Laptop - je nachdem, wie das Geraet heisst.
+/// Monitor or laptop - depending on what the device is called.
 fn device_symbol(label: &str) -> &'static str {
     let l = label.to_lowercase();
     if l.contains("laptop") || l.contains("book") || l.contains("note") {
@@ -9355,12 +9355,12 @@ fn row_color(online: bool, is_text: bool) -> egui::Color32 {
 }
 
 
-// ============================================================ Bedienelemente
+// ============================================================ Controls
 //
-// egui bringt eigene Kaestchen und Schieber mit, die sich aber mit der
-// eingestellten Rundung zu Punkten verformen und im hellen Modus kaum zu
-// sehen sind. Darum zeichnen wir beides selbst - eckig, mit sichtbarem Rand
-// und einer Reaktion auf die Maus.
+// egui brings its own checkboxes and sliders, but they deform into dots
+// with the configured rounding and are barely visible in light mode.
+// So we draw both ourselves - angular, with a visible border
+// and a reaction to the mouse.
 
 /// Eckiges Kaestchen mit Haken.
 fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
@@ -9385,7 +9385,7 @@ fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
     let idle_edge = if p.dark {
         p.line
     } else {
-        // im Hellen reicht die Haarlinie nicht - der Rand muss tragen
+        // in light mode the hairline is not enough - the border has to carry
         p.muted.gamma_multiply(0.85)
     };
     let fill = if *on {
@@ -9420,8 +9420,8 @@ fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
     zeigefinger(resp)
 }
 
-/// Schieber mit Beschriftung links und Wert rechts - nichts rutscht mehr
-/// ineinander wie bei "Schriftgroesse 100 %" und "Rundung".
+/// Slider with label on the left and value on the right - nothing slips
+/// into each other anymore like with "Schriftgroesse 100 %" and "Rundung".
 fn slider_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -9453,8 +9453,8 @@ fn slider_row(
     changed
 }
 
-/// Auswahlliste mit Beschriftung links. Gibt den neuen Wert zurueck, wenn
-/// sich etwas geaendert hat. `None` in der Liste = Systemstandard.
+/// Selection list with label on the left. Returns the new value if
+/// something changed. `None` in the list = system default.
 fn device_row(
     ui: &mut egui::Ui,
     id: &str,
@@ -9501,7 +9501,7 @@ fn device_row(
                 }
             });
     });
-    // Ein gewaehltes Geraet, das nicht mehr da ist, muss man sehen.
+    // A selected device that is no longer there must be visible.
     if let Some(n) = current {
         if !list.iter().any(|x| x == n) && !list.is_empty() {
             ui.label(
