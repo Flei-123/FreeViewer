@@ -21,13 +21,12 @@
    "web-patch/e2e.js": 1
   },
   "eol_comments": {
-   "relay/relay.js": 1,
    "src/meetfenster.rs": 1
   },
   "identifiers": {
    "relay/account.js": 3,
-   "relay/buch.js": 70,
-   "relay/relay.js": 142,
+   "relay/buch.js": 48,
+   "relay/relay.js": 79,
    "relay/setups.js": 4,
    "relay/test_einladung.js": 44,
    "src/app_meet.rs": 1,
@@ -43,8 +42,7 @@
    "src/meetui.rs": 6,
    "src/startup.rs": 5,
    "tools/freemeet-e2e/browsers.mjs": 4,
-   "web-patch/e2e.js": 84,
-   "web-patch/e2e.test.mjs": 18
+   "web-patch/e2e.js": 2
   },
   "strings": {
    "src/account.rs": 2,
@@ -89,8 +87,8 @@
  },
  "total": {
   "comments": 25,
-  "eol_comments": 2,
-  "identifiers": 452,
+  "eol_comments": 1,
+  "identifiers": 267,
   "strings": 363
  }
 }

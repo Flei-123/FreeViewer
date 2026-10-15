@@ -9,6 +9,7 @@
 > Friends -> meeting (r32, patch `0005`): `POST /fv/freunde/einladen` (friend only; https link WITHOUT `#` key fragment; 6/min, 100/day per sender),
 > `/einladungen` (my mailbox, 24 h), `/einladung-weg`. An old relay answers 404 "unbekannt" -> the client falls back to clipboard.
 > Setup download (r30): `Content-Disposition` carries the brand's name (`FreeViewer-Einrichtung.exe` / `X-Remote-Einrichtung.exe`). Tests: `node test_einladung.js`.
+> Identifier rename (r37, patch `0006`, NOT deployed): pure rename of German JS identifiers in `relay.js`/`buch.js`; wire and file JSON keys (`konto`, `freunde`, `gesehen`, `von_konto`, ...), URLs, env names and file names are unchanged, so old `freunde.json`/`buch-geraete.json` load as before. The patch applies to the repo state, not to the older live file.
 
 A small Node.js service. Its core does two things:
 
