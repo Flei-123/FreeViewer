@@ -26,6 +26,6 @@ self.onrtctransform = (ev) => {
   const { art, richtung } = tr.options;
   // Wait for the key; frames queue up in the readable stream meanwhile.
   keyReady.then(() => {
-    self.FreeMeetE2E.spurSchuetzen(roomKey, art, tr.readable, tr.writable, richtung);
+    self.FreeMeetE2E.protectTrack(roomKey, art, tr.readable, tr.writable, richtung);
   });
 };

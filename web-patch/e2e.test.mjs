@@ -31,16 +31,16 @@ async function rawKey(kind, salt) {
   return toHex(new Uint8Array(bits));
 }
 
-const handle = () => E2E.schluesselAufbauen(root);
+const handle = () => E2E.buildKeys(root);
 
-/** Run frames through spurSchuetzen and collect the output. */
-async function run(h, art, richtung, frames) {
+/** Run frames through protectTrack and collect the output. */
+async function run(h, art, direction, frames) {
   const out = [];
   const readable = new ReadableStream({
     start(c) { for (const f of frames) c.enqueue(f); c.close(); },
   });
   const writable = new WritableStream({ write(f) { out.push(f); } });
-  await E2E.spurSchuetzen(h, art, readable, writable, richtung);
+  await E2E.protectTrack(h, art, readable, writable, direction);
   return out;
 }
 const frame = (u8) => ({ data: u8.slice().buffer });
@@ -61,61 +61,61 @@ test('nonce layout matches the reference', () => {
 test('audio: sealing reproduces the reference frames, opening returns the plaintext', async () => {
   for (const e of V.audio) {
     const h = await handle();
-    const got = await E2E.schuetzenTon(h, hex(e.salt), e.counter, e.keyframe, hex(e.plain));
+    const got = await E2E.protectAudio(h, hex(e.salt), e.counter, e.keyframe, hex(e.plain));
     assert.equal(toHex(got), e.frame);
     const fresh = await handle(); // empty key cache
-    const open = await E2E.oeffnenTon(fresh, hex(e.frame));
-    assert.equal(toHex(open.klar), e.plain);
-    assert.equal(open.zaehler, e.counter);
+    const open = await E2E.openAudio(fresh, hex(e.frame));
+    assert.equal(toHex(open.plain), e.plain);
+    assert.equal(open.counter, e.counter);
   }
 });
 
 test('h264: sealing reproduces the reference frames, opening returns the plaintext', async () => {
   for (const e of V.h264) {
     const h = await handle();
-    const got = await E2E.schuetzenH264(h, hex(e.salt), e.counter, hex(e.plain));
+    const got = await E2E.protectH264(h, hex(e.salt), e.counter, hex(e.plain));
     assert.equal(toHex(got), e.frame);
     const fresh = await handle();
-    assert.equal(toHex(await E2E.oeffnenH264(fresh, hex(e.frame))), e.plain);
+    assert.equal(toHex(await E2E.openH264(fresh, hex(e.frame))), e.plain);
   }
 });
 
 test('h264: slice blobs name the slice pps_id in byte 0 (r82, shared vectors)', async () => {
   for (const e of V.h264_pps) {
     const h = await handle();
-    const got = await E2E.schuetzenH264(h, hex(e.salt), e.counter, hex(e.plain));
+    const got = await E2E.protectH264(h, hex(e.salt), e.counter, hex(e.plain));
     assert.equal(toHex(got), e.frame, 'pps ' + e.pps);
     const fresh = await handle();
-    assert.equal(toHex(await E2E.oeffnenH264(fresh, hex(e.frame))), e.plain);
+    assert.equal(toHex(await E2E.openH264(fresh, hex(e.frame))), e.plain);
     // What a receiving WebRTC stack does with the ENCRYPTED slice: read first_mb, slice_type, pps_id.
-    const units = E2E.nalEinheiten(got);
+    const units = E2E.nalUnits(got);
     for (const [sc, db, end] of units) {
       const typ = got[db] & 0x1f;
       if (typ !== 1 && typ !== 5) continue;
-      const seen = E2E.slicePpsId(E2E.epbRaus(got.subarray(db + 1, end)));
+      const seen = E2E.slicePpsId(E2E.epbRemove(got.subarray(db + 1, end)));
       assert.equal(seen, e.pps <= 6 ? e.pps : 0, 'receiver-visible pps_id of ' + e.pps);
     }
-    assert.equal(E2E.epbRaus(got.subarray(units[2][1] + 1))[0], e.blob_version);
+    assert.equal(E2E.epbRemove(got.subarray(units[2][1] + 1))[0], e.blob_version);
   }
 });
 
 test('h264: pps_id table fits one byte, reads 0,0,pps and nothing but the table is accepted', async () => {
   for (let p = 0; p <= 6; p++) {
-    const b = E2E.VIDEO_KENNUNG[p];
+    const b = E2E.VIDEO_TAG[p];
     assert.equal(E2E.slicePpsId(Uint8Array.from([b, 0, 0, 0, 0, 0, 0, 0])), p);
     // first_mb_in_slice = 0 and slice_type = 0 are the first two bits '1','1'
     assert.equal(b >> 6, 3);
   }
-  assert.equal(new Set(Object.values(E2E.VIDEO_KENNUNG)).size, 7);
+  assert.equal(new Set(Object.values(E2E.VIDEO_TAG)).size, 7);
   // slice header with pps_id 9 (out of range) keeps 0xE3; non-slice NAL units always do
-  assert.equal(E2E.videoKennung(5, Uint8Array.from([0xb1, 0x40, 0])), 0xe3);
-  assert.equal(E2E.videoKennung(6, Uint8Array.from([0x34, 0x80, 0])), 0xe3);
+  assert.equal(E2E.videoTag(5, Uint8Array.from([0xb1, 0x40, 0])), 0xe3);
+  assert.equal(E2E.videoTag(6, Uint8Array.from([0x34, 0x80, 0])), 0xe3);
   // a blob byte 0 outside the table is refused even with a valid-looking rest
   const e = V.h264_pps[1];
   const bad = hex(e.frame);
-  const at = E2E.nalEinheiten(bad)[2][1] + 1;
+  const at = E2E.nalUnits(bad)[2][1] + 1;
   bad[at] = 0xc0;
-  assert.equal(await E2E.oeffnenH264(await handle(), bad), null);
+  assert.equal(await E2E.openH264(await handle(), bad), null);
 });
 
 test('tampering with the clear header or ciphertext is detected', async () => {
@@ -124,20 +124,20 @@ test('tampering with the clear header or ciphertext is detected', async () => {
   for (const pos of [1, 2, 9, 10, 13, 14, 20, hex(e.frame).length - 1]) {
     const bad = hex(e.frame);
     bad[pos] ^= 1;
-    assert.equal(await E2E.oeffnenTon(h, bad), null, 'position ' + pos);
+    assert.equal(await E2E.openAudio(h, bad), null, 'position ' + pos);
   }
   const g = hex(V.h264[0].frame);
   g[g.length - 40] ^= 1;
-  assert.equal(await E2E.oeffnenH264(h, g), null);
+  assert.equal(await E2E.openH264(h, g), null);
 });
 
 test('a wrong room key opens nothing', async () => {
-  const other = await E2E.schluesselAufbauen(new Uint8Array(32).fill(7));
-  assert.equal(await E2E.oeffnenTon(other, hex(V.audio[0].frame)), null);
-  assert.equal(await E2E.oeffnenH264(other, hex(V.h264[0].frame)), null);
+  const other = await E2E.buildKeys(new Uint8Array(32).fill(7));
+  assert.equal(await E2E.openAudio(other, hex(V.audio[0].frame)), null);
+  assert.equal(await E2E.openH264(other, hex(V.h264[0].frame)), null);
 });
 
-test('round trip through spurSchuetzen (raus -> rein), replay is dropped', async () => {
+test('round trip through protectTrack (raus -> rein), replay is dropped', async () => {
   const h = await handle();
   const sent = await run(h, 'audio', 'raus', [frame(hex('aabbccdd11223344'))]);
   assert.equal(sent.length, 1);
@@ -161,7 +161,7 @@ test('old (v1) frames and unencrypted frames are dropped, not shown', async () =
   // v1 video blob: starts with the NAL index, not 0xe3
   const v1video = new Uint8Array([0, 0, 0, 1, 0x65, 0, 0, 0, 0, 5, ...Array.from({ length: 40 }, (_, i) => (i * 7 + 9) & 0xff)]);
   assert.equal((await run(h, 'video', 'rein', [frame(v1video)])).length, 0);
-  assert.equal(await E2E.oeffnenH264(h, v1video), null);
+  assert.equal(await E2E.openH264(h, v1video), null);
 });
 
 test('(key, nonce) never repeats over 2 senders x 3 streams x rejoin', async () => {
@@ -187,10 +187,10 @@ test('(key, nonce) never repeats over 2 senders x 3 streams x rejoin', async () 
         await note('ton', d.slice(2, 10), 0, dv.getUint32(10, false));
       }
       for (const f of [...cam, ...scr]) {
-        for (const [, db, end] of E2E.nalEinheiten(new Uint8Array(f.data))) {
+        for (const [, db, end] of E2E.nalUnits(new Uint8Array(f.data))) {
           const d = new Uint8Array(f.data);
           if ([7, 8, 9].includes(d[db] & 0x1f) || end === db + 1) continue;
-          const raw = E2E.epbRaus(d.slice(db + 1, end));
+          const raw = E2E.epbRemove(d.slice(db + 1, end));
           const dv = new DataView(raw.buffer);
           await note('bild', raw.slice(1, 9), dv.getUint16(13, false), dv.getUint32(9, false));
         }
@@ -203,17 +203,17 @@ test('(key, nonce) never repeats over 2 senders x 3 streams x rejoin', async () 
 });
 
 test('a sender rotates to a new salt before its counter wraps', () => {
-  const s = E2E.neuerSender(hex('0102030405060708'));
+  const s = E2E.newSender(hex('0102030405060708'));
   s.setzeNaechsten(0xffffffff);
   const last = s.nimm();
-  assert.equal(last.zaehler, 0xffffffff);
+  assert.equal(last.counter, 0xffffffff);
   const next = s.nimm();
-  assert.equal(next.zaehler, 0);
-  assert.notEqual(toHex(next.salz), toHex(last.salz));
+  assert.equal(next.counter, 0);
+  assert.notEqual(toHex(next.salt), toHex(last.salt));
 });
 
 test('replay guard keeps one window per sender salt', () => {
-  const w = E2E.neueWache();
+  const w = E2E.newGuard();
   const a = hex('a1a2a3a4a5a6a7a8'), b = hex('0102030405060708');
   assert.ok(w(a, 5)); assert.ok(w(b, 5));
   assert.ok(!w(a, 5)); assert.ok(!w(b, 5));
@@ -228,17 +228,17 @@ test('forged salts do not fill the key cache', async () => {
   for (let i = 0; i < 100; i++) {
     const f = real.slice();
     f[2] = i; f[3] = i >> 8;
-    await E2E.oeffnenTon(rx, f);
+    await E2E.openAudio(rx, f);
   }
   assert.equal(rx.cache.size, 0);
-  assert.ok(await E2E.oeffnenTon(rx, real));
+  assert.ok(await E2E.openAudio(rx, real));
   assert.equal(rx.cache.size, 1);
   void h;
 });
 
 test('replay guard windows match the reference model (shared vectors)', () => {
   for (const c of V.guard) {
-    const w = E2E.neueWache();
+    const w = E2E.newGuard();
     c.steps.forEach((st, i) => {
       assert.equal(w(hex(st.salt), st.counter), st.accept, `${c.name} step ${i}`);
     });
@@ -246,7 +246,7 @@ test('replay guard windows match the reference model (shared vectors)', () => {
 });
 
 test('replay guard: a step of exactly 64 keeps the old highest, bits stay 64 wide', () => {
-  const w = E2E.neueWache();
+  const w = E2E.newGuard();
   const s = hex('0707070707070707');
   assert.ok(w(s, 0)); assert.ok(w(s, 64)); assert.ok(!w(s, 0));
   // long run: must stay fast and correct (the bit field used to grow without bound)
@@ -254,7 +254,7 @@ test('replay guard: a step of exactly 64 keeps the old highest, bits stay 64 wid
   assert.ok(!w(s, 19999)); assert.ok(!w(s, 19990));
 });
 
-test('video replay guard through spurSchuetzen matches the reference (r60)', async () => {
+test('video replay guard through protectTrack matches the reference (r60)', async () => {
   const frames = V.replay_video.frames.map(hex);
   for (const c of V.replay_video.cases) {
     const h = await handle();
@@ -262,7 +262,7 @@ test('video replay guard through spurSchuetzen matches the reference (r60)', asy
     const got = await run(h, 'video', 'rein', input);
     const expected = [];
     for (const st of c.steps) {
-      if (st.accept) expected.push(toHex(await E2E.oeffnenH264(h, frames[st.frame])));
+      if (st.accept) expected.push(toHex(await E2E.openH264(h, frames[st.frame])));
     }
     assert.deepEqual(got.map((f) => toHex(new Uint8Array(f.data))), expected, c.name);
   }
@@ -277,23 +277,23 @@ test('a live video replay and a spliced frame are dropped', async () => {
   assert.equal(got.length, 2, 'replayed video frames must be dropped');
 });
 
-test('moeglich(): createEncodedStreams, or ScriptTransform + Worker (r62)', () => {
+test('supported(): createEncodedStreams, or ScriptTransform + Worker (r62)', () => {
   const saved = { s: globalThis.RTCRtpSender, t: globalThis.RTCRtpScriptTransform, w: globalThis.Worker };
   try {
     delete globalThis.RTCRtpSender; delete globalThis.RTCRtpScriptTransform; delete globalThis.Worker;
-    assert.equal(E2E.moeglich(), false, 'no WebRTC');
+    assert.equal(E2E.supported(), false, 'no WebRTC');
     globalThis.RTCRtpSender = function RTCRtpSender() {};
     // neither API: no E2E (page says so, server keeps the browser out of E2E rooms)
-    assert.equal(E2E.moeglich(), false, 'no insertable streams at all');
+    assert.equal(E2E.supported(), false, 'no insertable streams at all');
     // Firefox / Safari: ScriptTransform + Worker (web/e2e-worker.js does the work)
     globalThis.RTCRtpScriptTransform = function RTCRtpScriptTransform() {};
-    assert.equal(E2E.moeglich(), false, 'ScriptTransform without Worker must not claim E2E');
+    assert.equal(E2E.supported(), false, 'ScriptTransform without Worker must not claim E2E');
     globalThis.Worker = function Worker() {};
-    assert.equal(E2E.moeglich(), true, 'ScriptTransform + Worker');
+    assert.equal(E2E.supported(), true, 'ScriptTransform + Worker');
     // Chromium
     delete globalThis.RTCRtpScriptTransform; delete globalThis.Worker;
     globalThis.RTCRtpSender.prototype.createEncodedStreams = function () {};
-    assert.equal(E2E.moeglich(), true);
+    assert.equal(E2E.supported(), true);
   } finally {
     for (const [k, v] of [['RTCRtpSender', saved.s], ['RTCRtpScriptTransform', saved.t], ['Worker', saved.w]]) {
       if (v === undefined) delete globalThis[k]; else globalThis[k] = v;
@@ -302,11 +302,11 @@ test('moeglich(): createEncodedStreams, or ScriptTransform + Worker (r62)', () =
 });
 
 test('outgoing video without any NAL unit (VP8/VP9) is dropped, never sent in the clear', async () => {
-  const key = await E2E.schluesselAufbauen(root);
+  const key = await E2E.buildKeys(root);
   const clear = new Uint8Array(64).map((_, i) => (i * 5 + 3) & 0xff);   // no start code
   const out = [];
   const rs = new ReadableStream({ start(c) { c.enqueue({ data: clear.buffer.slice(0), type: 'key' }); c.close(); } });
-  await E2E.spurSchuetzen(key, 'video', rs, new WritableStream({ write(f) { out.push(f); } }), 'raus');
+  await E2E.protectTrack(key, 'video', rs, new WritableStream({ write(f) { out.push(f); } }), 'raus');
   assert.equal(out.length, 0, 'clear frame must not leave the sender');
 });
 
@@ -315,7 +315,7 @@ test('web/e2e-worker.js: shares the key handle, protects frames per transform', 
   const scope = { importScripts: () => {}, FreeMeetE2E: E2E };
   scope.self = scope;
   const calls = [];
-  scope.FreeMeetE2E = { spurSchuetzen: (...a) => calls.push(a) };
+  scope.FreeMeetE2E = { protectTrack: (...a) => calls.push(a) };
   vm.runInNewContext(code, scope);
   const handle = { marker: 1 };
   scope.onmessage({ data: { key: handle } });
@@ -329,7 +329,7 @@ test('web/e2e-worker.js: shares the key handle, protects frames per transform', 
 test('web/e2e-worker.js: a transform arriving BEFORE the key waits for it', async () => {
   const code = fs.readFileSync(path.join(here, 'e2e-worker.js'), 'utf8');
   const calls = [];
-  const scope = { importScripts: () => {}, FreeMeetE2E: { spurSchuetzen: (...a) => calls.push(a) } };
+  const scope = { importScripts: () => {}, FreeMeetE2E: { protectTrack: (...a) => calls.push(a) } };
   scope.self = scope;
   vm.runInNewContext(code, scope);
   scope.onrtctransform({ transformer: { options: { art: 'audio', richtung: 'rein' }, readable: 'R', writable: 'W' } });
