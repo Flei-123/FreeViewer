@@ -57,7 +57,7 @@ if ! fv_flag only-dropin; then
   put relay "$RELAY_LOCAL_REQAUTH" "$RELAY_DIR/reqauth.js.new"
   put relay "$RELAY_LOCAL_BUCH" "$RELAY_DIR/buch.js.new"
   put relay "$RELAY_LOCAL_JS" "$RELAY_DIR/relay.js.new"
-  mx relay "node --check all, clientip.js + reqauth.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check reqauth.js.new && node --check buch.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f reqauth.js.new reqauth.js && mv -f buch.js.new buch.js && mv -f relay.js.new relay.js && node -e \"require('./clientip');require('./reqauth');require('./buch')\" && sha256sum relay.js buch.js clientip.js reqauth.js"
+  mx relay "node --check all, clientip.js + reqauth.js first, then relay.js into place" "cd $RELAY_DIR && node --check - < clientip.js.new && node --check - < reqauth.js.new && node --check - < buch.js.new && node --check - < relay.js.new && mv -f clientip.js.new clientip.js && mv -f reqauth.js.new reqauth.js && mv -f buch.js.new buch.js && mv -f relay.js.new relay.js && node -e \"require('./clientip');require('./reqauth');require('./buch')\" && sha256sum relay.js buch.js clientip.js reqauth.js"
 fi
 
 step "drop-in + restart (mode $mode)"
