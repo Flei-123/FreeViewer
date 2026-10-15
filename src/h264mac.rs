@@ -479,7 +479,7 @@ unsafe extern "C" fn kodier_rueckruf(
 impl Encoder {
     pub fn new(w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Self> {
         if w < 16 || h < 16 {
-            return Err(anyhow!("Bild zu klein fuer H.264"));
+            return Err(anyhow!("frame too small for H.264"));
         }
         // Gerade Kantenlaengen - alles andere mag kein 4:2:0.
         let (w, h) = (w & !1, h & !1);
@@ -626,7 +626,7 @@ impl Encoder {
         // is no longer read by VideoToolbox when it is rewritten next time.
         unsafe {
             if CVPixelBufferLockBaseAddress(self.pixel, 0) != 0 {
-                return Err(anyhow!("Pixelpuffer laesst sich nicht sperren"));
+                return Err(anyhow!("pixel buffer cannot be locked"));
             }
             // Y-Ebene
             let y = CVPixelBufferGetBaseAddressOfPlane(self.pixel, 0) as *mut u8;

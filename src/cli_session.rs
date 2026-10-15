@@ -121,7 +121,7 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
                 cur
             );
             println!(
-                "Transport: {} ({} Bilder direkt per UDP, Rest ueber den Relay)",
+                "Transport: {} ({} frames direct via UDP, rest via the relay)",
                 if shared.direct.load(Ordering::Relaxed) {
                     "direkt (P2P)"
                 } else {

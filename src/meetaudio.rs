@@ -790,7 +790,7 @@ mod tests {
         let rest = effektivwert(&letzter);
         assert!(
             rest < 0.001,
-            "Rauschen wird nicht gedaempft: Effektivwert {rest}"
+            "noise is not attenuated: RMS {rest}"
         );
         assert!(!sp.durchlass(), "Tor haette zu sein muessen");
     }
@@ -811,7 +811,7 @@ mod tests {
             letzter = r;
         }
         let laut = effektivwert(&letzter);
-        assert!(laut > 0.15, "Sprache kommt nicht durch: Effektivwert {laut}");
+        assert!(laut > 0.15, "speech does not get through: RMS {laut}");
         assert!(sp.durchlass(), "Tor haette offen sein muessen");
     }
 
@@ -850,8 +850,8 @@ mod tests {
             sp.rahmen(&mut r, staerke);
             sp.durchlass()
         };
-        assert!(mess(0), "bei 0 muss das Klappern durchkommen");
-        assert!(!mess(100), "bei 100 darf das Klappern nicht durchkommen");
+        assert!(mess(0), "at 0 the rattle must get through");
+        assert!(!mess(100), "at 100 the rattle must not get through");
     }
     use super::*;
 
@@ -919,7 +919,7 @@ mod tests {
         }
         let verlust = 10.0 * (ein_l / aus_l.max(1e-12)).log10();
         println!("Verlust ohne Lautsprecher = {:.2} dB", verlust);
-        assert!(verlust < 3.0, "eigene Stimme wird gedaempft: {:.2} dB", verlust);
+        assert!(verlust < 3.0, "own voice is attenuated: {:.2} dB", verlust);
     }
 
     #[test]
@@ -953,7 +953,7 @@ mod tests {
         println!("Gegensprechen: Verlust {:.2} dB", verhaeltnis);
         assert!(
             verhaeltnis < 6.0,
-            "beim Gegensprechen geht zu viel Stimme verloren: {:.2} dB",
+            "too much voice lost during double talk: {:.2} dB",
             verhaeltnis
         );
     }
@@ -976,7 +976,7 @@ mod tests {
         // In the debug build Rust computes without optimisation (factor ~40). What is measured
         // is the release build: there it is 3.6 % of real time.
         let grenze = if cfg!(debug_assertions) { 3.0 } else { 0.2 };
-        assert!(faktor < grenze, "zu langsam: {:.0} % der Echtzeit", faktor * 100.0);
+        assert!(faktor < grenze, "too slow: {:.0} % of real time", faktor * 100.0);
     }
 
     #[test]

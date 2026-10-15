@@ -62,7 +62,7 @@ impl App {
                             self.meet_id = m.id.clone();
                             self.meet_pw = m.passphrase.clone();
                             self.meet_last = Some(m.clone());
-                            // Sofort ins eigene Meeting-Fenster wechseln.
+                            // Switch to the own meeting window right away.
                             self.meet_win_open(m);
                             self.hint = i18n::t("meet.created").to_string();
                             self.meet_loaded = false;
@@ -246,7 +246,7 @@ impl App {
         if std::time::Instant::now() >= self.meet_win.next_window {
             self.meet_win.next_window =
                 std::time::Instant::now() + std::time::Duration::from_millis(1500);
-            self.meet_win.fenster = fenster::liste()
+            self.meet_win.window = window::liste()
                 .into_iter()
                 .map(|f| (f.kennung, f.titel, f.programm))
                 .collect();
@@ -302,7 +302,7 @@ impl App {
     ///
     /// Before joining there is the centered card with live self preview,
     /// afterwards the meeting: marks on top, stage in the middle, sidebar
-    /// on the right, control bar at the bottom. DRAWING happens in `meetfenster` - here
+    /// on the right, control bar at the bottom. DRAWING happens in `meetwindow` - here
     /// we only gather what it needs and execute what the
     /// user clicked. This separation is the reason why every
     /// view can be rendered through in `--uitest` without server,
@@ -326,7 +326,7 @@ impl App {
         self.meet_win.nativ_start = false;
         self.meet_kam_start = None;
         // The small window must close too, otherwise it is left standing alone.
-        self.meet_z = meetfenster::Fensterzustand::default();
+        self.meet_z = meetwindow::MeetWindowState::default();
         self.meet_win.offen = false;
     }
 
@@ -392,7 +392,7 @@ impl App {
             None => self.nativ_eigen = None,
         }
 
-        let mut b = meetfenster::Beitritt {
+        let mut b = meetwindow::Beitritt {
             raum: m.id.clone(),
             titel: m.titel.clone(),
             name: self.meet_win.name.clone(),
@@ -408,22 +408,22 @@ impl App {
             laeuft: self.meet_win.nativ_start,
         };
         let tex = self.nativ_eigen.as_ref().map(|(_, t)| t.clone());
-        let aktion = meetfenster::beitritt_ui(ctx, &mut b, tex.as_ref());
+        let aktion = meetwindow::beitritt_ui(ctx, &mut b, tex.as_ref());
         self.meet_win.name = b.name;
         self.meet_win.mic_sel = b.mic_sel;
         self.meet_win.cam_sel = b.cam_sel;
 
         match aktion {
-            Some(meetfenster::Beitrittsaktion::MikroUm) => {
+            Some(meetwindow::Beitrittsaktion::MikroUm) => {
                 self.meet_win.is_muted = !self.meet_win.is_muted;
             }
-            Some(meetfenster::Beitrittsaktion::KameraUm) => {
+            Some(meetwindow::Beitrittsaktion::KameraUm) => {
                 self.meet_win.ohne_video = !self.meet_win.ohne_video;
             }
-            Some(meetfenster::Beitrittsaktion::Back) => {
+            Some(meetwindow::Beitrittsaktion::Back) => {
                 self.close_meet_win();
             }
-            Some(meetfenster::Beitrittsaktion::Beitreten) => {
+            Some(meetwindow::Beitrittsaktion::Beitreten) => {
                 self.meet_win.nativ_start = true;
             }
             None => {}
@@ -471,7 +471,7 @@ impl App {
                     self.nativ_meet = Some(n);
                     self.meet_win.beigetreten = true;
                     self.meet_gelesen = 0;
-                    self.meet_z = meetfenster::Fensterzustand::default();
+                    self.meet_z = meetwindow::MeetWindowState::default();
                     self.meet_win.tn_next = std::time::Instant::now();
                 }
                 Err(e) => {

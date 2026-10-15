@@ -83,7 +83,7 @@ impl App {
             nativ_eigen: None,
             native_own_screen: None,
             vorprobe: meetui::Vorprobe::default(),
-            meet_z: meetfenster::Fensterzustand::default(),
+            meet_z: meetwindow::MeetWindowState::default(),
             meet_gelesen: 0,
             meet_kam_start: None,
             headless: false,

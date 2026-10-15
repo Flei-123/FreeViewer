@@ -234,7 +234,7 @@ pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
     let vid2 = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
     let (angebot, offen) = api
         .apply()
-        .ok_or_else(|| anyhow!("Angebot laesst sich nicht bauen"))?;
+        .ok_or_else(|| anyhow!("offer cannot be built"))?;
     let angebot_sdp = angebot.to_sdp_string();
 
     let (raus_tx, raus_rx) = std::sync::mpsc::channel::<Vec<i16>>();
@@ -861,7 +861,7 @@ mod tests {
         let bleibt = rueckstau_in_ms(TON_STAU_MAX, 500);
         assert!(
             bleibt <= 60,
-            "nach dem Abbau warten noch {} ms Ton - das ist die Verzoegerung, die bleibt",
+            "{} ms of audio still waiting after the drain - that is the delay that stays",
             bleibt
         );
     }
@@ -878,7 +878,7 @@ mod tests {
         );
         assert!(
             bleibt > 5_000,
-            "die Gegenprobe zeigt kein Problem - dann taugt die Messung nicht"
+            "the control run shows no problem - then the measurement is useless"
         );
     }
 
@@ -892,8 +892,8 @@ mod tests {
         assert_eq!(weg, 7);
         assert_eq!(w.len(), 3);
         // The youngest frame (9) must be kept, the oldest gone.
-        assert_eq!(w.back().unwrap()[0], 9, "der neueste Ton wurde weggeworfen");
-        assert_eq!(w.front().unwrap()[0], 7, "es wurde vom falschen Ende geworfen");
+        assert_eq!(w.back().unwrap()[0], 9, "the newest audio was dropped");
+        assert_eq!(w.front().unwrap()[0], 7, "dropped from the wrong end");
     }
 
     #[test]
@@ -954,10 +954,10 @@ mod tests {
     #[test]
     fn angebot_enthaelt_opus_und_eine_tonspur() {
         let ton = launch().expect("Ton startet");
-        assert!(ton.angebot.contains("m=audio"), "kein Ton im Angebot");
+        assert!(ton.angebot.contains("m=audio"), "no audio in the offer");
         assert!(
             ton.angebot.to_lowercase().contains("opus"),
-            "kein Opus im Angebot"
+            "no Opus in the offer"
         );
         assert!(!ton.mid.is_empty());
         ton.finish();
@@ -966,13 +966,13 @@ mod tests {
     #[test]
     fn angebot_enthaelt_auch_eine_bildspur_mit_h264() {
         let ton = launch().expect("startet");
-        assert!(ton.angebot.contains("m=video"), "keine Bildspur im Angebot");
+        assert!(ton.angebot.contains("m=video"), "no video track in the offer");
         assert!(
             ton.angebot.to_uppercase().contains("H264"),
-            "kein H.264 im Angebot"
+            "no H.264 in the offer"
         );
-        assert!(!ton.vid.is_empty(), "keine Kennung fuer die Bildspur");
-        assert_ne!(ton.vid, ton.mid, "Bild und Ton auf derselben Spur");
+        assert!(!ton.vid.is_empty(), "no id for the video track");
+        assert_ne!(ton.vid, ton.mid, "video and audio on the same track");
     }
 
     #[test]
@@ -980,8 +980,8 @@ mod tests {
         let ton = launch().expect("startet");
         let zeilen = ton.angebot.lines().filter(|l| l.starts_with("m=")).count();
         assert_eq!(zeilen, 3, "Angebot:\n{}", ton.angebot);
-        assert_ne!(ton.vid2, ton.vid, "Bildschirm und Kamera auf derselben Spur");
-        assert_ne!(ton.vid2, ton.mid, "Bildschirm und Ton auf derselben Spur");
+        assert_ne!(ton.vid2, ton.vid, "screen and camera on the same track");
+        assert_ne!(ton.vid2, ton.mid, "screen and audio on the same track");
         assert_eq!(
             ton.angebot.matches("H264").count() >= 2,
             true,

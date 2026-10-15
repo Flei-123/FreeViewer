@@ -386,12 +386,12 @@ mod tests {
         // Deliberately the CHEEK: depending on the hairstyle, hair sits in the
         // middle of the image, which would be a shaky check point.
         let mitte = punkt(&px, 320, 120, 185);
-        assert_ne!(ecke, mitte, "es wurde offenbar nichts gezeichnet");
+        assert_ne!(ecke, mitte, "apparently nothing was drawn");
         let haut = HAUTTOENE[a.haut as usize];
         let nah = (mitte[0] as i32 - haut[0] as i32).abs()
             + (mitte[1] as i32 - haut[1] as i32).abs()
             + (mitte[2] as i32 - haut[2] as i32).abs();
-        assert!(nah < 120, "in der Mitte steht keine Haut: {:?}", mitte);
+        assert!(nah < 120, "no skin in the middle: {:?}", mitte);
     }
 
     /// The actual point of the exercise: does the mouth REALLY move?
@@ -418,7 +418,7 @@ mod tests {
         let (nz, na) = (dunkel(&zu), dunkel(&auf));
         assert!(
             na > nz * 2,
-            "der Mund bewegt sich kaum: zu={} auf={}",
+            "the mouth barely moves: closed={} open={}",
             nz,
             na
         );
@@ -446,7 +446,7 @@ mod tests {
         assert!(weiss(&offen) > 40, "offene Augen zeigen kein Weiss");
         assert!(
             weiss(&zu) * 4 < weiss(&offen),
-            "das Lid schliesst nicht: offen={} zu={}",
+            "the lid does not close: open={} closed={}",
             weiss(&offen),
             weiss(&zu)
         );
@@ -483,6 +483,6 @@ mod tests {
         for _ in 0..30 {
             m = mundstellung(0.25, m);
         }
-        assert!(m > 0.7, "Sprechen bewegt den Mund zu wenig: {m}");
+        assert!(m > 0.7, "speaking moves the mouth too little: {m}");
     }
 }

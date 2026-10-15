@@ -147,7 +147,7 @@ pub struct NativMeet {
     pub screen_on: bool,
     /// The red frame around whatever is currently going out. Lives exactly as long
     /// as the share; it disappears by itself when dropped.
-    rahmen: Option<crate::fenster::Rahmen>,
+    rahmen: Option<crate::window::Rahmen>,
     /// Noise gate: on? And how strict (0..100)? Kept here
     /// so that a device change does not forget the setting - the
     /// audio devices are rebuilt completely in the process.
@@ -748,7 +748,7 @@ impl NativMeet {
         match (self.rahmen_an, quelle.lage()) {
             (true, Some(lage)) => {
                 if self.rahmen.is_none() {
-                    self.rahmen = Some(crate::fenster::Rahmen::zeigen(
+                    self.rahmen = Some(crate::window::Rahmen::zeigen(
                         lage.0, lage.1, lage.2, lage.3,
                     ));
                     self.rahmen_lage = Some(lage);
@@ -775,9 +775,9 @@ impl NativMeet {
         }
     }
 
-    /// Welche Programmfenster lassen sich teilen?
-    pub fn fenster() -> Vec<crate::fenster::Fenster> {
-        crate::fenster::liste()
+    /// Which program windows can be shared?
+    pub fn window() -> Vec<crate::window::WindowInfo> {
+        crate::window::liste()
     }
 
     /// How many screens are there here?
@@ -849,7 +849,7 @@ impl NativMeet {
                         self.rahmen_lage = None;
                         if self.rahmen_an {
                             if let Some((x, y, b, h)) = quelle.lage() {
-                                self.rahmen = Some(crate::fenster::Rahmen::zeigen(x, y, b, h));
+                                self.rahmen = Some(crate::window::Rahmen::zeigen(x, y, b, h));
                                 self.rahmen_lage = Some((x, y, b, h));
                             }
                         }
@@ -1685,7 +1685,7 @@ mod tests {
         v.mikro(true, None);
         v.pumpe();
         #[cfg(not(windows))]
-        assert!(!v.kamera_an(), "ohne Kamera darf keine laufen");
+        assert!(!v.kamera_an(), "none may be running without a camera");
         assert!(v.eigen.is_none() || v.kamera_an());
         v.aus();
         assert!(!v.kamera_an());
@@ -1709,7 +1709,7 @@ mod tests {
             m.kamera_schalten(true);
             #[cfg(not(windows))]
             {
-                assert!(!m.kamera_an, "ohne Kamera darf sie nicht an sein");
+                assert!(!m.kamera_an, "it must not be on without a camera");
                 assert!(!m.camera_notice.is_empty(), "keine Meldung");
             }
             m.kamera_schalten(false);
@@ -1749,7 +1749,7 @@ mod tests {
         if let Ok(mut m) = r {
             assert!(!m.steuer_frei, "ohne Nummer darf nichts freigegeben sein");
             m.release_control(true);
-            assert!(!m.steuer_frei, "ohne Nummer darf die Freigabe nicht greifen");
+            assert!(!m.steuer_frei, "without a number the grant must not take effect");
             assert!(!m.notice.is_empty(), "keine Meldung");
             m.verlassen();
         }
@@ -1767,7 +1767,7 @@ mod tests {
             None,
             None, None,);
         if let Ok(mut m) = r {
-            assert!(!m.steuer_frei, "beim Beitreten war die Freigabe aus");
+            assert!(!m.steuer_frei, "the grant was off when joining");
             m.release_control(true);
             assert!(m.steuer_frei, "Freigabe hat nicht gegriffen");
             m.release_control(false);
@@ -1829,13 +1829,13 @@ mod bitrate_tests {
         let (k, s) = bitraten_verteilen(1_021_098, true, true);
         assert!(
             (k + s) as u64 <= 1_021_098,
-            "zusammen {} bit/s ueber einer Leitung von 1021098",
+            "together {} bit/s over a line of 1021098",
             k + s
         );
         // And the old state would have sent 6 Mbit/s here:
         assert!(
             (k + s) < 2_000_000 + 4_000_000,
-            "nicht besser als vorher"
+            "not better than before"
         );
     }
 

@@ -739,8 +739,8 @@ mod e2e_link_tests {
         let l2 = invite(&mit);
         assert!(l2.contains("#k="), "{}", l2);
         println!("MIT Haken:  {}", l2.lines().last().unwrap_or(""));
-        println!("RAUM_OHNE={} PASS_OHNE={}", ohne.id, ohne.passphrase);
-        println!("RAUM_MIT={} PASS_MIT={} KEY={}", mit.id, mit.passphrase, mit.e2e);
+        println!("ROOM_WITHOUT={} PASS_WITHOUT={}", ohne.id, ohne.passphrase);
+        println!("ROOM_WITH={} PASS_WITH={} KEY={}", mit.id, mit.passphrase, mit.e2e);
     }
 
     /// WITH the tick a valid key is created - and a different one every time.
@@ -763,7 +763,7 @@ mod e2e_link_tests {
             e2e: crate::meete2e::Key::neu().als_text(),
         };
         let text = invite(&m);
-        assert!(text.contains("#k="), "kein Schluessel in der Einladung:\n{}", text);
+        assert!(text.contains("#k="), "no key in the invitation:\n{}", text);
         assert_eq!(key_from_link(&text).as_deref(), Some(m.e2e.as_str()));
     }
 }

@@ -602,7 +602,7 @@ mod imp {
             };
             let input = match input_desktop() {
                 Ok(n) => n,
-                Err(c) => format!("nicht zu oeffnen (Fehler {})", c),
+                Err(c) => format!("cannot be opened (error {})", c),
             };
             format!(
                 "Sitzung {}, Station {}, Desktop {}, Eingabe-Desktop {}",
@@ -689,7 +689,7 @@ mod imp {
         let h = match RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(handler), None) {
             Ok(h) => h,
             Err(e) => {
-                log(&format!("handler konnte nicht registriert werden: {}", e));
+                log(&format!("handler could not be registered: {}", e));
                 return;
             }
         };
@@ -993,7 +993,7 @@ mod stub {
     /// On which input desktop does the agent run? Only Windows knows the
     /// problem (login screen, UAC), elsewhere there is exactly one.
     pub fn desktop_report() -> String {
-        "kein Windows - nur ein Desktop".to_string()
+        "not Windows - single desktop only".to_string()
     }
     /// Follow the input desktop - not needed elsewhere.
     pub fn watch_desktop() {}

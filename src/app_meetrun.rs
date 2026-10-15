@@ -5,8 +5,8 @@ use super::*;
 impl App {
     /// The running meeting.
     pub(crate) fn meet_lauf_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
-        let sicht: meetfenster::Sicht;
-        let bilder: meetfenster::Bilder;
+        let sicht: meetwindow::Sicht;
+        let bilder: meetwindow::Bilder;
         // Whose screen is currently seen large - this determines
         // who we send our zoom request to.
         let mut main_screen_peer: Option<u64> = None;
@@ -119,7 +119,7 @@ impl App {
             } else {
                 self.meet_win.name.trim().to_string()
             };
-            let mut leute = vec![meetfenster::Person {
+            let mut leute = vec![meetwindow::Person {
                 id: z.ich,
                 name: ich_name,
                 is_muted: n.is_muted,
@@ -131,7 +131,7 @@ impl App {
                 spricht: !n.is_muted && n.pegel > 0.06,
             }];
             for t in z.leute.iter() {
-                leute.push(meetfenster::Person {
+                leute.push(meetwindow::Person {
                     id: t.id,
                     name: t.name.clone(),
                     is_muted: t.ton_aus,
@@ -143,10 +143,10 @@ impl App {
                     spricht: n.spricht(t.id),
                 });
             }
-            let chat: Vec<meetfenster::Chatzeile> = n
+            let chat: Vec<meetwindow::Chatzeile> = n
                 .chat
                 .iter()
-                .map(|(von, text)| meetfenster::Chatzeile {
+                .map(|(von, text)| meetwindow::Chatzeile {
                     von: *von,
                     name: if *von == 0 {
                         String::new()
@@ -158,7 +158,7 @@ impl App {
                 })
                 .collect();
             // Chat counts as read as long as the sidebar shows it.
-            if self.meet_z.seite_offen && self.meet_z.reiter == meetfenster::Reiter::Chat {
+            if self.meet_z.seite_offen && self.meet_z.reiter == meetwindow::Reiter::Chat {
                 self.meet_gelesen = chat.len();
             }
             let ungelesen = chat.len().saturating_sub(self.meet_gelesen) as u32;
@@ -208,7 +208,7 @@ impl App {
                 .find(|id| *id != z.ich)
                 .or_else(|| schirme.first().map(|(id, _)| *id));
             main_screen_peer = screen_main;
-            sicht = meetfenster::Sicht {
+            sicht = meetwindow::Sicht {
                 raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
                 titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
                 gastgeber: n.bin_gastgeber(),
@@ -220,9 +220,9 @@ impl App {
                     "verbinde …".to_string()
                 },
                 connect_tone: if zahlen.verbunden {
-                    meetfenster::Ton::Gut
+                    meetwindow::Ton::Gut
                 } else {
-                    meetfenster::Ton::Warn
+                    meetwindow::Ton::Warn
                 },
                 // Green only if encryption is REALLY happening - i.e. a
                 // key exists. A green mark without encryption
@@ -281,7 +281,7 @@ impl App {
                     None => false,
                 },
                 monitore: self.meet_win.monitore.clone(),
-                fenster: self.meet_win.fenster.clone(),
+                window: self.meet_win.window.clone(),
                 rahmen_an: n.rahmen_an,
                 avatar_an: n.avatar_an,
                 avatar: n.avatar,
@@ -291,7 +291,7 @@ impl App {
                 sperre_grund: n.sperre_grundrauschen(),
                 eigener_pegel: n.pegel,
             };
-            bilder = meetfenster::Bilder {
+            bilder = meetwindow::Bilder {
                 eigen: self.nativ_eigen.as_ref().map(|(_, t)| t.clone()),
                 kameras: self
                     .nativ_bilder
@@ -316,7 +316,7 @@ impl App {
         // the guest would sit in front of a black area and think the program
         // is broken - exactly the case noticed during the rehearsal.
         if sicht.im_warteraum {
-            if meetfenster::warteschirm_ui(ctx, &sicht.titel, &sicht.warte_text) {
+            if meetwindow::warteschirm_ui(ctx, &sicht.titel, &sicht.warte_text) {
                 if let Some(n) = self.nativ_meet.take() {
                     n.verlassen();
                 }
@@ -325,7 +325,7 @@ impl App {
             }
             return;
         }
-        let mut aktionen = meetfenster::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
+        let mut aktionen = meetwindow::meeting_ui(ctx, &sicht, &mut self.meet_z, &bilder);
         // Picture-in-picture: own small window that stays on top - otherwise
         // you see nobody anymore when sharing your own screen.
         if self.meet_z.pip && !self.headless {
@@ -334,7 +334,7 @@ impl App {
             // viewport callback - hence a copy here that is written back
             // afterwards (otherwise `self` would be borrowed twice).
             let mut selbst = self.meet_z.pip_selbst;
-            let mut pip_aktionen: Vec<meetfenster::Aktion> = Vec::new();
+            let mut pip_aktionen: Vec<meetwindow::Aktion> = Vec::new();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("fv_meet_pip"),
                 egui::ViewportBuilder::default()
@@ -346,7 +346,7 @@ impl App {
                         .frame(egui::Frame::NONE.fill(theme::bg()))
                         .show(pctx, |ui| {
                             pip_aktionen
-                                .extend(meetfenster::pip_inhalt(ui, &sicht, &bilder, &mut selbst));
+                                .extend(meetwindow::pip_inhalt(ui, &sicht, &bilder, &mut selbst));
                         });
                     if pctx.input(|i| i.viewport().close_requested()) {
                         zu = true;
@@ -367,7 +367,7 @@ impl App {
         // exactly that from its native capture - same bandwidth, but
         // real pixels. Without this message it would stay with upscaling.
         if let (Some(p), Some(n)) = (main_screen_peer, self.nativ_meet.as_mut()) {
-            let f = self.meet_z.zoomfenster;
+            let f = self.meet_z.zoom_window;
             let zoomt = self.meet_z.zoom > 1.001;
             n.zoom_wunsch(p, f, zoomt && self.meet_z.scharf);
         }
@@ -384,54 +384,54 @@ impl App {
                 None => break,
             };
             match a {
-                meetfenster::Aktion::Muted(v) => n.toggle_muted(v),
-                meetfenster::Aktion::Kamera(v) => n.kamera_schalten(v),
-                meetfenster::Aktion::Screen(v) => {
+                meetwindow::Aktion::Muted(v) => n.toggle_muted(v),
+                meetwindow::Aktion::Kamera(v) => n.kamera_schalten(v),
+                meetwindow::Aktion::Screen(v) => {
                     if let Some(m) = n.report_toggle_screen(v, 0) {
                         screen_error = Some(m);
                     }
                 }
-                meetfenster::Aktion::PickScreen(i) => {
+                meetwindow::Aktion::PickScreen(i) => {
                     if let Some(m) = n.report_toggle_screen(true, i) {
                         screen_error = Some(m);
                     }
                 }
-                meetfenster::Aktion::PickWindow(k) => {
+                meetwindow::Aktion::PickWindow(k) => {
                     if let Some(m) = n.quelle_schalten_melden(
                         true,
-                        meetschirm::Quelle::Fenster(k),
+                        meetschirm::Quelle::Window(k),
                     ) {
                         screen_error = Some(m);
                     }
                 }
-                meetfenster::Aktion::Rahmen(v) => n.rahmen_schalten(v),
-                meetfenster::Aktion::Rauschsperre(an, st) => n.rauschsperre_setzen(an, st),
-                meetfenster::Aktion::Avatar(v) => n.avatar_schalten(v),
-                meetfenster::Aktion::AvatarAussehen(a) => n.avatar_setzen(a),
-                meetfenster::Aktion::Hand(v) => n.hand_heben(v),
-                meetfenster::Aktion::Control(v) => n.release_control(v),
-                meetfenster::Aktion::RequestControl => n.request_control(),
-                meetfenster::Aktion::ControlReply(id, ja) => n.reply_control(id, ja),
-                meetfenster::Aktion::ControlGiveBack(p) => n.revoke_control(p),
-                meetfenster::Aktion::Send(t) => {
+                meetwindow::Aktion::Rahmen(v) => n.rahmen_schalten(v),
+                meetwindow::Aktion::Rauschsperre(an, st) => n.rauschsperre_setzen(an, st),
+                meetwindow::Aktion::Avatar(v) => n.avatar_schalten(v),
+                meetwindow::Aktion::AvatarAussehen(a) => n.avatar_setzen(a),
+                meetwindow::Aktion::Hand(v) => n.hand_heben(v),
+                meetwindow::Aktion::Control(v) => n.release_control(v),
+                meetwindow::Aktion::RequestControl => n.request_control(),
+                meetwindow::Aktion::ControlReply(id, ja) => n.reply_control(id, ja),
+                meetwindow::Aktion::ControlGiveBack(p) => n.revoke_control(p),
+                meetwindow::Aktion::Send(t) => {
                     n.input_text = t;
                     n.send_out();
                 }
-                meetfenster::Aktion::Tippt(v) => n.tippt(v),
-                meetfenster::Aktion::Einlassen(id) => n.einlassen(id),
-                meetfenster::Aktion::Abweisen(id) => n.abweisen(id),
-                meetfenster::Aktion::AlleEinlassen => n.alle_einlassen(),
-                meetfenster::Aktion::Warteraum(v) => n.warteraum(v),
-                meetfenster::Aktion::MuteAll => n.gastgeber_aktion("mute-all", None),
-                meetfenster::Aktion::Stummschalten(id) => n.gastgeber_aktion("mute", Some(id)),
-                meetfenster::Aktion::Rauswerfen(id) => n.gastgeber_aktion("kick", Some(id)),
-                meetfenster::Aktion::Leave => {
+                meetwindow::Aktion::Tippt(v) => n.tippt(v),
+                meetwindow::Aktion::Einlassen(id) => n.einlassen(id),
+                meetwindow::Aktion::Abweisen(id) => n.abweisen(id),
+                meetwindow::Aktion::AlleEinlassen => n.alle_einlassen(),
+                meetwindow::Aktion::Warteraum(v) => n.warteraum(v),
+                meetwindow::Aktion::MuteAll => n.gastgeber_aktion("mute-all", None),
+                meetwindow::Aktion::Stummschalten(id) => n.gastgeber_aktion("mute", Some(id)),
+                meetwindow::Aktion::Rauswerfen(id) => n.gastgeber_aktion("kick", Some(id)),
+                meetwindow::Aktion::Leave => {
                     n.gastgeber_aktion("end", None);
                     verlassen = true;
                 }
-                meetfenster::Aktion::Verlassen => verlassen = true,
-                meetfenster::Aktion::Steuern(fvid, wer) => steuern_zu = Some((fvid, wer)),
-                meetfenster::Aktion::KameraGeraet(i) => {
+                meetwindow::Aktion::Verlassen => verlassen = true,
+                meetwindow::Aktion::Steuern(fvid, wer) => steuern_zu = Some((fvid, wer)),
+                meetwindow::Aktion::KameraGeraet(i) => {
                     self.meet_win.cam_sel = i;
                     let g = if i == 0 {
                         None
@@ -440,7 +440,7 @@ impl App {
                     };
                     n.kamera_waehlen(g);
                 }
-                meetfenster::Aktion::MikroGeraet(i) => {
+                meetwindow::Aktion::MikroGeraet(i) => {
                     self.meet_win.mic_sel = i;
                     let mik = if i == 0 {
                         None
@@ -454,7 +454,7 @@ impl App {
                     };
                     n.ton_waehlen(mik, spk);
                 }
-                meetfenster::Aktion::LautsprecherGeraet(i) => {
+                meetwindow::Aktion::LautsprecherGeraet(i) => {
                     self.meet_win.spk_sel = i;
                     let spk = if i == 0 {
                         None
@@ -468,7 +468,7 @@ impl App {
                     };
                     n.ton_waehlen(mik, spk);
                 }
-                meetfenster::Aktion::ReloadDevices => {
+                meetwindow::Aktion::ReloadDevices => {
                     // Re-reading runs in the background again - the
                     // PnP query takes almost a second on Windows.
                     self.meet_win.geraete_da = false;
@@ -484,7 +484,7 @@ impl App {
                         *slot.lock_ok() = Some((mics, cams, spks));
                     });
                 }
-                meetfenster::Aktion::EinladungKopieren => {
+                meetwindow::Aktion::EinladungKopieren => {
                     ctx.copy_text(meet::invite(m));
                     self.meet_win.toast = Some((
                         i18n::t("meet.toast_copied").to_string(),

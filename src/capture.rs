@@ -138,7 +138,7 @@ pub fn open_index(prefer_fast: bool, index: usize) -> Option<Box<dyn Backend>> {
         if delivers(&mut s) {
             return Some(Box::new(s));
         }
-        log_line("xcap liefert keine Bilder - versuche den GDI-Weg");
+        log_line("xcap delivers no frames - trying the GDI path");
     }
     #[cfg(windows)]
     match gdi::GdiCap::new_index(index) {
@@ -235,7 +235,7 @@ mod gdi {
                 let desktop_dc = GetDC(HWND::default());
                 let display_dc = CreateDCW(w!("DISPLAY"), None, None, None);
                 if desktop_dc.is_invalid() && display_dc.is_invalid() {
-                    return Err(anyhow!("kein Bildschirm-DC zu bekommen"));
+                    return Err(anyhow!("could not get a screen DC"));
                 }
                 let base = if !desktop_dc.is_invalid() {
                     desktop_dc

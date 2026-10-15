@@ -433,7 +433,7 @@ pub fn beitreten(
                 }
             });
         })
-        .map_err(|e| anyhow!("Faden laesst sich nicht starten: {}", e))?;
+        .map_err(|e| anyhow!("thread cannot be started: {}", e))?;
 
     Ok(Session {
         befehle: bef_tx,
@@ -856,7 +856,7 @@ async fn connect_now(
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
     }
-    Err(anyhow!("keine Verbindung zu {} ({})", host, letzter))
+    Err(anyhow!("no connection to {} ({})", host, letzter))
 }
 
 #[cfg(test)]
@@ -925,7 +925,7 @@ mod tests {
         match rx.try_recv().unwrap() {
             Ereignis::ControlAnswered { gewaehrt, fvid, .. } => {
                 assert!(!gewaehrt);
-                assert!(fvid.is_empty(), "bei einer Absage darf keine Nummer kommen");
+                assert!(fvid.is_empty(), "a rejection must not carry a number");
             }
             x => panic!("falsches Ereignis: {:?}", x),
         }
@@ -1022,6 +1022,6 @@ mod tests {
     fn unknown_message_does_not_disturb() {
         let (tx, _rx) = channel();
         let z = Arc::new(Mutex::new(State::default()));
-        assert!(!verarbeiten(&json!({"t":"gibt-es-nicht","x":1}), &tx, &z));
+        assert!(!verarbeiten(&json!({"t":"does-not-exist","x":1}), &tx, &z));
     }
 }

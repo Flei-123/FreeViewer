@@ -5,7 +5,7 @@ use super::*;
 /// The host already runs in its own threads - here we only wait and
 /// log so that the process stays alive.
 pub(crate) fn continue_without_window(shared: &Arc<Shared>) -> ! {
-    capture::log_line("Oberflaeche geht nicht - laufe als Host ohne Fenster weiter");
+    capture::log_line("UI does not work - continuing as a host without a window");
     let mut zuletzt = String::new();
     loop {
         std::thread::sleep(Duration::from_secs(5));
@@ -86,7 +86,7 @@ pub(crate) fn report_start_error(e: &str) {
         );
     }
     eprintln!("{}", text);
-    fehlerfenster(&text);
+    error_window(&text);
 }
 
 /// Date and time without an extra crate - enough for a log line.
@@ -99,7 +99,7 @@ pub(crate) fn chrono_zeit() -> String {
 }
 
 #[cfg(windows)]
-pub(crate) fn fehlerfenster(text: &str) {
+pub(crate) fn error_window(text: &str) {
     use windows::core::PCWSTR;
     use windows::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
@@ -122,4 +122,4 @@ pub(crate) fn fehlerfenster(text: &str) {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn fehlerfenster(_text: &str) {}
+pub(crate) fn error_window(_text: &str) {}

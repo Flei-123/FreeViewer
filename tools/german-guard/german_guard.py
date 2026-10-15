@@ -26,6 +26,8 @@ WORD = re.compile(r"[a-zäöüß]+")
 COMMENT_EXT = {'rs': ('//', '/*', '*'), 'js': ('//', '/*', '*'), 'mjs': ('//', '/*', '*'),
                'py': ('#',), 'sh': ('#',)}
 STR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# JS also has single-quoted strings (wire keys, URL paths): count them as strings, not identifiers
+STR_RE_JS = re.compile(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'')
 ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 EOL_RE = re.compile(r'^(?P<code>[^"\']*?\S)\s+//\s?(?P<c>.*)$')
 
@@ -49,7 +51,9 @@ def id_german(name):
     return any(p.lower() in IDWORDS for p in parts)
 
 
-def strip_strings(line):
+def strip_strings(line, js=False):
+    if js:
+        return STR_RE_JS.sub('""', line)
     return STR_RE.sub('""', line)
 
 
@@ -92,10 +96,12 @@ def scan(root):
                     l = m.group('code')
             if ext in ('py', 'sh') or not l.strip():
                 pass
-            for sm in STR_RE.finditer(l):
-                if is_german_text(sm.group(1)):
-                    hit('strings', sm.group(1))
-            code = strip_strings(l)
+            js = ext in ('js', 'mjs')
+            for sm in (STR_RE_JS if js else STR_RE).finditer(l):
+                txt = next((g for g in sm.groups() if g is not None), '')
+                if is_german_text(txt):
+                    hit('strings', txt)
+            code = strip_strings(l, js)
             for idm in set(ID_RE.findall(code)):
                 if id_german(idm):
                     hit('identifiers', idm)

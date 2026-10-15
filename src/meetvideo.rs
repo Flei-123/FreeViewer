@@ -232,7 +232,7 @@ mod tests {
         let a = m.naechstes();
         let b = m.naechstes();
         assert_eq!(a.len(), (WIDTH * HEIGHT * 3) as usize);
-        assert_ne!(a, b, "das Bild bewegt sich nicht");
+        assert_ne!(a, b, "the frame does not move");
         // It is not black.
         let hell = a.iter().filter(|v| **v > 200).count();
         assert!(hell > 1000, "Bild zu dunkel: {}", hell);

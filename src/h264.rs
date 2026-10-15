@@ -328,7 +328,7 @@ mod win {
             let w = w & !1;
             let h = h & !1;
             if w < 32 || h < 32 {
-                return Err(anyhow!("Aufloesung zu klein fuer H.264"));
+                return Err(anyhow!("resolution too small for H.264"));
             }
             let input = type_info(MFMediaType_Video, MFVideoFormat_NV12);
             let output = type_info(MFMediaType_Video, MFVideoFormat_H264);
@@ -377,7 +377,7 @@ mod win {
             let w = w & !1;
             let h = h & !1;
             if w < 32 || h < 32 {
-                return Err(anyhow!("Aufloesung zu klein fuer H.264"));
+                return Err(anyhow!("resolution too small for H.264"));
             }
             let input = type_info(MFMediaType_Video, MFVideoFormat_NV12);
             let output = type_info(MFMediaType_Video, MFVideoFormat_H264);
@@ -394,7 +394,7 @@ mod win {
                     }
                 },
             );
-            enc.ok_or_else(|| anyhow!("kein H.264 Encoder mit Grafikkarten-Anbindung"))
+            enc.ok_or_else(|| anyhow!("no H.264 encoder with GPU binding"))
         }
 
         /// True if this encoder takes images directly from the graphics card.
@@ -488,7 +488,7 @@ mod win {
                     if events.is_some() { ", async" } else { "" }
                 ));
                 if devman.is_some() {
-                    crate::capture::log_line("h264 encoder nimmt die Bilder direkt von der Grafikkarte");
+                    crate::capture::log_line("h264 encoder takes frames directly from the GPU");
                 }
 
                 Ok(Self {
@@ -640,7 +640,7 @@ mod win {
         /// PCIe bus - about 6 MB at 2496x1664.
         pub fn encode_tex(&mut self, tex: &ID3D11Texture2D) -> Result<Vec<Chunk>> {
             if self.devman.is_none() {
-                return Err(anyhow!("dieser Encoder nimmt keine Texturen"));
+                return Err(anyhow!("this encoder does not accept textures"));
             }
             let (time, dur) = self.zeitmarke();
             // SAFETY: `tex` is a live D3D11 texture and this encoder was built with a DXGI device
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn h264_round_trip() {
         if !available() {
-            println!("kein H.264-Kodierer auf dieser Maschine - uebersprungen");
+            println!("no H.264 encoder on this machine - skipped");
             return;
         }
         let (w, h) = (320u32, 240u32);
@@ -1308,13 +1308,13 @@ pub fn selftest(rounds: u32) -> String {
     ));
     match first_err {
         Some((mean, max)) => out.push_str(&format!(
-            "Bildfehler nach Encode+Decode: Mittel {:.2}, Max {} (von 255)\n",
+            "Image error after encode+decode: mean {:.2}, max {} (of 255)\n",
             mean, max
         )),
-        None => out.push_str("WARN: kein Bild konnte mit dem Original verglichen werden\n"),
+        None => out.push_str("WARN: no frame could be compared with the original\n"),
     }
     if decoded == 0 {
-        out.push_str("FAIL: der Decoder hat kein Bild geliefert\n");
+        out.push_str("FAIL: the decoder delivered no frame\n");
     } else {
         out.push_str("OK\n");
     }

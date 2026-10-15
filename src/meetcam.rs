@@ -1005,7 +1005,7 @@ mod win {
         });
         let (quelle, name) = match treffer {
             Some(Ok(t)) => t,
-            Some(Err(e)) => return format!("Kamera nicht zu oeffnen: {}", e),
+            Some(Err(e)) => return format!("camera cannot be opened: {}", e),
             None => return "keine Kamera gefunden".to_string(),
         };
         sag!("Kamera: {}", name);
@@ -1024,7 +1024,7 @@ mod win {
         };
         let strom = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
-        sag!("--- was die Kamera von sich aus kann ---");
+        sag!("--- what the camera offers by itself ---");
         for i in 0..64u32 {
             match leser.GetNativeMediaType(strom, i) {
                 Ok(t) => sag!("  [{:2}] {}", i, typ_text(&t)),
@@ -1042,7 +1042,7 @@ mod win {
             let _ = mt.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1));
         }
         match leser.SetCurrentMediaType(strom, None, &mt) {
-            Ok(_) => sag!("Wunschgroesse angenommen (ACHTUNG: sagt nichts ueber die echten Daten)"),
+            Ok(_) => sag!("Requested size accepted (WARNING: says nothing about the real data)"),
             Err(e) => {
                 skalieren = true;
                 sag!("Wunschgroesse abgelehnt ({}) -> nur NV12 setzen", e);
@@ -1050,7 +1050,7 @@ mod win {
                 let _ = mt2.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video);
                 let _ = mt2.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12);
                 if let Err(e) = leser.SetCurrentMediaType(strom, None, &mt2) {
-                    return format!("{}\nKamera kann kein NV12: {}", log, e);
+                    return format!("{}\ncamera cannot do NV12: {}", log, e);
                 }
             }
         }
@@ -1361,7 +1361,7 @@ mod tests_stufe5 {
         assert_eq!(nv12.len(), 16 * 16 * 3 / 2);
         // Y of green is around 145 (BT.601).
         let y0 = nv12[0];
-        assert!((120..175).contains(&y0), "Y von Gruen ist {}", y0);
+        assert!((120..175).contains(&y0), "Y of green is {}", y0);
     }
 
     #[test]
@@ -1402,7 +1402,7 @@ mod tests_stufe5 {
         }
         if l.is_empty() {
             match open(None, 640, 360, 15) {
-                Ok(_) => println!("ohne Kameraliste trotzdem eine bekommen"),
+                Ok(_) => println!("got one anyway without a camera list"),
                 Err(e) => println!("keine Kamera: {}", e),
             }
             return;
@@ -1434,7 +1434,7 @@ mod tests_stufe5 {
                 }
                 k.stoppen();
             }
-            Err(e) => println!("Kamera trotz Liste nicht zu oeffnen: {}", e),
+            Err(e) => println!("camera cannot be opened despite the list: {}", e),
         }
     }
 }
@@ -1519,7 +1519,7 @@ mod tests {
         assert!(out[..yn].iter().all(|v| *v == 200), "Helligkeit verfaelscht");
         assert!(
             out[yn..].iter().all(|v| *v == 128),
-            "Farbe kommt aus der Helligkeit - genau der Gruenstich-Fehler"
+            "color comes from the brightness - exactly the green-tint bug"
         );
     }
 

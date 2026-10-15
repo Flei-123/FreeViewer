@@ -43,8 +43,8 @@ if let Some(path) = self.shot.clone() {
     /// participant.
     pub(crate) fn meet_demo_ui(&mut self, ctx: &egui::Context, nr: usize) {
         // EXAMPLES+1: the waiting screen.
-        if nr == meetfenster::BEISPIELE + 1 {
-            meetfenster::warteschirm_ui(
+        if nr == meetwindow::BEISPIELE + 1 {
+            meetwindow::warteschirm_ui(
                 ctx,
                 "Wochenbesprechung",
                 "Der Gastgeber wurde benachrichtigt.",
@@ -52,15 +52,15 @@ if let Some(path) = self.shot.clone() {
             return;
         }
         // From EXAMPLES: the join screen.
-        if nr >= meetfenster::BEISPIELE {
-            let bilder = meetfenster::pruefbilder(ctx);
-            let mut b = meetfenster::beispiel_beitritt();
-            meetfenster::beitritt_ui(ctx, &mut b, bilder.eigen.as_ref());
+        if nr >= meetwindow::BEISPIELE {
+            let bilder = meetwindow::pruefbilder(ctx);
+            let mut b = meetwindow::beispiel_beitritt();
+            meetwindow::beitritt_ui(ctx, &mut b, bilder.eigen.as_ref());
             return;
         }
-        let bilder = meetfenster::pruefbilder(ctx);
-        let (_name, sicht, mut z) = meetfenster::beispiel(nr);
-        meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+        let bilder = meetwindow::pruefbilder(ctx);
+        let (_name, sicht, mut z) = meetwindow::beispiel(nr);
+        meetwindow::meeting_ui(ctx, &sicht, &mut z, &bilder);
     }
 
     /// Kurzer, sichtbarer Hinweis ("Link kopiert").

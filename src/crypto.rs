@@ -377,7 +377,7 @@ mod tests {
         let key = [7u8; 32];
         let h = UdpCipher::new(&key, true);
         let v = UdpCipher::new(&key, false);
-        assert_ne!(udp_key(&key), key, "UDP muss einen eigenen Schluessel haben");
+        assert_ne!(udp_key(&key), key, "UDP must have its own key");
 
         let a = h.seal(b"eins");
         let b = h.seal(b"zwei");

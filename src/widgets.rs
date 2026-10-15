@@ -326,7 +326,7 @@ pub(crate) fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.add_space(2.0);
 }
 
-/// Fenstersymbol: dasselbe Auge wie im Infobereich, 32x32 RGBA.
+/// Window icon: the same eye as in the tray, 32x32 RGBA.
 pub(crate) fn app_icon() -> egui::IconData {
     // The same drawing that is also in the EXE (see build.rs), so that
     // window, taskbar, start menu and Explorer show the same thing.

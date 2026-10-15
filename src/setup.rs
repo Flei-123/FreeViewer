@@ -195,7 +195,7 @@ mod imp {
                 }
                 if !weg {
                     return Err(anyhow!(
-                        "{} liess sich nicht beiseite legen - laeuft dort noch etwas?",
+                        "{} could not be moved aside - is something still running there?",
                         dst.display()
                     ));
                 }
@@ -357,6 +357,6 @@ mod tests {
         let l = start_menu_link().to_string_lossy().to_lowercase();
         assert!(l.contains("start menu"), "{}", l);
         let lnk = crate::brand::EXE.replace(".exe", ".lnk").to_lowercase();
-        assert!(l.ends_with(&lnk), "{} endet nicht auf {}", l, lnk);
+        assert!(l.ends_with(&lnk), "{} does not end with {}", l, lnk);
     }
 }

@@ -10,7 +10,7 @@
 //! are the same for all brands - every build can talk to every other.
 //! (Later the GitHub action builds this as a matrix with two exe files.)
 
-/// Anzeigename ueberall: Fenster, Tray, Startmenue, Dienst.
+/// Display name everywhere: window, tray, start menu, service.
 pub const NAME: &str = match option_env!("FV_BRAND_NAME") {
     Some(s) => s,
     None => "FreeViewer",

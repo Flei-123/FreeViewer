@@ -340,10 +340,10 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     // Waiting room and join screen also belong in the test.
     {
         let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| {
-            meetfenster::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            meetwindow::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
         });
         let out = ctx.run(meetschirm(920.0, 640.0), |ctx| {
-            meetfenster::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            meetwindow::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
         });
         println!("Meet Warteschirm: {} Formen gezeichnet", out.shapes.len());
         if out.shapes.len() < 12 {
@@ -352,16 +352,16 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     }
     // Render all example states - the same ones --meetdemo
     // later shows as a real image.
-    let bilder = meetfenster::pruefbilder(&ctx);
-    for i in 0..meetfenster::BEISPIELE {
-        let (name, sicht, mut z) = meetfenster::beispiel(i);
+    let bilder = meetwindow::pruefbilder(&ctx);
+    for i in 0..meetwindow::BEISPIELE {
+        let (name, sicht, mut z) = meetwindow::beispiel(i);
         let (b, h) = if name.starts_with("Info") { (560.0, 430.0) } else { (1100.0, 720.0) };
         // Twice: the first frame creates ids and textures.
         let _ = ctx.run(meetschirm(b, h), |ctx| {
-            meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            meetwindow::meeting_ui(ctx, &sicht, &mut z, &bilder);
         });
         let out = ctx.run(meetschirm(b, h), |ctx| {
-            meetfenster::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            meetwindow::meeting_ui(ctx, &sicht, &mut z, &bilder);
         });
         let shapes = out.shapes.len();
         println!("Meet {}: {} Formen gezeichnet", name, shapes);
@@ -374,11 +374,11 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     // the user, because it never appears in the main window.
     let mut pipzahl = std::collections::HashMap::new();
     for (nr, selbst) in [(2usize, true), (2, false), (0, true), (0, false)] {
-        let (_, sicht, _) = meetfenster::beispiel(nr);
+        let (_, sicht, _) = meetwindow::beispiel(nr);
         let mut mich = selbst;
         let mal = |ctx: &egui::Context, mich: &mut bool| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                meetfenster::pip_inhalt(ui, &sicht, &bilder, mich);
+                meetwindow::pip_inhalt(ui, &sicht, &bilder, mich);
             });
         };
         let _ = ctx.run(meetschirm(260.0, 330.0), |ctx| mal(ctx, &mut mich));
@@ -399,7 +399,7 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     for nr in [0usize, 2] {
         let (an, aus) = (pipzahl[&(nr, true)], pipzahl[&(nr, false)]);
         if an <= aus {
-            println!("FEHLER: eigene Kachel im Bild-im-Bild fehlt (Beispiel {})", nr);
+            println!("ERROR: own tile missing in picture-in-picture (example {})", nr);
             ok = false;
         }
     }

@@ -505,7 +505,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
                         }
                     } else {
                         shared.set_update_status(format!(
-                            "Update {} wird vom Dienst eingespielt (dieser Stand: {})",
+                            "Update {} is applied by the service (this build: {})",
                             rel.version, VERSION
                         ));
                     }
@@ -633,7 +633,7 @@ pub fn reopen_gui() {
         };
         // Without arguments = completely normal window, like a double click.
         let _ = std::process::Command::new(exe).spawn();
-        crate::service::log("Oberflaeche nach dem Update wieder geoeffnet");
+        crate::service::log("UI reopened after the update");
     }
 }
 

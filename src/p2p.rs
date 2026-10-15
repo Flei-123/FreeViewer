@@ -398,7 +398,7 @@ pub async fn stun_reflexive(sock: &UdpSocket, server: &str) -> Result<SocketAddr
     let addr = tokio::net::lookup_host(server)
         .await?
         .find(|a| a.is_ipv4())
-        .ok_or_else(|| anyhow!("keine IPv4 fuer {}", server))?;
+        .ok_or_else(|| anyhow!("no IPv4 for {}", server))?;
     sock.send_to(&req, addr).await?;
 
     let mut buf = [0u8; 1024];
@@ -437,7 +437,7 @@ pub async fn stun_reflexive(sock: &UdpSocket, server: &str) -> Result<SocketAddr
             }
             p = val + alen.div_ceil(4) * 4; // attributes are padded to 4 bytes
         }
-        return Err(anyhow!("keine Adresse in der STUN-Antwort"));
+        return Err(anyhow!("no address in the STUN reply"));
     }
 }
 
@@ -494,15 +494,15 @@ pub fn selftest() -> String {
                 }
             }
             if seen.len() == 1 {
-                out.push_str("NAT-Verhalten: gleiche Aussenadresse fuer alle Ziele - Hole Punching moeglich\n");
+                out.push_str("NAT behavior: same external address for all targets - hole punching possible\n");
             } else {
                 out.push_str(&format!(
-                    "NAT-Verhalten: symmetrisch ({:?}) - direkter Weg unwahrscheinlich, Relay bleibt\n",
+                    "NAT behavior: symmetric ({:?}) - direct path unlikely, relay stays\n",
                     seen
                 ));
             }
         } else {
-            out.push_str("kein STUN erreichbar - direkter Weg nicht ermittelbar\n");
+            out.push_str("no STUN reachable - direct path cannot be determined\n");
         }
         out
     })

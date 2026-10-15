@@ -21,9 +21,9 @@
 //! functions stay empty shells, so the rest of the program does not have to fight with
 //! `cfg`.
 
-/// Ein teilbares Programmfenster.
+/// A shareable program window.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Fenster {
+pub struct WindowInfo {
     /// Window identifier (HWND as a number - this keeps the type platform-free).
     pub kennung: isize,
     pub titel: String,
@@ -34,7 +34,7 @@ pub struct Fenster {
 }
 
 /// All sensibly shareable windows, topmost first.
-pub fn liste() -> Vec<Fenster> {
+pub fn liste() -> Vec<WindowInfo> {
     #[cfg(windows)]
     {
         win::liste()
@@ -100,7 +100,7 @@ impl Drop for Rahmen {
     }
 }
 
-/// Wo liegt dieses Fenster gerade? (x, y, Width, Hoehe) in Bildpunkten.
+/// Where is this window right now? (x, y, width, height) in pixels.
 pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
     #[cfg(windows)]
     {
@@ -115,7 +115,7 @@ pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
 
 #[cfg(windows)]
 mod win {
-    use super::{Fenster, Rahmen};
+    use super::{WindowInfo, Rahmen};
     use anyhow::{anyhow, Result};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -139,7 +139,7 @@ mod win {
     // ------------------------------------------------------------ auflisten
 
     struct Sammler {
-        raus: Vec<Fenster>,
+        raus: Vec<WindowInfo>,
         eigen: u32,
     }
 
@@ -164,7 +164,7 @@ mod win {
     /// list: invisible helper windows, minimised programs, the empty
     /// shells of UWP applications and - important - our OWN window
     /// (sharing that would create a hall-of-mirrors effect).
-    unsafe fn check(hwnd: HWND, eigen: u32) -> Option<Fenster> {
+    unsafe fn check(hwnd: HWND, eigen: u32) -> Option<WindowInfo> {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return None;
         }
@@ -204,7 +204,7 @@ mod win {
         if b < 120 || h < 80 {
             return None;
         }
-        Some(Fenster {
+        Some(WindowInfo {
             kennung: hwnd.0 as isize,
             titel,
             programm: programmname(pid),
@@ -287,7 +287,7 @@ mod win {
         }
     }
 
-    pub fn liste() -> Vec<Fenster> {
+    pub fn liste() -> Vec<WindowInfo> {
         // SAFETY: `s` is a local `Sammler` that outlives the call; its address is passed as LPARAM
         // to `sammeln`, which casts it back to `&mut Sammler`. EnumWindows is synchronous, so the
         // pointer is valid for every callback and nothing else uses `s` meanwhile; the results are
@@ -332,7 +332,7 @@ mod win {
             // safe on every error path. All pointers used inside the callees are locals.
             unsafe {
                 if !IsWindow(hwnd).as_bool() {
-                    return Err(anyhow!("das Fenster gibt es nicht mehr"));
+                    return Err(anyhow!("the window no longer exists"));
                 }
                 let (_, _, b, h) = rahmen_rect(hwnd).ok_or_else(|| anyhow!("Fenster ohne Groesse"))?;
                 let mut c = WindowCap {
@@ -512,7 +512,7 @@ mod win {
         }
 
         fn name(&self) -> &'static str {
-            "fenster"
+            "window"
         }
     }
 
@@ -658,7 +658,7 @@ mod tests {
             // Eintraege enthalten.
             for f in liste() {
                 assert!(f.kennung != 0, "Fenster ohne Kennung");
-                assert!(f.width_px >= 120 && f.height_px >= 80, "Zwergfenster in der Liste");
+                assert!(f.width_px >= 120 && f.height_px >= 80, "tiny window in the list");
             }
         }
     }

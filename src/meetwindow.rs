@@ -196,7 +196,7 @@ pub struct Sicht {
     pub monitore: Vec<(String, u32, u32)>,
     /// Open program windows that can be shared individually:
     /// (id, title, program).
-    pub fenster: Vec<(isize, String, String)>,
+    pub window: Vec<(isize, String, String)>,
     /// Red frame around what is shared: on?
     pub rahmen_an: bool,
     /// Noise gate: on, strictness 0..100, currently letting sound through,
@@ -214,7 +214,7 @@ pub struct Sicht {
 
 /// State that only concerns the UI (not the meeting).
 #[derive(Clone)]
-pub struct Fensterzustand {
+pub struct MeetWindowState {
     pub seite_offen: bool,
     pub reiter: Reiter,
     pub input_text: String,
@@ -245,14 +245,14 @@ pub struct Fensterzustand {
     /// The section drawn last (x, y, w, h) in screen
     /// coordinates of the sender. Reported upwards so that it can send
     /// exactly this part in full sharpness.
-    pub zoomfenster: (f32, f32, f32, f32),
+    pub zoom_window: (f32, f32, f32, f32),
     /// Should the sender really send only this part (real pixels
     /// instead of extrapolated ones)? Costs it some CPU time, hence a
     /// switch - but on by default, because sharp is the point of it.
     pub scharf: bool,
 }
 
-impl Default for Fensterzustand {
+impl Default for MeetWindowState {
     fn default() -> Self {
         Self {
             seite_offen: false,
@@ -272,7 +272,7 @@ impl Default for Fensterzustand {
             zoom: 1.0,
             zoomanker: Zoomanker::Eigene,
             zoommitte: vec2(0.5, 0.5),
-            zoomfenster: (0.0, 0.0, 1.0, 1.0),
+            zoom_window: (0.0, 0.0, 1.0, 1.0),
             scharf: true,
         }
     }
@@ -318,7 +318,7 @@ pub enum Aktion {
     ReloadDevices,
     /// Diesen Display teilen (Index aus `Sicht::monitore`).
     PickScreen(usize),
-    /// Genau dieses Programmfenster teilen (Kennung aus `Sicht::fenster`).
+    /// Share exactly this program window (id from `Sicht::window`).
     PickWindow(isize),
     /// Switch the red frame around what is shared on/off.
     Rahmen(bool),
@@ -796,7 +796,7 @@ pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
 
 /// Which part of the RECEIVED image shows the wanted window?
 ///
-/// `fenster` and `bereich` are both fractions of the sender's WHOLE screen.
+/// `window` and `bereich` are both fractions of the sender's WHOLE screen.
 /// If it sends only a section (`bereich` smaller than everything),
 /// the incoming image contains exactly this section - the magnifier must then
 /// not zoom in as far again, otherwise it would be doubled.
@@ -804,13 +804,13 @@ pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
 /// This very calculation makes the sharp zoom possible AND correct: as soon as
 /// the sender delivers the wanted area, the result is the whole
 /// image (0..1) - so real pixels instead of extrapolated ones.
-pub fn zoom_uv(fenster: Rect, bereich: Rect) -> Rect {
+pub fn zoom_uv(window: Rect, bereich: Rect) -> Rect {
     let bw = bereich.width().max(0.0001);
     let bh = bereich.height().max(0.0001);
-    let x0 = ((fenster.min.x - bereich.min.x) / bw).clamp(0.0, 1.0);
-    let y0 = ((fenster.min.y - bereich.min.y) / bh).clamp(0.0, 1.0);
-    let x1 = ((fenster.max.x - bereich.min.x) / bw).clamp(0.0, 1.0);
-    let y1 = ((fenster.max.y - bereich.min.y) / bh).clamp(0.0, 1.0);
+    let x0 = ((window.min.x - bereich.min.x) / bw).clamp(0.0, 1.0);
+    let y0 = ((window.min.y - bereich.min.y) / bh).clamp(0.0, 1.0);
+    let x1 = ((window.max.x - bereich.min.x) / bw).clamp(0.0, 1.0);
+    let y1 = ((window.max.y - bereich.min.y) / bh).clamp(0.0, 1.0);
     // Never collapse to zero - an empty area would be a black
     // image instead of a section.
     let x1 = x1.max(x0 + 0.001).min(1.0);
@@ -1383,7 +1383,7 @@ pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
 pub fn meeting_ui(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     bilder: &Bilder,
 ) -> Vec<Aktion> {
     let f = farben();
@@ -1420,7 +1420,7 @@ pub fn meeting_ui(
 fn kopf(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -1644,7 +1644,7 @@ fn kopf(
                     {
                         if s.screen_on {
                             aktionen.push(Aktion::Screen(false));
-                        } else if s.monitore.len() > 1 || !s.fenster.is_empty() {
+                        } else if s.monitore.len() > 1 || !s.window.is_empty() {
                             // As soon as there is something to choose, we ask.
                             // Earlier, with a single screen, EVERYTHING went out
                             // unasked - exactly what Justin did not want
@@ -1692,7 +1692,7 @@ fn kopf(
 fn schirmwahl(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -1724,7 +1724,7 @@ fn schirmwahl(
                     z.schirmwahl_offen = false;
                 }
             }
-            if !s.fenster.is_empty() {
+            if !s.window.is_empty() {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new("NUR EIN PROGRAMM")
@@ -1743,7 +1743,7 @@ fn schirmwahl(
                 egui::ScrollArea::vertical()
                     .max_height(220.0)
                     .show(ui, |ui| {
-                        for (k, titel, prog) in s.fenster.iter() {
+                        for (k, titel, prog) in s.window.iter() {
                             let text = if prog.is_empty() {
                                 kurz(titel, 40)
                             } else {
@@ -1782,7 +1782,7 @@ fn schirmwahl(
 fn settings(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -2012,7 +2012,7 @@ fn settings(
 fn seite(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -2113,7 +2113,7 @@ fn reiter_knopf(
 fn reiter_chat(
     ui: &mut egui::Ui,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -2493,7 +2493,7 @@ fn steuer_leiste(
 fn lobby_leiste(
     ctx: &egui::Context,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
@@ -2587,7 +2587,7 @@ fn screen_tile(
     k: &Kachel,
     tex: Option<&egui::TextureHandle>,
     s: &Sicht,
-    z: &mut Fensterzustand,
+    z: &mut MeetWindowState,
     f: &Farben,
 ) {
     // --- Wheel: zoom in and out ---
@@ -2645,10 +2645,10 @@ fn screen_tile(
     // The wanted window - ALWAYS in screen coordinates of the sender.
     // It is also reported upwards so that the sender can send exactly this part
     // sharp.
-    let fenster = zoom_ausschnitt(z.zoom, mitte);
-    z.zoomfenster = (fenster.min.x, fenster.min.y, fenster.width(), fenster.height());
+    let window = zoom_ausschnitt(z.zoom, mitte);
+    z.zoom_window = (window.min.x, window.min.y, window.width(), window.height());
     let ausschnitt = if z.zoom > 1.0 || s.screen_region.is_some() {
-        Some(zoom_uv(fenster, ber))
+        Some(zoom_uv(window, ber))
     } else {
         None
     };
@@ -2661,8 +2661,8 @@ fn screen_tile(
         if d.length_sq() > 0.0 {
             z.zoomanker = Zoomanker::Fest;
             z.zoommitte = vec2(
-                (z.zoommitte.x - d.x / rect.width().max(1.0) * fenster.width()).clamp(0.0, 1.0),
-                (z.zoommitte.y - d.y / rect.height().max(1.0) * fenster.height()).clamp(0.0, 1.0),
+                (z.zoommitte.x - d.x / rect.width().max(1.0) * window.width()).clamp(0.0, 1.0),
+                (z.zoommitte.y - d.y / rect.height().max(1.0) * window.height()).clamp(0.0, 1.0),
             );
         }
     }
@@ -2683,7 +2683,7 @@ fn screen_tile(
 }
 
 /// Kleine Leiste oben rechts im geteilten Bild: -, Stufe, +, Anker, go_back.
-fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, f: &Farben) {
+fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut MeetWindowState, f: &Farben) {
     if rect.width() < 260.0 || rect.height() < 120.0 {
         return; // in einem Briefmarkenbild waere die Leiste nur im Weg
     }
@@ -2780,7 +2780,7 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
     }
 }
 
-fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &Farben) {
+fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut MeetWindowState, b: &Bilder, f: &Farben) {
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, egui::Sense::hover());
     if area.width() < 40.0 || area.height() < 40.0 {
@@ -3194,7 +3194,7 @@ pub fn beispiel_beitritt() -> Beitritt {
 /// views headless with it AND `--meetdemo` makes real images from it. Both
 /// thereby see guaranteed the same thing - otherwise you end up checking a different
 /// window than the one the customer gets.
-pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
+pub fn beispiel(nr: usize) -> (&'static str, Sicht, MeetWindowState) {
     let namen = ["Justin", "Anna Berger", "Cem", "Dora", "Emil", "Frida"];
     let mach = |item_count: usize, with_screen: bool, warteraum: bool| {
         let mut leute = Vec::new();
@@ -3212,7 +3212,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             });
         }
         Sicht {
-            fenster: Vec::new(),
+            window: Vec::new(),
             rahmen_an: true,
             sperre_an: true,
             sperre_staerke: 45,
@@ -3299,7 +3299,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             // (Example 10 sets the area further below by hand.)
         }
     };
-    let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| Fensterzustand {
+    let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| MeetWindowState {
         seite_offen: seite,
         reiter,
         kameraplatz: platz,
@@ -3309,7 +3309,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     // The settings screen needs its own example state, otherwise it
     // would never be drawn in --uitest and an error in it would only be
     // noticed by the user.
-    let with_settings = || Fensterzustand {
+    let with_settings = || MeetWindowState {
         settings_open: true,
         ..Default::default()
     };
@@ -3360,7 +3360,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         9 => (
             "Bildschirm hineingezoomt",
             mach(3, true, false),
-            Fensterzustand {
+            MeetWindowState {
                 zoom: 2.5,
                 zoomanker: Zoomanker::Teiler,
                 zoommitte: vec2(0.62, 0.41),
@@ -3370,7 +3370,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         11 => (
             "Bildschirmauswahl offen",
             mach(2, false, false),
-            Fensterzustand {
+            MeetWindowState {
                 schirmwahl_offen: true,
                 ..Default::default()
             },
@@ -3385,7 +3385,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 v.screen_region = Some((0.47, 0.26, 0.4, 0.4));
                 v
             },
-            Fensterzustand {
+            MeetWindowState {
                 zoom: 2.5,
                 zoomanker: Zoomanker::Fest,
                 zoommitte: vec2(0.67, 0.46),
@@ -3484,8 +3484,8 @@ mod tests {
     /// incoming image is to be shown COMPLETELY - then they are real pixels.
     #[test]
     fn scharfer_zoom_zeigt_das_ganze_bild() {
-        let fenster = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
-        let uv = zoom_uv(fenster, fenster);
+        let window = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
+        let uv = zoom_uv(window, window);
         assert!((uv.min.x).abs() < 1e-5 && (uv.min.y).abs() < 1e-5);
         assert!((uv.max.x - 1.0).abs() < 1e-5 && (uv.max.y - 1.0).abs() < 1e-5);
     }
@@ -3494,8 +3494,8 @@ mod tests {
     #[test]
     fn ohne_ausschnitt_bleibt_die_lupe_wie_gehabt() {
         let ganz = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        let fenster = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
-        assert_eq!(zoom_uv(fenster, ganz), fenster);
+        let window = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
+        assert_eq!(zoom_uv(window, ganz), window);
     }
 
     /// Halfway: it sends more than wanted - then the rest is
@@ -3503,8 +3503,8 @@ mod tests {
     #[test]
     fn groesserer_ausschnitt_wird_richtig_verrechnet() {
         let bereich = Rect::from_min_size(pos2(0.2, 0.2), vec2(0.6, 0.6));
-        let fenster = Rect::from_min_size(pos2(0.35, 0.35), vec2(0.3, 0.3));
-        let uv = zoom_uv(fenster, bereich);
+        let window = Rect::from_min_size(pos2(0.35, 0.35), vec2(0.3, 0.3));
+        let uv = zoom_uv(window, bereich);
         assert!((uv.min.x - 0.25).abs() < 1e-5, "links falsch: {}", uv.min.x);
         assert!((uv.width() - 0.5).abs() < 1e-5, "Breite falsch: {}", uv.width());
     }
@@ -3514,8 +3514,8 @@ mod tests {
     #[test]
     fn window_outside_stays_in_frame() {
         let bereich = Rect::from_min_size(pos2(0.5, 0.5), vec2(0.2, 0.2));
-        let fenster = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.2, 0.2));
-        let uv = zoom_uv(fenster, bereich);
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.2, 0.2));
+        let uv = zoom_uv(window, bereich);
         assert!(uv.min.x >= 0.0 && uv.min.y >= 0.0);
         assert!(uv.max.x <= 1.0 && uv.max.y <= 1.0);
         assert!(uv.width() > 0.0 && uv.height() > 0.0, "leere Flaeche waere schwarz");

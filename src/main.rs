@@ -37,13 +37,13 @@ mod meete2e;
 mod meetrtc;
 mod meetaudio;
 mod meetui;
-mod meetfenster;
+mod meetwindow;
 mod meetvideo;
 #[cfg(windows)]
 mod camdshow;
 mod meetcam;
 mod avatar;
-mod fenster;
+mod window;
 mod meetschirm;
 mod input;
 mod net;
@@ -536,7 +536,7 @@ fn main() -> eframe::Result<()> {
                 return;
             }
             report_start_error(&format!(
-                "Das Fenster kam auch nach {} Sekunden nicht hoch (kein Bild gezeichnet)",
+                "The window did not come up even after {} seconds (no frame drawn)",
                 frist.as_secs()
             ));
             continue_without_window(&wach);
@@ -553,7 +553,7 @@ fn main() -> eframe::Result<()> {
     let Err(e1) = erst else {
         return Ok(());
     };
-    capture::log_line(&format!("Oberflaeche startet nicht ({}) - zweiter Anlauf ohne Hardwarebeschleunigung", e1));
+    capture::log_line(&format!("UI does not start ({}) - second attempt without hardware acceleration", e1));
     let optionen2 = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
@@ -599,7 +599,7 @@ fn main() -> eframe::Result<()> {
     // rasterizer WARP steps in ("Microsoft Basic Render Driver"). That is why
     // this attempt draws a window even on a bare VM.
     capture::log_line(&format!(
-        "OpenGL geht nicht ({}) - dritter Anlauf mit DirectX (wgpu)",
+        "OpenGL does not work ({}) - third attempt with DirectX (wgpu)",
         e2
     ));
     let optionen3 = eframe::NativeOptions {
@@ -708,7 +708,7 @@ struct App {
     fb_contact: String,
     /// Device list: selected folder and open edit field.
     folder: String,
-    /// Offenes "Geraet hinzufuegen"-Fenster.
+    /// Open "add device" window.
     add_dev: Option<AddDev>,
     edit_dev: Option<DevEdit>,
     /// When the title bar was last colored.
@@ -773,7 +773,7 @@ struct App {
     /// Camera and microphone BEFORE joining (self preview, level).
     vorprobe: meetui::Vorprobe,
     /// What only concerns the UI: sidebar, tabs, camera slot.
-    meet_z: meetfenster::Fensterzustand,
+    meet_z: meetwindow::MeetWindowState,
     /// How many chat lines the user has already seen (counter on the button).
     meet_gelesen: usize,
     /// When the camera may start AFTER joining. The preview holds
@@ -895,7 +895,7 @@ struct MeetWin {
     /// one and a half seconds: EnumWindows asks the window manager and the process
     /// for EVERY window - doing that at every frame rate
     /// would be a waste.
-    fenster: Vec<(isize, String, String)>,
+    window: Vec<(isize, String, String)>,
     next_window: std::time::Instant,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
     tn: Arc<std::sync::Mutex<Vec<meet::Participant>>>,
@@ -921,7 +921,7 @@ impl Default for MeetWin {
             spks: Vec::new(),
             spk_sel: 0,
             monitore: Vec::new(),
-            fenster: Vec::new(),
+            window: Vec::new(),
             next_window: std::time::Instant::now(),
             is_muted: false,
             ohne_video: false,

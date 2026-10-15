@@ -684,7 +684,7 @@ pub fn salz_von(rahmen: &[u8]) -> Option<Salt> {
 struct Window {
     hoechste: u32,
     /// Bit field of the last 64 numbers below `hoechste` (the network may reorder).
-    fenster: u64,
+    window: u64,
 }
 
 impl Window {
@@ -694,8 +694,8 @@ impl Window {
             // The old highest becomes bit (schritt - 1). With a step of
             // exactly 64 that is bit 63 and the old bits fall out; a larger
             // step forgets everything.
-            self.fenster = match schritt {
-                1..=63 => (self.fenster << schritt) | (1u64 << (schritt - 1)),
+            self.window = match schritt {
+                1..=63 => (self.window << schritt) | (1u64 << (schritt - 1)),
                 64 => 1u64 << 63,
                 _ => 0,
             };
@@ -707,10 +707,10 @@ impl Window {
             return false; // exactly the highest, or long out of the window
         }
         let bit = 1u64 << (go_back - 1);
-        if self.fenster & bit != 0 {
+        if self.window & bit != 0 {
             return false;
         }
-        self.fenster |= bit;
+        self.window |= bit;
         true
     }
 }
@@ -724,23 +724,23 @@ impl Window {
 /// was evicted since is not detected (documented limit).
 #[derive(Default)]
 pub struct Wache {
-    fenster: Vec<(Salt, Window)>,
+    window: Vec<(Salt, Window)>,
 }
 
 impl Wache {
     /// True = new and fine. False = repeat or too old.
     pub fn check(&mut self, salz: &Salt, ctr: u32) -> bool {
-        if let Some((_, f)) = self.fenster.iter_mut().find(|(s, _)| s == salz) {
+        if let Some((_, f)) = self.window.iter_mut().find(|(s, _)| s == salz) {
             return f.check(ctr);
         }
-        if self.fenster.len() >= GUARD_SALTS_MAX {
-            self.fenster.remove(0);
+        if self.window.len() >= GUARD_SALTS_MAX {
+            self.window.remove(0);
         }
         let f = Window {
             hoechste: ctr,
-            fenster: 0,
+            window: 0,
         };
-        self.fenster.push((*salz, f));
+        self.window.push((*salz, f));
         true
     }
 }
@@ -1111,7 +1111,7 @@ mod tests {
             assert!(w.check(&s, 1));
             assert!(!w.check(&s, 1));
         }
-        assert!(w.fenster.len() <= GUARD_SALTS_MAX, "guard grows without limit");
+        assert!(w.window.len() <= GUARD_SALTS_MAX, "guard grows without limit");
     }
 
     // --------------------------------------------- nonce uniqueness ------

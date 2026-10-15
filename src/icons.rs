@@ -316,8 +316,8 @@ mod tests {
     #[test]
     fn every_icon_is_wellformed_svg() {
         for (n, s) in ICONS.iter() {
-            assert!(s.starts_with("<svg"), "{} faengt nicht mit <svg an", n);
-            assert!(s.ends_with("</svg>"), "{} endet nicht mit </svg>", n);
+            assert!(s.starts_with("<svg"), "{} does not start with <svg", n);
+            assert!(s.ends_with("</svg>"), "{} does not end with </svg>", n);
             assert!(s.contains("viewBox=\"0 0 24 24\""), "{} ohne viewBox", n);
         }
     }
@@ -343,7 +343,7 @@ mod tests {
             let letzte = d.trim().chars().last().unwrap_or(' ');
             assert!(
                 letzte == 'Z' || letzte == 'z',
-                "{} endet auf '{}' statt geschlossen zu sein: ...{}",
+                "{} ends with '{}' instead of being closed: ...{}",
                 name,
                 letzte,
                 &d[d.len().saturating_sub(40)..]

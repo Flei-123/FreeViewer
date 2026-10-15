@@ -95,7 +95,7 @@ fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
                 }
             }
         }
-        crate::capture::log_line(&format!("Mikrofon '{}' nicht da - nehme den Standard", w));
+        crate::capture::log_line(&format!("Microphone '{}' not found - using the default", w));
     }
     host.default_input_device()
 }
@@ -111,7 +111,7 @@ fn pick_output(host: &cpal::Host) -> Option<cpal::Device> {
                 }
             }
         }
-        crate::capture::log_line(&format!("Lautsprecher '{}' nicht da - nehme den Standard", w));
+        crate::capture::log_line(&format!("Speaker '{}' not found - using the default", w));
     }
     host.default_output_device()
 }

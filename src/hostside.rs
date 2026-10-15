@@ -924,7 +924,7 @@ pub fn gpu_selftest(rounds: u32) -> String {
             (t_cpu as f32 / n_cpu.max(1) as f32) / (t_gpu as f32 / n_gpu as f32).max(1.0)
         ));
         out.push_str(&format!(
-            "Bildabweichung zur CPU-Skalierung: Mittel {:.2}, Max {} (von 255) ueber {} Stichproben\n",
+            "Image deviation from CPU scaling: mean {:.2}, max {} (of 255) over {} samples\n",
             diff_sum / samples.max(1) as f64,
             diff_max,
             samples
@@ -1105,13 +1105,13 @@ pub fn video_selftest(rounds: u32) -> String {
                         max = max.max(d);
                     }
                     out.push_str(&format!(
-                        "NV12 kommt von der GPU | Abweichung zur CPU-Konvertierung: Mittel {:.2}, Max {} (Y-Ebene {} Byte)\n",
+                        "NV12 comes from the GPU | deviation from CPU conversion: mean {:.2}, max {} (Y plane {} bytes)\n",
                         sum / n as f64,
                         max,
                         ysize
                     ));
                 } else if !gpu_nv12 {
-                    out.push_str("NV12 wird auf der CPU erzeugt (kein GPU-Scaler)\n");
+                    out.push_str("NV12 is produced on the CPU (no GPU scaler)\n");
                 }
             }
             let t = Instant::now();
@@ -1166,7 +1166,7 @@ pub fn video_selftest(rounds: u32) -> String {
                         }
                     }
                 } else if dir_error.is_empty() {
-                    dir_error = "keine NV12-Textur von der Aufnahme".to_string();
+                    dir_error = "no NV12 texture from the capture".to_string();
                 }
             }
 
@@ -1202,7 +1202,7 @@ pub fn video_selftest(rounds: u32) -> String {
         {
             if n_dir > 0 {
                 out.push_str(&format!(
-                    "DIREKT: alles auf der Grafikkarte {:.2} ms/Frame => {:.0} fps moeglich | {} Einheiten, {:.1} KB/Frame\n",
+                    "DIRECT: all on the GPU {:.2} ms/frame => {:.0} fps possible | {} units, {:.1} KB/frame\n",
                     t_dir as f32 / n_dir as f32 / 1000.0,
                     1000.0 / (t_dir as f32 / n_dir as f32 / 1000.0).max(0.001),
                     n_dir,
@@ -1222,7 +1222,7 @@ pub fn video_selftest(rounds: u32) -> String {
         ));
         if b_264 > 0 && b_jpg > 0 {
             out.push_str(&format!(
-                "=> H.264 braucht {:.2}x der JPEG-Datenmenge und {:.2}x der Encode-Zeit\n",
+                "=> H.264 needs {:.2}x the JPEG data volume and {:.2}x the encode time\n",
                 b_264 as f32 / b_jpg as f32,
                 (t_nv + t_264) as f32 / t_jpg.max(1) as f32
             ));
@@ -1235,7 +1235,7 @@ pub fn video_selftest(rounds: u32) -> String {
 struct DirektZahlen {
     frames: u32,
     bytes: usize,
-    fenster: Instant,
+    window_start: Instant,
 }
 
 /// Encode an image completely on the graphics card and send it off.
@@ -1270,7 +1270,7 @@ fn send_direct(
         match crate::h264::Encoder::new_d3d(&dev, dw, dh, prof.fps as u32, prof.bitrate) {
             Ok(e) => {
                 capture::log_line(&format!(
-                    "Direktpfad an: {} {}x{} - das Bild verlaesst die Grafikkarte nicht mehr",
+                    "Direct path on: {} {}x{} - the frame no longer leaves the GPU",
                     e.name(),
                     dw,
                     dh
@@ -1309,14 +1309,14 @@ fn send_direct(
                     return true;
                 }
             }
-            if z.fenster.elapsed() >= Duration::from_secs(1) {
-                let secs = z.fenster.elapsed().as_secs_f32();
+            if z.window_start.elapsed() >= Duration::from_secs(1) {
+                let secs = z.window_start.elapsed().as_secs_f32();
                 let mut st = shared.stats.lock_ok();
                 st.fps = z.frames as f32 / secs;
                 st.kbps = (z.bytes as f32 * 8.0 / 1000.0) / secs;
                 z.frames = 0;
                 z.bytes = 0;
-                z.fenster = Instant::now();
+                z.window_start = Instant::now();
             }
             true
         }
@@ -1428,7 +1428,7 @@ fn capture_loop(
         let mut direkt_z = DirektZahlen {
             frames: 0,
             bytes: 0,
-            fenster: Instant::now(),
+            window_start: Instant::now(),
         };
         // A picture has to arrive even when nothing moves. Desktop
         // Duplication only reports *changes*, and the lock screen is
@@ -1615,7 +1615,7 @@ fn capture_loop(
                         // backend is slower but always delivers something.
                         tried_fallback = true;
                         capture::log_line(
-                            "keine Bilder von der Duplication - wechsle auf den Screenshot-Weg",
+                            "no frames from duplication - switching to the screenshot path",
                         );
                         if let Some(c) = capture::open_index(false, cur_mon) {
                             cap = c;
@@ -1684,7 +1684,7 @@ fn capture_loop(
             {
                 trace = Instant::now();
                 capture::log_line(&format!(
-                    "grabber: {} Bilder geholt, {} an den Encoder, backend {}",
+                    "grabber: {} frames grabbed, {} to the encoder, backend {}",
                     grabbed,
                     pushed,
                     cap.name()
@@ -1976,7 +1976,7 @@ mod verbindungstests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(war_bereit, "Registrierung wurde nie als 'bereit' gemeldet");
+        assert!(war_bereit, "registration was never reported as 'ready'");
 
         // 2) and afterwards, without a single sign of life, flip to offline
         let mut wurde_offline = false;
@@ -1990,11 +1990,11 @@ mod verbindungstests {
         host.abort();
         assert!(
             wurde_offline,
-            "stille Leitung blieb 'bereit' - genau der Fehler, um den es geht"
+            "silent line stayed 'ready' - exactly the bug this is about"
         );
         assert!(
             shared.my_id.lock_ok().is_empty(),
-            "die eigene Nummer muss weg sein, wenn niemand sie mehr kennt"
+            "the own number must be gone when nobody knows it any more"
         );
         let text = shared.host_status.lock_ok().clone();
         assert!(
@@ -2023,7 +2023,7 @@ mod verbindungstests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         host.abort();
-        assert!(offline, "ohne Relay muss der Zustand offline sein");
+        assert!(offline, "without a relay the state must be offline");
     }
     #[test]
     fn peer_name_is_cleaned() {

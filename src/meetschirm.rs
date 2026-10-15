@@ -43,15 +43,15 @@ pub struct Screen {
 pub enum Quelle {
     /// Index aus `liste()`.
     Display(usize),
-    /// Fensterkennung aus `crate::fenster::liste()`.
-    Fenster(isize),
+    /// Window id from `crate::window::liste()`.
+    Window(isize),
 }
 
 impl Quelle {
     fn open(&self) -> Option<Box<dyn crate::capture::Backend>> {
         match self {
             Quelle::Display(i) => crate::capture::open_index(true, *i),
-            Quelle::Fenster(k) => crate::fenster::aufnahme(*k),
+            Quelle::Window(k) => crate::window::aufnahme(*k),
         }
     }
 
@@ -62,7 +62,7 @@ impl Quelle {
             Quelle::Display(i) => crate::capture::list_monitors(true)
                 .get(*i)
                 .map(|m| (m.x, m.y, m.w as i32, m.h as i32)),
-            Quelle::Fenster(k) => crate::fenster::lage(*k),
+            Quelle::Window(k) => crate::window::lage(*k),
         }
     }
 }
@@ -256,7 +256,7 @@ pub fn bild_nach_nv12_teil(
 pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
     match q {
         Quelle::Display(i) => zeiger_anteil(i),
-        Quelle::Fenster(_) => {
+        Quelle::Window(_) => {
             #[cfg(windows)]
             {
                 use windows::Win32::Foundation::POINT;
@@ -492,7 +492,7 @@ fn schleife(
         None => {
             let _ = tx.send(Err(match quelle {
                 Quelle::Display(_) => "kein Bildschirm aufnehmbar".to_string(),
-                Quelle::Fenster(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
+                Quelle::Window(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
             }));
             return;
         }
@@ -504,7 +504,7 @@ fn schleife(
             .get(index)
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("Bildschirm {}", index + 1)),
-        Quelle::Fenster(k) => crate::fenster::liste()
+        Quelle::Window(k) => crate::window::liste()
             .into_iter()
             .find(|f| f.kennung == k)
             .map(|f| f.titel)
@@ -548,7 +548,7 @@ fn schleife(
                                 Quelle::Display(_) => "Bildschirm nicht mehr aufnehmbar".into(),
                                 // For a window the most common reason
                                 // is simply: it was closed.
-                                Quelle::Fenster(_) => "Das geteilte Fenster ist weg".to_string(),
+                                Quelle::Window(_) => "Das geteilte Fenster ist weg".to_string(),
                             };
                         }
                         return;
@@ -619,7 +619,7 @@ mod tests {
         let (b, h) = zielgroesse(3840, 2160, 1920, 1080);
         assert_eq!((b, h), (1920, 1080));
         let (b, h) = zielgroesse(1366, 768, 1920, 1080);
-        assert_eq!((b, h), (1366, 768), "kleiner Schirm wird nicht hochskaliert");
+        assert_eq!((b, h), (1366, 768), "small screen is not scaled up");
         let (b, h) = zielgroesse(2560, 1080, 1920, 1080);
         assert!(b <= 1920 && h <= 1080, "{}x{}", b, h);
         assert!(b % 2 == 0 && h % 2 == 0, "ungerade Kante {}x{}", b, h);
@@ -644,10 +644,10 @@ mod tests {
             .collect();
         assert!(
             umgebung.iter().any(|v| *v != 100),
-            "an der Zeigerspitze wurde nichts gezeichnet"
+            "nothing was drawn at the pointer tip"
         );
         // Weit weg darf nichts angefasst worden sein.
-        assert_eq!(y[40 * w as usize + 60], 100, "es wurde ausserhalb gemalt");
+        assert_eq!(y[40 * w as usize + 60], 100, "painted outside");
         // White must occur (the body of the arrow).
         assert!(y.iter().any(|v| *v > 200), "kein heller Pfeilkoerper");
         assert!(y.iter().any(|v| *v < 40), "kein dunkler Rand");
@@ -685,7 +685,7 @@ mod tests {
         // Centre, a quarter of the edge.
         let (x, y, w, h) = bereich_vereinen(&[(0.375, 0.375, 0.25, 0.25)]);
         assert!((w - h).abs() < 1e-6, "muss quadratisch bleiben");
-        assert!(w > 0.25 && w < 0.4, "Rand fehlt oder ist zu gross: {}", w);
+        assert!(w > 0.25 && w < 0.4, "border missing or too big: {}", w);
         // still centred
         assert!((x + w / 2.0 - 0.5).abs() < 0.01);
         assert!((y + h / 2.0 - 0.5).abs() < 0.01);
@@ -748,12 +748,12 @@ mod tests {
         let y = &nv12[..16 * 16];
         assert!(
             y.iter().all(|v| *v > 200),
-            "der Ausschnitt zeigt nicht die rechte Haelfte"
+            "the crop does not show the right half"
         );
         // And the LEFT half -> everything dark.
         assert!(bild_nach_nv12_teil(&px, sb, sh, true, (0.0, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
         let y = &nv12[..16 * 16];
-        assert!(y.iter().all(|v| *v < 60), "linker Ausschnitt ist nicht dunkel");
+        assert!(y.iter().all(|v| *v < 60), "left crop is not dark");
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(nv12.len(), 32 * 16 * 3 / 2);
         // Y of red is around 82 (BT.601) - clearly away from 0 and 255.
         let y0 = nv12[0];
-        assert!((60..110).contains(&y0), "Y von Rot ist {}", y0);
+        assert!((60..110).contains(&y0), "Y of red is {}", y0);
     }
 
     #[test]
@@ -812,7 +812,7 @@ mod tests {
     fn display_through_h264() {
         let schirme = liste();
         if schirme.is_empty() {
-            println!("kein Bildschirm auf dieser Maschine - uebersprungen");
+            println!("no screen on this machine - skipped");
             return;
         }
         println!("Bildschirm 0: {:?}", schirme[0]);
@@ -865,7 +865,7 @@ mod tests {
         // And now through the encoder - that is the part that is
         // new on the Mac.
         if !crate::h264::available() {
-            println!("kein H.264-Kodierer - Kette hier nicht pruefbar");
+            println!("no H.264 encoder - chain cannot be checked here");
             return;
         }
         let mut enc = crate::h264::Encoder::new(zb, zh, 10, 3_000_000).expect("Kodierer");
@@ -886,8 +886,8 @@ mod tests {
             }
         }
         println!("H.264: {} Bytes, {} Schluesselbilder", bytes, key_frames);
-        assert!(bytes > 0, "Bildschirmbild liess sich nicht kodieren");
-        assert!(key_frames > 0, "kein Schluesselbild am Anfang");
+        assert!(bytes > 0, "screen frame could not be encoded");
+        assert!(key_frames > 0, "no keyframe at the start");
         auf.stoppen();
     }
 
