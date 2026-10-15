@@ -8,10 +8,10 @@
 //!
 //! Where things live:
 //!
-//! * The relay holds the truth: `/fv/freunde/*` (see relay.js). It is
+//! * The relay holds the truth: `/fv/friends/*` (see relay.js). It is
 //!   the only way a request reaches the other side at all.
 //! * This file keeps a COPY of it next to the other settings
-//!   (`freunde.json` in the folder from `ident::config_dir()`, just like
+//!   (`friends.json` in the folder from `ident::config_dir()`, just like
 //!   `partners.json`). This way the list is on screen immediately, even when
 //!   the relay is currently not reachable.
 //!
@@ -34,7 +34,7 @@
 //! ALWAYS in the request body, never in the URL.
 //!
 //! Nothing here blocks the UI. Every network call runs in its
-//! own thread; results come back via `Dienst::meldung()` - the same
+//! own thread; results come back via `Dienst::notice()` - the same
 //! mailbox pattern as in `account.rs` and `presence.rs`.
 
 // The module is complete, the UI is attached separately.
@@ -56,14 +56,14 @@ const ABGLEICH_SEKUNDEN: u64 = 20;
 const EINLADUNG_PAUSE_SEKUNDEN: u64 = 600;
 
 /// Upper limit, so that a broken answer cannot blow up the file.
-const MAX_FREUNDE: usize = 500;
+const MAX_FRIENDS: usize = 500;
 const MAX_ANFRAGEN: usize = 200;
 
 // ============================================================== Datentypen
 
-/// Ein bestaetigter Freund. Beide haben zugestimmt.
+/// Ein bestaetigter Friend. Beide haben zugestimmt.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Freund {
+pub struct Friend {
     /// The FreeViewer ID of the other - used for meeting and remote support.
     pub fvid: String,
     /// What the other calls themselves (empty = show ID).
@@ -86,7 +86,7 @@ pub struct Freund {
     pub handle: String,
     /// All FreeViewer PCs of this person, online first. `fvid` is the first.
     #[serde(default)]
-    pub geraete: Vec<FreundGeraet>,
+    pub geraete: Vec<FriendDevice>,
     /// "buch" (address book) or "fv" (old list at the relay, without account).
     #[serde(default)]
     pub quelle: String,
@@ -94,7 +94,7 @@ pub struct Freund {
 
 /// Ein PC eines Freundes.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct FreundGeraet {
+pub struct FriendDevice {
     pub fvid: String,
     #[serde(default)]
     pub label: String,
@@ -106,7 +106,7 @@ pub struct FreundGeraet {
 
 /// Number, otherwise "k:<person>", otherwise "@handle" - the key the
 /// relay understands for this entry.
-fn schluessel_aus(fvid: &str, person: &str, handle: &str) -> String {
+fn key_from(fvid: &str, person: &str, handle: &str) -> String {
     if !fvid.is_empty() {
         fvid.to_string()
     } else if !person.is_empty() {
@@ -133,9 +133,9 @@ fn passt(k: &str, fvid: &str, person: &str, handle: &str) -> bool {
     !fvid.is_empty() && k == fvid
 }
 
-impl Freund {
+impl Friend {
     /// What shows in the list: name, otherwise @name, otherwise the nicely formatted ID.
-    pub fn anzeige(&self) -> String {
+    pub fn display_name(&self) -> String {
         if !self.name.trim().is_empty() {
             self.name.clone()
         } else if !self.handle.is_empty() {
@@ -146,7 +146,7 @@ impl Freund {
     }
 
     pub fn schluessel(&self) -> String {
-        schluessel_aus(&self.fvid, &self.person, &self.handle)
+        key_from(&self.fvid, &self.person, &self.handle)
     }
 
     /// Is `k` this friend - via any of their PCs, their account or
@@ -194,7 +194,7 @@ impl Default for Richtung {
 
 /// Eine offene Freundschaftsanfrage.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Anfrage {
+pub struct Request {
     /// The OTHER side: for `Eingehend` the sender, for `Ausgehend` the
     /// recipient. (The name is chosen this way because the list almost always shows
     /// the incoming ones - there it literally means "from whom".)
@@ -209,7 +209,8 @@ pub struct Anfrage {
     pub richtung: Richtung,
     /// Freier Gruss des Absenders (darf leer sein).
     #[serde(default)]
-    pub nachricht: String,
+    #[serde(rename = "nachricht")]
+    pub message: String,
     /// Is the other currently online?
     #[serde(default)]
     pub online: bool,
@@ -222,18 +223,18 @@ pub struct Anfrage {
     pub quelle: String,
 }
 
-impl Anfrage {
+impl Request {
     /// The key of the other side - independent of the direction:
     /// their number, otherwise "k:<person>", otherwise "@handle".
     pub fn gegenueber(&self) -> String {
-        schluessel_aus(&self.von_fvid, &self.person, &self.handle)
+        key_from(&self.von_fvid, &self.person, &self.handle)
     }
 
     pub fn ist(&self, k: &str) -> bool {
         passt(k, &self.von_fvid, &self.person, &self.handle)
     }
 
-    pub fn anzeige(&self) -> String {
+    pub fn display_name(&self) -> String {
         if !self.name.trim().is_empty() {
             self.name.clone()
         } else if !self.handle.is_empty() {
@@ -265,7 +266,7 @@ pub struct Blockiert {
 
 impl Blockiert {
     pub fn schluessel(&self) -> String {
-        schluessel_aus(&self.fvid, &self.person, &self.handle)
+        key_from(&self.fvid, &self.person, &self.handle)
     }
 
     pub fn ist(&self, k: &str) -> bool {
@@ -276,18 +277,18 @@ impl Blockiert {
 /// What can go wrong. All messages are ready-made German sentences and
 /// can be displayed directly.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Fehler {
+pub enum FriendError {
     /// The own ID cannot be the own friend.
-    SelbstAnfrage,
+    SelfRequest,
     SchonBefreundet,
     SchonAngefragt,
     /// Accept/decline without a request being present.
-    KeineAnfrage,
-    KeinFreund,
+    NoRequest,
+    NotFriend,
     Blockiert,
     UngueltigeId,
     /// An @name only works with an account (the address book hangs on the account).
-    KontoNoetig,
+    AccountRequired,
     /// The relay declined or was not reachable.
     Netz(String),
     /// The relay does not know meeting invitations yet (older version).
@@ -295,24 +296,24 @@ pub enum Fehler {
     /// The friend has no (yet) FreeViewer PC an invitation could go to.
     KeinGeraet,
     /// A link with an end-to-end key must never go through the relay.
-    LinkMitSchluessel,
+    LinkWithKey,
 }
 
-impl std::fmt::Display for Fehler {
+impl std::fmt::Display for FriendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Fehler::SelbstAnfrage => "Das ist die eigene FreeViewer-ID".to_string(),
-            Fehler::SchonBefreundet => "Ihr seid schon befreundet".to_string(),
-            Fehler::SchonAngefragt => "Die Anfrage laeuft schon".to_string(),
-            Fehler::KeineAnfrage => "Von dieser ID liegt keine Anfrage vor".to_string(),
-            Fehler::KeinFreund => "Diese ID steht nicht in der Freundesliste".to_string(),
-            Fehler::Blockiert => "Diese ID steht auf der Blockliste".to_string(),
-            Fehler::UngueltigeId => "Das ist keine gueltige FreeViewer-ID oder kein @Name".to_string(),
-            Fehler::KontoNoetig => "Fuer @Namen bitte zuerst mit dem Fleitec-Konto anmelden".to_string(),
-            Fehler::Netz(m) => m.clone(),
-            Fehler::KeinKanal => "Der Relay kann noch keine Einladungen zustellen".to_string(),
-            Fehler::KeinGeraet => "Dieser Freund hat noch keinen FreeViewer-PC".to_string(),
-            Fehler::LinkMitSchluessel => {
+            FriendError::SelfRequest => "Das ist die eigene FreeViewer-ID".to_string(),
+            FriendError::SchonBefreundet => "Ihr seid schon befreundet".to_string(),
+            FriendError::SchonAngefragt => "Die Anfrage laeuft schon".to_string(),
+            FriendError::NoRequest => "Von dieser ID liegt keine Anfrage vor".to_string(),
+            FriendError::NotFriend => "Diese ID steht nicht in der Freundesliste".to_string(),
+            FriendError::Blockiert => "Diese ID steht auf der Blockliste".to_string(),
+            FriendError::UngueltigeId => "Das ist keine gueltige FreeViewer-ID oder kein @Name".to_string(),
+            FriendError::AccountRequired => "Fuer @Namen bitte zuerst mit dem Fleitec-Konto anmelden".to_string(),
+            FriendError::Netz(m) => m.clone(),
+            FriendError::KeinKanal => "Der Relay kann noch keine Einladungen zustellen".to_string(),
+            FriendError::KeinGeraet => "Dieser Freund hat noch keinen FreeViewer-PC".to_string(),
+            FriendError::LinkWithKey => {
                 "Ein Link mit Schluessel geht nicht ueber den Relay".to_string()
             }
         };
@@ -320,13 +321,13 @@ impl std::fmt::Display for Fehler {
     }
 }
 
-impl std::error::Error for Fehler {}
+impl std::error::Error for FriendError {}
 
 /// What a background run reports back to the UI.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Meldung {
-    /// Abgleich fertig: so viele Freunde, so viele offene Anfragen.
-    Abgeglichen { freunde: usize, offen: usize },
+pub enum Notice {
+    /// Abgleich fertig: so viele Friends, so viele offene Anfragen.
+    Abgeglichen { friends: usize, offen: usize },
     /// Request has arrived at the relay.
     Angefragt(String),
     /// The other had already asked me - we are friends immediately now.
@@ -384,7 +385,7 @@ pub fn ist_ziel(s: &str) -> bool {
 }
 
 /// For messages: "497 628 420", "@anna" or "dieser Kontakt".
-pub fn ziel_anzeige(s: &str) -> String {
+pub fn target_label(s: &str) -> String {
     let z = ziel_norm(s);
     if z.starts_with('@') {
         z
@@ -406,7 +407,7 @@ fn jetzt() -> u64 {
 
 /// The local copy: friends, open requests, block list.
 ///
-/// Lives as `freunde.json` in the same folder as `partners.json` and
+/// Lives as `friends.json` in the same folder as `partners.json` and
 /// `identity.txt`. Without an account this is the only version this machine
 /// has; with an account it is additionally stored at the relay.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -414,9 +415,10 @@ pub struct Buch {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
-    pub freunde: Vec<Freund>,
+    #[serde(rename = "freunde")]
+    pub friends: Vec<Friend>,
     #[serde(default)]
-    pub anfragen: Vec<Anfrage>,
+    pub anfragen: Vec<Request>,
     #[serde(default)]
     pub blockiert: Vec<Blockiert>,
     /// Which FreeViewer ID this state belongs to (check on load).
@@ -424,7 +426,8 @@ pub struct Buch {
     pub fvid: String,
     /// Which account - empty means "without account".
     #[serde(default)]
-    pub konto: String,
+    #[serde(rename = "konto")]
+    pub account: String,
     /// Wann zuletzt erfolgreich abgeglichen, unix Sekunden.
     #[serde(default)]
     pub stand: u64,
@@ -438,9 +441,9 @@ pub fn has_friend_named(name: &str) -> bool {
         return false;
     }
     Buch::load()
-        .freunde
+        .friends
         .iter()
-        .any(|f| f.anzeige().trim().to_lowercase() == name)
+        .any(|f| f.display_name().trim().to_lowercase() == name)
 }
 
 impl Buch {
@@ -490,13 +493,13 @@ impl Buch {
 
     // ------------------------------------------------------------ Abfragen
 
-    pub fn freund(&self, fvid: &str) -> Option<&Freund> {
+    pub fn friend(&self, fvid: &str) -> Option<&Friend> {
         let id = ziel_norm(fvid);
-        self.freunde.iter().find(|f| f.ist(&id))
+        self.friends.iter().find(|f| f.ist(&id))
     }
 
-    pub fn ist_freund(&self, fvid: &str) -> bool {
-        self.freund(fvid).is_some()
+    pub fn is_friend(&self, fvid: &str) -> bool {
+        self.friend(fvid).is_some()
     }
 
     pub fn ist_blockiert(&self, fvid: &str) -> bool {
@@ -505,29 +508,29 @@ impl Buch {
     }
 
     /// What is the entry behind this key called? For messages.
-    pub fn anzeige_fuer(&self, k: &str) -> String {
+    pub fn label_for(&self, k: &str) -> String {
         let id = ziel_norm(k);
-        if let Some(f) = self.freunde.iter().find(|f| f.ist(&id)) {
-            return f.anzeige();
+        if let Some(f) = self.friends.iter().find(|f| f.ist(&id)) {
+            return f.display_name();
         }
         if let Some(a) = self.anfragen.iter().find(|a| a.ist(&id)) {
-            return a.anzeige();
+            return a.display_name();
         }
-        ziel_anzeige(&id)
+        target_label(&id)
     }
 
     /// Online first, then by name - that is how a friend list reads well.
-    pub fn sortiert(&self) -> Vec<Freund> {
-        let mut v = self.freunde.clone();
+    pub fn sortiert(&self) -> Vec<Friend> {
+        let mut v = self.friends.clone();
         v.sort_by(|a, b| {
             b.online
                 .cmp(&a.online)
-                .then_with(|| a.anzeige().to_lowercase().cmp(&b.anzeige().to_lowercase()))
+                .then_with(|| a.display_name().to_lowercase().cmp(&b.display_name().to_lowercase()))
         });
         v
     }
 
-    pub fn eingehende(&self) -> Vec<Anfrage> {
+    pub fn eingehende(&self) -> Vec<Request> {
         self.anfragen
             .iter()
             .filter(|a| a.richtung == Richtung::Eingehend)
@@ -535,7 +538,7 @@ impl Buch {
             .collect()
     }
 
-    pub fn ausgehende(&self) -> Vec<Anfrage> {
+    pub fn ausgehende(&self) -> Vec<Request> {
         self.anfragen
             .iter()
             .filter(|a| a.richtung == Richtung::Ausgehend)
@@ -543,7 +546,7 @@ impl Buch {
             .collect()
     }
 
-    fn anfrage_von(&self, fvid: &str, richtung: Richtung) -> Option<usize> {
+    fn request_from(&self, fvid: &str, richtung: Richtung) -> Option<usize> {
         let id = ziel_norm(fvid);
         self.anfragen
             .iter()
@@ -557,26 +560,26 @@ impl Buch {
     // more - they are here so that the UI can answer immediately
     // and does not first wait on the wire.
 
-    /// Ich stelle eine Anfrage.
-    pub fn anfrage_stellen(&mut self, fvid: &str, name: &str) -> Result<Anfrage, Fehler> {
+    /// Ich stelle eine Request.
+    pub fn submit_request(&mut self, fvid: &str, name: &str) -> Result<Request, FriendError> {
         let id = ziel_norm(fvid);
         if !ist_ziel(&id) {
-            return Err(Fehler::UngueltigeId);
+            return Err(FriendError::UngueltigeId);
         }
         if !self.fvid.is_empty() && id == self.fvid {
-            return Err(Fehler::SelbstAnfrage);
+            return Err(FriendError::SelfRequest);
         }
-        if self.ist_freund(&id) {
-            return Err(Fehler::SchonBefreundet);
+        if self.is_friend(&id) {
+            return Err(FriendError::SchonBefreundet);
         }
         if self.ist_blockiert(&id) {
-            return Err(Fehler::Blockiert);
+            return Err(FriendError::Blockiert);
         }
-        if self.anfrage_von(&id, Richtung::Ausgehend).is_some() {
-            return Err(Fehler::SchonAngefragt);
+        if self.request_from(&id, Richtung::Ausgehend).is_some() {
+            return Err(FriendError::SchonAngefragt);
         }
         // They already asked me: then both agree.
-        if let Some(i) = self.anfrage_von(&id, Richtung::Eingehend) {
+        if let Some(i) = self.request_from(&id, Richtung::Eingehend) {
             let a = self.anfragen[i].clone();
             self.annehmen(&a.gegenueber())?;
             return Ok(a);
@@ -588,12 +591,12 @@ impl Buch {
         } else {
             (id, String::new(), String::new())
         };
-        let a = Anfrage {
+        let a = Request {
             von_fvid,
             name: crate::presence::clean(name),
             wann: jetzt(),
             richtung: Richtung::Ausgehend,
-            nachricht: String::new(),
+            message: String::new(),
             online: false,
             person,
             handle,
@@ -605,13 +608,13 @@ impl Buch {
     }
 
     /// A request came in from the relay. `true` if it was new.
-    pub fn anfrage_eintragen(&mut self, mut a: Anfrage) -> bool {
+    pub fn record_request(&mut self, mut a: Request) -> bool {
         a.von_fvid = normalisieren(&a.von_fvid);
         let k = a.gegenueber();
-        if k.is_empty() || self.ist_freund(&k) || self.ist_blockiert(&k) {
+        if k.is_empty() || self.is_friend(&k) || self.ist_blockiert(&k) {
             return false;
         }
-        if let Some(i) = self.anfrage_von(&k, a.richtung) {
+        if let Some(i) = self.request_from(&k, a.richtung) {
             self.anfragen[i] = a;
             return false;
         }
@@ -623,20 +626,20 @@ impl Buch {
     /// I accept an INCOMING request - only with this does the
     /// friendship arise. Without a pending request this is not possible; a stranger
     /// can thus never silently become a friend.
-    pub fn annehmen(&mut self, fvid: &str) -> Result<Freund, Fehler> {
+    pub fn annehmen(&mut self, fvid: &str) -> Result<Friend, FriendError> {
         let id = ziel_norm(fvid);
-        if let Some(f) = self.freund(&id) {
-            return Ok(f.clone()); // zweiter Klick - kein Fehler
+        if let Some(f) = self.friend(&id) {
+            return Ok(f.clone()); // zweiter Klick - kein FriendError
         }
         let i = self
-            .anfrage_von(&id, Richtung::Eingehend)
-            .ok_or(Fehler::KeineAnfrage)?;
+            .request_from(&id, Richtung::Eingehend)
+            .ok_or(FriendError::NoRequest)?;
         let a = self.anfragen.remove(i);
         // an own request in the opposite direction is dropped too
-        if let Some(j) = self.anfrage_von(&id, Richtung::Ausgehend) {
+        if let Some(j) = self.request_from(&id, Richtung::Ausgehend) {
             self.anfragen.remove(j);
         }
-        let f = Freund {
+        let f = Friend {
             fvid: a.von_fvid,
             name: a.name,
             seit: jetzt(),
@@ -647,7 +650,7 @@ impl Buch {
             geraete: Vec::new(),
             quelle: a.quelle,
         };
-        self.freunde.push(f.clone());
+        self.friends.push(f.clone());
         self.kuerzen();
         Ok(f)
     }
@@ -655,41 +658,41 @@ impl Buch {
     /// Decline (incoming) or withdraw the own request
     /// (outgoing). Both only throw the request away - NO
     /// friendship arises.
-    pub fn ablehnen(&mut self, fvid: &str) -> Result<(), Fehler> {
+    pub fn ablehnen(&mut self, fvid: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         let vorher = self.anfragen.len();
         self.anfragen.retain(|a| !a.ist(&id));
         if self.anfragen.len() == vorher {
-            return Err(Fehler::KeineAnfrage);
+            return Err(FriendError::NoRequest);
         }
         Ok(())
     }
 
     /// Dissolve a friendship. Applies to both sides - the relay cleans it up
     /// at the other end too.
-    pub fn entfernen(&mut self, fvid: &str) -> Result<(), Fehler> {
+    pub fn entfernen(&mut self, fvid: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
-        let vorher = self.freunde.len();
-        self.freunde.retain(|f| !f.ist(&id));
-        if self.freunde.len() == vorher {
-            return Err(Fehler::KeinFreund);
+        let vorher = self.friends.len();
+        self.friends.retain(|f| !f.ist(&id));
+        if self.friends.len() == vorher {
+            return Err(FriendError::NotFriend);
         }
         Ok(())
     }
 
     /// Put on the block list (or take off again). Whoever is blocked
     /// can no longer ask; open requests are dropped.
-    pub fn blockieren(&mut self, fvid: &str, an: bool) -> Result<(), Fehler> {
+    pub fn blockieren(&mut self, fvid: &str, an: bool) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         if !ist_ziel(&id) {
-            return Err(Fehler::UngueltigeId);
+            return Err(FriendError::UngueltigeId);
         }
         if !self.fvid.is_empty() && id == self.fvid {
-            return Err(Fehler::SelbstAnfrage);
+            return Err(FriendError::SelfRequest);
         }
         if an {
             if !self.ist_blockiert(&id) {
-                let name = self.anzeige_fuer(&id);
+                let name = self.label_for(&id);
                 let mut b = Blockiert {
                     seit: jetzt(),
                     name,
@@ -716,7 +719,7 @@ impl Buch {
     pub fn uebernehmen(&mut self, stand: &Stand) -> bool {
         let mut neu = Buch {
             version: 1,
-            freunde: stand.freunde.clone(),
+            friends: stand.friends.clone(),
             anfragen: stand
                 .eingehend
                 .iter()
@@ -732,10 +735,10 @@ impl Buch {
                 .collect(),
             blockiert: stand.blockiert.clone(),
             fvid: normalisieren(&stand.fvid),
-            konto: stand.konto.clone(),
+            account: stand.account.clone(),
             stand: jetzt(),
         };
-        for f in &mut neu.freunde {
+        for f in &mut neu.friends {
             f.fvid = normalisieren(&f.fvid);
             for g in &mut f.geraete {
                 g.fvid = normalisieren(&g.fvid);
@@ -750,21 +753,21 @@ impl Buch {
         }
         // A friend from the address book may also stand there WITHOUT a PC - then
         // they are carried by their account (person) or their @name.
-        neu.freunde.retain(|f| !f.schluessel().is_empty());
+        neu.friends.retain(|f| !f.schluessel().is_empty());
         neu.anfragen.retain(|a| !a.gegenueber().is_empty());
         neu.blockiert.retain(|b| !b.schluessel().is_empty());
         neu.kuerzen();
-        let anders = neu.freunde != self.freunde
+        let anders = neu.friends != self.friends
             || neu.anfragen != self.anfragen
             || neu.blockiert != self.blockiert
-            || neu.konto != self.konto;
+            || neu.account != self.account;
         *self = neu;
         anders
     }
 
     fn kuerzen(&mut self) {
-        if self.freunde.len() > MAX_FREUNDE {
-            self.freunde.truncate(MAX_FREUNDE);
+        if self.friends.len() > MAX_FRIENDS {
+            self.friends.truncate(MAX_FRIENDS);
         }
         if self.anfragen.len() > MAX_ANFRAGEN {
             self.anfragen.truncate(MAX_ANFRAGEN);
@@ -775,7 +778,7 @@ impl Buch {
 
 // ================================================================ Netzteil
 
-/// The answer of the relay to `/fv/freunde/stand` (and `/liste`).
+/// The answer of the relay to `/fv/friends/stand` (and `/liste`).
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct Stand {
     #[serde(default)]
@@ -783,20 +786,21 @@ pub struct Stand {
     #[serde(default)]
     pub fvid: String,
     #[serde(default)]
-    pub konto: String,
+    #[serde(rename = "konto")]
+    pub account: String,
     #[serde(default)]
-    pub freunde: Vec<Freund>,
+    pub friends: Vec<Friend>,
     #[serde(default)]
-    pub eingehend: Vec<Anfrage>,
+    pub eingehend: Vec<Request>,
     #[serde(default)]
-    pub ausgehend: Vec<Anfrage>,
+    pub ausgehend: Vec<Request>,
     #[serde(default)]
     pub blockiert: Vec<Blockiert>,
     #[serde(default)]
     pub error: String,
 }
 
-/// `wss://host/fv/ws` -> `https://host/fv/freunde/<was>`
+/// `wss://host/fv/ws` -> `https://host/fv/friends/<was>`
 pub fn url(relay_url: &str, was: &str) -> String {
     let http = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{}", rest)
@@ -813,7 +817,7 @@ pub fn url(relay_url: &str, was: &str) -> String {
 }
 
 /// A POST to the relay. Error codes become readable German sentences.
-fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_json::Value, Fehler> {
+fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_json::Value, FriendError> {
     let ziel = url(relay_url, was);
     let body = rumpf.to_string();
     // Also read the body on 4xx/5xx: only then do the German sentences of the
@@ -832,11 +836,11 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
             let text = r
                 .body_mut()
                 .read_to_string()
-                .map_err(|e| Fehler::Netz(format!("Antwort unlesbar: {}", e)))?;
+                .map_err(|e| FriendError::Netz(format!("Antwort unlesbar: {}", e)))?;
             (code, text)
         }
         Err(ureq::Error::StatusCode(code)) => (code, String::new()),
-        Err(e) => return Err(Fehler::Netz(format!("Relay nicht erreichbar: {}", e))),
+        Err(e) => return Err(FriendError::Netz(format!("Relay nicht erreichbar: {}", e))),
     };
     let wert: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
     if status == 200 {
@@ -845,9 +849,9 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
     // A relay before patch 0005 does not know /einladen and answers 404 "unbekannt"
     // (a known path with an unknown ID says something different).
     if status == 404 && wert.get("error").and_then(|e| e.as_str()) == Some("unbekannt") {
-        return Err(Fehler::KeinKanal);
+        return Err(FriendError::KeinKanal);
     }
-    let meldung = wert
+    let notice = wert
         .get("error")
         .and_then(|e| e.as_str())
         .map(|s| s.to_string())
@@ -859,7 +863,7 @@ fn ruf(relay_url: &str, was: &str, rumpf: serde_json::Value) -> Result<serde_jso
             429 => "Zu viele Anfragen - bitte kurz warten".to_string(),
             _ => format!("Relay meldet Fehler {}", status),
         });
-    Err(Fehler::Netz(meldung))
+    Err(FriendError::Netz(notice))
 }
 
 /// The credentials that are in every body.
@@ -877,35 +881,35 @@ fn mit(mut v: serde_json::Value, schluessel: &str, wert: &str) -> serde_json::Va
 }
 
 /// Fetch the complete state (one round trip for friends + requests + block list).
-pub fn hole_stand(relay: &str, geheimnis: &str, token: &str, name: &str) -> Result<Stand, Fehler> {
+pub fn hole_stand(relay: &str, geheimnis: &str, token: &str, name: &str) -> Result<Stand, FriendError> {
     let v = ruf(relay, "stand", ausweis(geheimnis, token, name))?;
-    serde_json::from_value(v).map_err(|e| Fehler::Netz(format!("Antwort unverstaendlich: {}", e)))
+    serde_json::from_value(v).map_err(|e| FriendError::Netz(format!("Antwort unverstaendlich: {}", e)))
 }
 
-pub fn sende_anfrage(
+pub fn send_request(
     relay: &str,
     geheimnis: &str,
     token: &str,
     name: &str,
     an: &str,
-    nachricht: &str,
-) -> Result<bool, Fehler> {
+    message: &str,
+) -> Result<bool, FriendError> {
     let mut v = mit(ausweis(geheimnis, token, name), "an", &ziel_norm(an));
-    v["nachricht"] = serde_json::Value::String(nachricht.to_string());
+    v["nachricht"] = serde_json::Value::String(message.to_string());
     let a = ruf(relay, "anfragen", v)?;
     // true = the other had already asked, we are friends immediately
     Ok(a.get("angenommen").and_then(|x| x.as_bool()).unwrap_or(false))
 }
 
-pub fn sende_annehmen(relay: &str, geheimnis: &str, token: &str, name: &str, von: &str) -> Result<(), Fehler> {
+pub fn sende_annehmen(relay: &str, geheimnis: &str, token: &str, name: &str, von: &str) -> Result<(), FriendError> {
     ruf(relay, "annehmen", mit(ausweis(geheimnis, token, name), "von", &ziel_norm(von))).map(|_| ())
 }
 
-pub fn sende_ablehnen(relay: &str, geheimnis: &str, token: &str, name: &str, wen: &str) -> Result<(), Fehler> {
+pub fn sende_ablehnen(relay: &str, geheimnis: &str, token: &str, name: &str, wen: &str) -> Result<(), FriendError> {
     ruf(relay, "ablehnen", mit(ausweis(geheimnis, token, name), "von", &ziel_norm(wen))).map(|_| ())
 }
 
-pub fn sende_entfernen(relay: &str, geheimnis: &str, token: &str, name: &str, wen: &str) -> Result<(), Fehler> {
+pub fn sende_entfernen(relay: &str, geheimnis: &str, token: &str, name: &str, wen: &str) -> Result<(), FriendError> {
     ruf(relay, "entfernen", mit(ausweis(geheimnis, token, name), "fvid", &ziel_norm(wen))).map(|_| ())
 }
 
@@ -916,7 +920,7 @@ pub fn sende_blockieren(
     name: &str,
     wen: &str,
     an: bool,
-) -> Result<(), Fehler> {
+) -> Result<(), FriendError> {
     let mut v = mit(ausweis(geheimnis, token, name), "fvid", &ziel_norm(wen));
     v["an"] = serde_json::Value::Bool(an);
     ruf(relay, "blockieren", v).map(|_| ())
@@ -928,7 +932,7 @@ pub fn sende_blockieren(
 // goes via the relay into the friend's mailbox (`/einladen`), the friend
 // fetches it on the next sync (`/einladungen`) and clears it with
 // `/einladung-weg`. Everything is additive: a relay without these paths
-// answers 404 "unbekannt" -> `Fehler::KeinKanal`, then the old way
+// answers 404 "unbekannt" -> `FriendError::KeinKanal`, then the old way
 // stays (link in the clipboard). The end-to-end key is in the
 // fragment (#k=) and NEVER goes through the relay - such links are rejected here already
 // before sending (and by the relay once more).
@@ -976,7 +980,7 @@ struct EinladungenAntwort {
 
 /// To which PC of the friend the invitation goes: a reachable one first,
 /// otherwise the first. Empty = the friend has no FreeViewer PC.
-pub fn einladung_ziel(fr: &Freund) -> String {
+pub fn einladung_ziel(fr: &Friend) -> String {
     let g = fr
         .geraete
         .iter()
@@ -1014,16 +1018,16 @@ pub fn einladung_link_ok(link: &str, base: &str) -> bool {
     }
 }
 
-/// Postfach abholen. `Fehler::KeinKanal` = aelterer Relay.
+/// Postfach abholen. `FriendError::KeinKanal` = aelterer Relay.
 pub fn hole_einladungen(
     relay: &str,
     geheimnis: &str,
     token: &str,
     name: &str,
-) -> Result<Vec<Einladung>, Fehler> {
+) -> Result<Vec<Einladung>, FriendError> {
     let v = ruf(relay, "einladungen", ausweis(geheimnis, token, name))?;
     let a: EinladungenAntwort = serde_json::from_value(v)
-        .map_err(|e| Fehler::Netz(format!("Antwort unverstaendlich: {}", e)))?;
+        .map_err(|e| FriendError::Netz(format!("Antwort unverstaendlich: {}", e)))?;
     Ok(a.einladungen)
 }
 
@@ -1036,7 +1040,7 @@ pub fn sende_einladung(
     an: &str,
     titel: &str,
     link: &str,
-) -> Result<bool, Fehler> {
+) -> Result<bool, FriendError> {
     let mut v = mit(ausweis(geheimnis, token, name), "an", &normalisieren(an));
     v["titel"] = serde_json::Value::String(titel.to_string());
     v["link"] = serde_json::Value::String(link.to_string());
@@ -1051,7 +1055,7 @@ pub fn sende_einladung_weg(
     token: &str,
     name: &str,
     ids: &[String],
-) -> Result<(), Fehler> {
+) -> Result<(), FriendError> {
     let mut v = ausweis(geheimnis, token, name);
     v["ids"] = serde_json::json!(ids);
     ruf(relay, "einladung-weg", v).map(|_| ())
@@ -1066,11 +1070,11 @@ pub fn sende_einladung_weg(
 /// `account::sync_async` (mailbox for the result).
 ///
 /// ```ignore
-/// let freunde = freunde::Dienst::vom_geraet(shared.relay_url.clone());
-/// freunde.starten();
+/// let friends = friends::Dienst::vom_geraet(shared.relay_url.clone());
+/// friends.launch();
 /// // in every frame of the UI:
-/// if let Some(m) = freunde.meldung() { /* show briefly */ }
-/// for f in freunde.liste() { /* draw row, button "Meeting" */ }
+/// if let Some(m) = friends.notice() { /* show briefly */ }
+/// for f in friends.liste() { /* draw row, button "Meeting" */ }
 /// ```
 pub struct Dienst {
     relay: String,
@@ -1080,7 +1084,7 @@ pub struct Dienst {
     buch: Mutex<Buch>,
     /// Mailbox for the UI. As an Arc, so that a background thread can
     /// write into it without holding on to the whole service.
-    postfach: Arc<Mutex<Vec<Meldung>>>,
+    postfach: Arc<Mutex<Vec<Notice>>>,
     gestartet: AtomicBool,
     beschaeftigt: AtomicBool,
     /// "Please sync soon" - every step sets it, the thread reads it.
@@ -1125,7 +1129,7 @@ impl Dienst {
     }
 
     /// Konto-Zeichen setzen (`None` = abgemeldet weiterarbeiten).
-    pub fn konto_setzen(&self, token: Option<&str>) {
+    pub fn set_account(&self, token: Option<&str>) {
         let neu = token.unwrap_or("").trim().to_string();
         let mut t = self.token.lock_ok();
         if *t != neu {
@@ -1148,7 +1152,7 @@ impl Dienst {
     }
 
     /// The background thread. May be called several times.
-    pub fn starten(self: &Arc<Self>) {
+    pub fn launch(self: &Arc<Self>) {
         if self.gestartet.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -1167,21 +1171,21 @@ impl Dienst {
 
     /// The friend list - online first. Comes from the cache,
     /// so it never waits for the network.
-    pub fn liste(&self) -> Vec<Freund> {
+    pub fn liste(&self) -> Vec<Friend> {
         self.buch.lock_ok().sortiert()
     }
 
     /// Alle offenen Anfragen, beide Richtungen.
-    pub fn offene_anfragen(&self) -> Vec<Anfrage> {
+    pub fn offene_anfragen(&self) -> Vec<Request> {
         self.buch.lock_ok().anfragen.clone()
     }
 
     /// Only those I have to answer.
-    pub fn eingehende(&self) -> Vec<Anfrage> {
+    pub fn eingehende(&self) -> Vec<Request> {
         self.buch.lock_ok().eingehende()
     }
 
-    pub fn ausgehende(&self) -> Vec<Anfrage> {
+    pub fn ausgehende(&self) -> Vec<Request> {
         self.buch.lock_ok().ausgehende()
     }
 
@@ -1189,8 +1193,8 @@ impl Dienst {
         self.buch.lock_ok().blockiert.clone()
     }
 
-    pub fn ist_freund(&self, fvid: &str) -> bool {
-        self.buch.lock_ok().ist_freund(fvid)
+    pub fn is_friend(&self, fvid: &str) -> bool {
+        self.buch.lock_ok().is_friend(fvid)
     }
 
     /// Reachable friend? (Offer one-click meeting/remote support only then.)
@@ -1198,7 +1202,7 @@ impl Dienst {
         self.buch
             .lock()
             .unwrap()
-            .freund(fvid)
+            .friend(fvid)
             .map(|f| f.online)
             .unwrap_or(false)
     }
@@ -1209,7 +1213,7 @@ impl Dienst {
     }
 
     /// Next message from the mailbox (and out of it).
-    pub fn meldung(&self) -> Option<Meldung> {
+    pub fn notice(&self) -> Option<Notice> {
         let mut p = self.postfach.lock_ok();
         if p.is_empty() {
             None
@@ -1218,7 +1222,7 @@ impl Dienst {
         }
     }
 
-    fn melde(&self, m: Meldung) {
+    fn melde(&self, m: Notice) {
         let mut p = self.postfach.lock_ok();
         if p.len() > 20 {
             p.remove(0);
@@ -1230,34 +1234,34 @@ impl Dienst {
     //
     // All four report back IMMEDIATELY whether the step is permissible at all
     // (self request, duplicate, not a friend ...). The network runs afterwards in
-    // its own thread; its result comes via meldung().
+    // its own thread; its result comes via notice().
 
     /// Friend request to a FreeViewer ID.
-    pub fn anfragen(&self, fvid: &str) -> Result<(), Fehler> {
+    pub fn anfragen(&self, fvid: &str) -> Result<(), FriendError> {
         self.anfragen_mit(fvid, "")
     }
 
     /// Like `anfragen`, but with a short greeting.
-    pub fn anfragen_mit(&self, fvid: &str, nachricht: &str) -> Result<(), Fehler> {
+    pub fn anfragen_mit(&self, fvid: &str, message: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         // @name and account ID live in the address book - that hangs on the account.
         if ist_ziel(&id) && !ist_id(&id) && !self.angemeldet() {
-            return Err(Fehler::KontoNoetig);
+            return Err(FriendError::AccountRequired);
         }
         {
             let mut b = self.buch.lock_ok();
             let name = self.name.lock_ok().clone();
-            b.anfrage_stellen(&id, &name)?;
+            b.submit_request(&id, &name)?;
             b.save();
         }
         let (relay, geheimnis, token, name) = self.zugang();
-        let nachricht = nachricht.to_string();
+        let message = message.to_string();
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
-            match sende_anfrage(&relay, &geheimnis, &token, &name, &id, &nachricht) {
-                Ok(true) => ich.melde(Meldung::SofortBefreundet(ziel_anzeige(&id))),
-                Ok(false) => ich.melde(Meldung::Angefragt(ziel_anzeige(&id))),
-                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+            match send_request(&relay, &geheimnis, &token, &name, &id, &message) {
+                Ok(true) => ich.melde(Notice::SofortBefreundet(target_label(&id))),
+                Ok(false) => ich.melde(Notice::Angefragt(target_label(&id))),
+                Err(e) => ich.melde(Notice::Fehlgeschlagen(e.to_string())),
             }
             ich.sofort.store(true, Ordering::SeqCst);
         });
@@ -1265,12 +1269,12 @@ impl Dienst {
     }
 
     /// Accept an incoming request - only with this are both friends.
-    pub fn annehmen(&self, fvid: &str) -> Result<(), Fehler> {
+    pub fn annehmen(&self, fvid: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         let wer;
         {
             let mut b = self.buch.lock_ok();
-            wer = b.anzeige_fuer(&id);
+            wer = b.label_for(&id);
             b.annehmen(&id)?;
             b.save();
         }
@@ -1278,8 +1282,8 @@ impl Dienst {
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
             match sende_annehmen(&relay, &geheimnis, &token, &name, &id) {
-                Ok(()) => ich.melde(Meldung::Angenommen(wer.clone())),
-                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+                Ok(()) => ich.melde(Notice::Angenommen(wer.clone())),
+                Err(e) => ich.melde(Notice::Fehlgeschlagen(e.to_string())),
             }
             ich.sofort.store(true, Ordering::SeqCst);
         });
@@ -1287,12 +1291,12 @@ impl Dienst {
     }
 
     /// Decline or withdraw the own request.
-    pub fn ablehnen(&self, fvid: &str) -> Result<(), Fehler> {
+    pub fn ablehnen(&self, fvid: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         let wer;
         {
             let mut b = self.buch.lock_ok();
-            wer = b.anzeige_fuer(&id);
+            wer = b.label_for(&id);
             b.ablehnen(&id)?;
             b.save();
         }
@@ -1300,8 +1304,8 @@ impl Dienst {
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
             match sende_ablehnen(&relay, &geheimnis, &token, &name, &id) {
-                Ok(()) => ich.melde(Meldung::Abgelehnt(wer.clone())),
-                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+                Ok(()) => ich.melde(Notice::Abgelehnt(wer.clone())),
+                Err(e) => ich.melde(Notice::Fehlgeschlagen(e.to_string())),
             }
             ich.sofort.store(true, Ordering::SeqCst);
         });
@@ -1309,12 +1313,12 @@ impl Dienst {
     }
 
     /// Freundschaft aufloesen (bei beiden).
-    pub fn entfernen(&self, fvid: &str) -> Result<(), Fehler> {
+    pub fn entfernen(&self, fvid: &str) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         let wer;
         {
             let mut b = self.buch.lock_ok();
-            wer = b.anzeige_fuer(&id);
+            wer = b.label_for(&id);
             b.entfernen(&id)?;
             b.save();
         }
@@ -1322,8 +1326,8 @@ impl Dienst {
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
             match sende_entfernen(&relay, &geheimnis, &token, &name, &id) {
-                Ok(()) => ich.melde(Meldung::Entfernt(wer.clone())),
-                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+                Ok(()) => ich.melde(Notice::Entfernt(wer.clone())),
+                Err(e) => ich.melde(Notice::Fehlgeschlagen(e.to_string())),
             }
             ich.sofort.store(true, Ordering::SeqCst);
         });
@@ -1331,7 +1335,7 @@ impl Dienst {
     }
 
     /// Block (`an = true`) or unblock again.
-    pub fn blockieren(&self, fvid: &str, an: bool) -> Result<(), Fehler> {
+    pub fn blockieren(&self, fvid: &str, an: bool) -> Result<(), FriendError> {
         let id = ziel_norm(fvid);
         {
             let mut b = self.buch.lock_ok();
@@ -1342,7 +1346,7 @@ impl Dienst {
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
             if let Err(e) = sende_blockieren(&relay, &geheimnis, &token, &name, &id, an) {
-                ich.melde(Meldung::Fehlgeschlagen(e.to_string()));
+                ich.melde(Notice::Fehlgeschlagen(e.to_string()));
             }
             ich.sofort.store(true, Ordering::SeqCst);
         });
@@ -1360,21 +1364,21 @@ impl Dienst {
     /// key. Permissible immediately or not; the delivery runs in the
     /// background and reports as `EinladungGesendet` or `EinladungNurLink`
     /// (relay without mailbox: then only the clipboard helps).
-    pub fn meeting_einladen(&self, fr: &Freund, titel: &str, link: &str) -> Result<(), Fehler> {
+    pub fn meeting_einladen(&self, fr: &Friend, titel: &str, link: &str) -> Result<(), FriendError> {
         let an = einladung_ziel(fr);
         if an.is_empty() {
-            return Err(Fehler::KeinGeraet);
+            return Err(FriendError::KeinGeraet);
         }
-        let link = link_fuer_relay(link).ok_or(Fehler::LinkMitSchluessel)?;
+        let link = link_fuer_relay(link).ok_or(FriendError::LinkWithKey)?;
         let titel = titel.trim().to_string();
-        let wer = fr.anzeige();
+        let wer = fr.display_name();
         let (relay, geheimnis, token, name) = self.zugang();
         let ich = self.klon_briefkasten();
         std::thread::spawn(move || {
             match sende_einladung(&relay, &geheimnis, &token, &name, &an, &titel, &link) {
-                Ok(_) => ich.melde(Meldung::EinladungGesendet(wer)),
-                Err(Fehler::KeinKanal) => ich.melde(Meldung::EinladungNurLink(wer)),
-                Err(e) => ich.melde(Meldung::Fehlgeschlagen(e.to_string())),
+                Ok(_) => ich.melde(Notice::EinladungGesendet(wer)),
+                Err(FriendError::KeinKanal) => ich.melde(Notice::EinladungNurLink(wer)),
+                Err(e) => ich.melde(Notice::Fehlgeschlagen(e.to_string())),
             }
         });
         Ok(())
@@ -1413,7 +1417,7 @@ impl Dienst {
         }
         *self.einladungen.lock_ok() = liste;
         for e in &neu {
-            self.melde(Meldung::EinladungErhalten(e.von(), e.titel.clone()));
+            self.melde(Notice::EinladungErhalten(e.von(), e.titel.clone()));
         }
         neu.len()
     }
@@ -1428,21 +1432,21 @@ impl Dienst {
                 self.einladungen_uebernehmen(liste);
             }
             // Older relay: stop asking for a while (it can be updated, after all).
-            Err(Fehler::KeinKanal) => self
+            Err(FriendError::KeinKanal) => self
                 .einl_pause_bis
                 .store(jetzt() + EINLADUNG_PAUSE_SEKUNDEN, Ordering::Relaxed),
             Err(_) => {}
         }
     }
 
-    /// Sofortigen Abgleich anstossen (kehrt sofort zurueck).
+    /// Sofortigen Abgleich anstossen (kehrt sofort go_back).
     pub fn synchronisieren(&self) {
         self.sofort.store(true, Ordering::SeqCst);
     }
 
     /// Sync NOW and here - blocks. Only for the background thread and
     /// headless operation; the UI uses `synchronisieren()`.
-    pub fn abgleich_blockierend(&self) -> Result<Stand, Fehler> {
+    pub fn abgleich_blockierend(&self) -> Result<Stand, FriendError> {
         let (relay, geheimnis, token, name) = self.zugang();
         let stand = hole_stand(&relay, &geheimnis, &token, &name)?;
         let mut b = self.buch.lock_ok();
@@ -1465,8 +1469,8 @@ impl Dienst {
                 self.verbunden.store(true, Ordering::Relaxed);
                 {
                     let b = self.buch.lock_ok();
-                    self.melde(Meldung::Abgeglichen {
-                        freunde: b.freunde.len(),
+                    self.melde(Notice::Abgeglichen {
+                        friends: b.friends.len(),
                         offen: b.anfragen.len(),
                     });
                 }
@@ -1474,7 +1478,7 @@ impl Dienst {
             }
             Err(e) => {
                 self.verbunden.store(false, Ordering::Relaxed);
-                self.melde(Meldung::Fehlgeschlagen(e.to_string()));
+                self.melde(Notice::Fehlgeschlagen(e.to_string()));
             }
         }
         self.beschaeftigt.store(false, Ordering::SeqCst);
@@ -1501,12 +1505,12 @@ impl Dienst {
 
 /// A small handle for background threads.
 struct Briefkasten {
-    postfach: Arc<Mutex<Vec<Meldung>>>,
+    postfach: Arc<Mutex<Vec<Notice>>>,
     sofort: Arc<AtomicBool>,
 }
 
 impl Briefkasten {
-    fn melde(&self, m: Meldung) {
+    fn melde(&self, m: Notice) {
         let mut p = self.postfach.lock_ok();
         if p.len() > 20 {
             p.remove(0);
@@ -1523,7 +1527,7 @@ mod tests {
 
     /// Own throwaway folder - a test NEVER touches the real configuration
     /// (the data loss of 31.07.2026 came from exactly that).
-    fn eigener_ordner(name: &str) -> std::path::PathBuf {
+    fn own_dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("fv-freunde-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         crate::ident::set_test_config_dir(d.clone());
@@ -1538,13 +1542,13 @@ mod tests {
         }
     }
 
-    fn eingehend(von: &str, name: &str) -> Anfrage {
-        Anfrage {
+    fn eingehend(von: &str, name: &str) -> Request {
+        Request {
             von_fvid: von.to_string(),
             name: name.to_string(),
             wann: 1_700_000_000,
             richtung: Richtung::Eingehend,
-            nachricht: String::new(),
+            message: String::new(),
             online: true,
             ..Default::default()
         }
@@ -1552,7 +1556,7 @@ mod tests {
 
     #[test]
     fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
-        eigener_ordner("isoliert");
+        own_dir("isoliert");
         let b = buch_mit_mir("111111111");
         b.save();
         assert!(Buch::path().starts_with(std::env::temp_dir()));
@@ -1564,18 +1568,18 @@ mod tests {
 
     #[test]
     fn speichern_und_laden_behaelt_alles() {
-        eigener_ordner("speichern");
+        own_dir("speichern");
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         b.annehmen("222222222").unwrap();
-        b.anfrage_eintragen(eingehend("333333333", "Handy"));
+        b.record_request(eingehend("333333333", "Handy"));
         b.blockieren("444444444", true).unwrap();
         b.save();
 
         let wieder = Buch::load();
-        assert_eq!(wieder.freunde.len(), 1);
-        assert_eq!(wieder.freunde[0].fvid, "222222222");
-        assert_eq!(wieder.freunde[0].name, "Laptop");
+        assert_eq!(wieder.friends.len(), 1);
+        assert_eq!(wieder.friends[0].fvid, "222222222");
+        assert_eq!(wieder.friends[0].name, "Laptop");
         assert_eq!(wieder.eingehende().len(), 1);
         assert_eq!(wieder.eingehende()[0].von_fvid, "333333333");
         assert!(wieder.ist_blockiert("444444444"));
@@ -1583,158 +1587,158 @@ mod tests {
     }
 
     #[test]
-    fn eine_leere_liste_ist_gueltig_und_holt_nichts_zurueck() {
-        eigener_ordner("leer");
+    fn empty_list_is_valid_and_fetches_nothing() {
+        own_dir("leer");
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Weg"));
+        b.record_request(eingehend("222222222", "Weg"));
         b.annehmen("222222222").unwrap();
         b.save();
         // second write creates the backup copy
         b.entfernen("222222222").unwrap();
         b.save();
         let wieder = Buch::load();
-        assert_eq!(wieder.freunde.len(), 0, "entfernte Freunde duerfen nicht zurueckkommen");
+        assert_eq!(wieder.friends.len(), 0, "entfernte Freunde duerfen nicht zurueckkommen");
     }
 
     #[test]
-    fn eine_kaputte_datei_faellt_auf_die_sicherung_zurueck() {
-        eigener_ordner("kaputt");
+    fn broken_file_falls_back_to_backup() {
+        own_dir("kaputt");
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         b.annehmen("222222222").unwrap();
         b.save();
         b.save(); // jetzt existiert die Sicherungskopie
         std::fs::write(Buch::path(), b"{ kaputt").unwrap();
         let wieder = Buch::load();
-        assert_eq!(wieder.freunde.len(), 1);
-        assert_eq!(wieder.freunde[0].fvid, "222222222");
+        assert_eq!(wieder.friends.len(), 1);
+        assert_eq!(wieder.friends[0].fvid, "222222222");
     }
 
     #[test]
-    fn eine_anfrage_an_sich_selbst_wird_abgewiesen() {
+    fn request_to_self_is_rejected() {
         let mut b = buch_mit_mir("111111111");
-        assert_eq!(b.anfrage_stellen("111111111", "Ich"), Err(Fehler::SelbstAnfrage));
+        assert_eq!(b.submit_request("111111111", "Ich"), Err(FriendError::SelfRequest));
         // also typed with spaces
-        assert_eq!(b.anfrage_stellen("111 111 111", "Ich"), Err(Fehler::SelbstAnfrage));
+        assert_eq!(b.submit_request("111 111 111", "Ich"), Err(FriendError::SelfRequest));
         assert!(b.anfragen.is_empty());
     }
 
     #[test]
     fn eine_unsinnige_id_wird_abgewiesen() {
         let mut b = buch_mit_mir("111111111");
-        assert_eq!(b.anfrage_stellen("123", "Kurz"), Err(Fehler::UngueltigeId));
-        assert_eq!(b.anfrage_stellen("", "Nichts"), Err(Fehler::UngueltigeId));
-        assert_eq!(b.anfrage_stellen("abc", "Buchstaben"), Err(Fehler::UngueltigeId));
+        assert_eq!(b.submit_request("123", "Kurz"), Err(FriendError::UngueltigeId));
+        assert_eq!(b.submit_request("", "Nichts"), Err(FriendError::UngueltigeId));
+        assert_eq!(b.submit_request("abc", "Buchstaben"), Err(FriendError::UngueltigeId));
     }
 
     #[test]
-    fn dieselbe_anfrage_zweimal_geht_nicht() {
+    fn same_request_twice_is_rejected() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_stellen("222222222", "Ich").unwrap();
-        assert_eq!(b.anfrage_stellen("222222222", "Ich"), Err(Fehler::SchonAngefragt));
+        b.submit_request("222222222", "Ich").unwrap();
+        assert_eq!(b.submit_request("222222222", "Ich"), Err(FriendError::SchonAngefragt));
         // andere Schreibweise, gleiche ID
-        assert_eq!(b.anfrage_stellen("222 222 222", "Ich"), Err(Fehler::SchonAngefragt));
+        assert_eq!(b.submit_request("222 222 222", "Ich"), Err(FriendError::SchonAngefragt));
         assert_eq!(b.ausgehende().len(), 1);
     }
 
     #[test]
-    fn eine_anfrage_an_einen_freund_geht_nicht() {
+    fn request_to_a_friend_is_rejected() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         b.annehmen("222222222").unwrap();
-        assert_eq!(b.anfrage_stellen("222222222", "Ich"), Err(Fehler::SchonBefreundet));
+        assert_eq!(b.submit_request("222222222", "Ich"), Err(FriendError::SchonBefreundet));
     }
 
     #[test]
-    fn ohne_anfrage_wird_niemand_still_zum_freund() {
+    fn nobody_becomes_friend_silently_without_request() {
         let mut b = buch_mit_mir("111111111");
         // request from a complete stranger is not present
-        assert_eq!(b.annehmen("999999999"), Err(Fehler::KeineAnfrage));
-        assert!(b.freunde.is_empty());
+        assert_eq!(b.annehmen("999999999"), Err(FriendError::NoRequest));
+        assert!(b.friends.is_empty());
         // an OUTGOING request does not make me a friend - the other
         // has to agree
-        b.anfrage_stellen("222222222", "Ich").unwrap();
-        assert_eq!(b.annehmen("222222222"), Err(Fehler::KeineAnfrage));
-        assert!(b.freunde.is_empty());
+        b.submit_request("222222222", "Ich").unwrap();
+        assert_eq!(b.annehmen("222222222"), Err(FriendError::NoRequest));
+        assert!(b.friends.is_empty());
     }
 
     #[test]
-    fn annehmen_macht_aus_der_anfrage_einen_freund() {
+    fn accept_turns_request_into_friend() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         assert_eq!(b.eingehende().len(), 1);
         let f = b.annehmen("222222222").unwrap();
         assert_eq!(f.fvid, "222222222");
         assert_eq!(f.name, "Laptop");
         assert!(f.seit > 0);
-        assert!(b.ist_freund("222222222"));
+        assert!(b.is_friend("222222222"));
         assert!(b.anfragen.is_empty(), "die Anfrage muss aus der Liste raus");
         // second click is not an error
         assert!(b.annehmen("222222222").is_ok());
-        assert_eq!(b.freunde.len(), 1);
+        assert_eq!(b.friends.len(), 1);
     }
 
     #[test]
-    fn beide_fragen_sich_gegenseitig_und_sind_sofort_freunde() {
+    fn mutual_requests_make_friends_immediately() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
-        b.anfrage_stellen("222222222", "Ich").unwrap();
-        assert!(b.ist_freund("222222222"));
+        b.record_request(eingehend("222222222", "Laptop"));
+        b.submit_request("222222222", "Ich").unwrap();
+        assert!(b.is_friend("222222222"));
         assert!(b.anfragen.is_empty());
     }
 
     #[test]
-    fn ablehnen_wirft_die_anfrage_weg_ohne_freundschaft() {
+    fn reject_drops_request_without_friendship() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         b.ablehnen("222222222").unwrap();
         assert!(b.anfragen.is_empty());
-        assert!(!b.ist_freund("222222222"));
-        assert_eq!(b.ablehnen("222222222"), Err(Fehler::KeineAnfrage));
+        assert!(!b.is_friend("222222222"));
+        assert_eq!(b.ablehnen("222222222"), Err(FriendError::NoRequest));
     }
 
     #[test]
-    fn eine_eigene_anfrage_laesst_sich_zuruecknehmen() {
+    fn own_request_can_be_withdrawn() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_stellen("222222222", "Ich").unwrap();
+        b.submit_request("222222222", "Ich").unwrap();
         assert_eq!(b.ausgehende().len(), 1);
         b.ablehnen("222222222").unwrap();
         assert!(b.anfragen.is_empty());
-        assert!(!b.ist_freund("222222222"));
+        assert!(!b.is_friend("222222222"));
     }
 
     #[test]
-    fn entfernen_nimmt_den_freund_aus_der_liste() {
+    fn remove_takes_friend_off_the_list() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Laptop"));
+        b.record_request(eingehend("222222222", "Laptop"));
         b.annehmen("222222222").unwrap();
         b.entfernen("222222222").unwrap();
-        assert!(!b.ist_freund("222222222"));
-        assert_eq!(b.entfernen("222222222"), Err(Fehler::KeinFreund));
+        assert!(!b.is_friend("222222222"));
+        assert_eq!(b.entfernen("222222222"), Err(FriendError::NotFriend));
     }
 
     #[test]
     fn blockieren_wirft_offene_anfragen_weg_und_sperrt_neue() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "Nervt"));
+        b.record_request(eingehend("222222222", "Nervt"));
         b.blockieren("222222222", true).unwrap();
         assert!(b.anfragen.is_empty());
         assert!(b.ist_blockiert("222222222"));
-        assert_eq!(b.anfrage_stellen("222222222", "Ich"), Err(Fehler::Blockiert));
-        // eine hereinkommende Anfrage prallt ab
-        assert!(!b.anfrage_eintragen(eingehend("222222222", "Nervt")));
+        assert_eq!(b.submit_request("222222222", "Ich"), Err(FriendError::Blockiert));
+        // eine hereinkommende Request prallt ab
+        assert!(!b.record_request(eingehend("222222222", "Nervt")));
         assert!(b.anfragen.is_empty());
         // freigeben
         b.blockieren("222222222", false).unwrap();
         assert!(!b.ist_blockiert("222222222"));
-        assert!(b.anfrage_eintragen(eingehend("222222222", "Nervt")));
+        assert!(b.record_request(eingehend("222222222", "Nervt")));
     }
 
     #[test]
     fn eingehend_und_ausgehend_bleiben_getrennt() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_eintragen(eingehend("222222222", "A"));
-        b.anfrage_stellen("333333333", "Ich").unwrap();
+        b.record_request(eingehend("222222222", "A"));
+        b.submit_request("333333333", "Ich").unwrap();
         assert_eq!(b.eingehende().len(), 1);
         assert_eq!(b.ausgehende().len(), 1);
         assert_eq!(b.eingehende()[0].gegenueber(), "222222222");
@@ -1746,12 +1750,12 @@ mod tests {
     #[test]
     fn der_stand_vom_relay_gewinnt() {
         let mut b = buch_mit_mir("111111111");
-        b.anfrage_stellen("999999999", "Ich").unwrap(); // nur lokal geraten
+        b.submit_request("999999999", "Ich").unwrap(); // nur lokal geraten
         let stand = Stand {
             ok: true,
             fvid: "111111111".into(),
-            konto: "justin".into(),
-            freunde: vec![Freund {
+            account: "justin".into(),
+            friends: vec![Friend {
                 fvid: "222222222".into(),
                 name: "Laptop".into(),
                 seit: 1_700_000_000,
@@ -1765,11 +1769,11 @@ mod tests {
             error: String::new(),
         };
         assert!(b.uebernehmen(&stand));
-        assert_eq!(b.freunde.len(), 1);
-        assert_eq!(b.freunde[0].fvid, "222222222");
+        assert_eq!(b.friends.len(), 1);
+        assert_eq!(b.friends[0].fvid, "222222222");
         assert_eq!(b.eingehende().len(), 1);
         assert_eq!(b.ausgehende().len(), 0, "die lokale Vermutung faellt weg");
-        assert_eq!(b.konto, "justin");
+        assert_eq!(b.account, "justin");
         assert!(b.ist_blockiert("444444444"));
         // derselbe Stand nochmal aendert nichts
         assert!(!b.uebernehmen(&stand));
@@ -1783,12 +1787,12 @@ mod tests {
             fvid: "111111111".into(),
             // the relay sends "richtung" in both lists, deliberately
             // the wrong way round here - the assignment by list must win
-            eingehend: vec![Anfrage {
+            eingehend: vec![Request {
                 von_fvid: "222222222".into(),
                 richtung: Richtung::Ausgehend,
                 ..Default::default()
             }],
-            ausgehend: vec![Anfrage {
+            ausgehend: vec![Request {
                 von_fvid: "333333333".into(),
                 richtung: Richtung::Eingehend,
                 ..Default::default()
@@ -1803,10 +1807,10 @@ mod tests {
     #[test]
     fn die_liste_stellt_online_nach_vorne() {
         let mut b = buch_mit_mir("111111111");
-        b.freunde = vec![
-            Freund { fvid: "222222222".into(), name: "Zebra".into(), online: false, ..Default::default() },
-            Freund { fvid: "333333333".into(), name: "Anton".into(), online: false, ..Default::default() },
-            Freund { fvid: "444444444".into(), name: "Willi".into(), online: true, ..Default::default() },
+        b.friends = vec![
+            Friend { fvid: "222222222".into(), name: "Zebra".into(), online: false, ..Default::default() },
+            Friend { fvid: "333333333".into(), name: "Anton".into(), online: false, ..Default::default() },
+            Friend { fvid: "444444444".into(), name: "Willi".into(), online: true, ..Default::default() },
         ];
         let s = b.sortiert();
         assert_eq!(s[0].name, "Willi");
@@ -1845,36 +1849,36 @@ mod tests {
         assert!(j.contains("\"fvid\":\"222222222\""), "{}", j);
         // and back again - exactly how the relay sends it
         let roh = r#"{"fvid":"333333333","name":"Handy","wann":5,"richtung":"ausgehend","nachricht":"hi","online":true}"#;
-        let b: Anfrage = serde_json::from_str(roh).unwrap();
+        let b: Request = serde_json::from_str(roh).unwrap();
         assert_eq!(b.von_fvid, "333333333");
         assert_eq!(b.richtung, Richtung::Ausgehend);
-        assert_eq!(b.nachricht, "hi");
+        assert_eq!(b.message, "hi");
     }
 
     #[test]
-    fn die_antwort_des_relays_laesst_sich_lesen() {
-        // woertlich so, wie relay.js /fv/freunde/stand antwortet
+    fn relay_reply_is_parseable() {
+        // woertlich so, wie relay.js /fv/friends/stand antwortet
         let roh = r#"{"ok":true,"fvid":"7902410486","konto":"","freunde":[
             {"fvid":"8358538558","name":"FV-Test-B","seit":1786250165,"online":true,"gesehen":1786250165580}],
             "eingehend":[{"fvid":"2130270636","name":"FV-Test-C","wann":1786250165,"richtung":"eingehend","nachricht":"","online":true}],
             "ausgehend":[],"blockiert":[]}"#;
         let s: Stand = serde_json::from_str(roh).unwrap();
         assert!(s.ok);
-        assert_eq!(s.freunde.len(), 1);
-        assert_eq!(s.freunde[0].name, "FV-Test-B");
-        assert!(s.freunde[0].online);
+        assert_eq!(s.friends.len(), 1);
+        assert_eq!(s.friends[0].name, "FV-Test-B");
+        assert!(s.friends[0].online);
         assert_eq!(s.eingehend.len(), 1);
         assert_eq!(s.eingehend[0].von_fvid, "2130270636");
     }
 
     #[test]
-    fn anzeige_faellt_auf_die_id_zurueck() {
-        let f = Freund { fvid: "497628420".into(), ..Default::default() };
-        assert_eq!(f.anzeige(), "497 628 420");
-        let g = Freund { fvid: "497628420".into(), name: "Buero-PC".into(), ..Default::default() };
-        assert_eq!(g.anzeige(), "Buero-PC");
+    fn label_falls_back_to_id() {
+        let f = Friend { fvid: "497628420".into(), ..Default::default() };
+        assert_eq!(f.display_name(), "497 628 420");
+        let g = Friend { fvid: "497628420".into(), name: "Buero-PC".into(), ..Default::default() };
+        assert_eq!(g.display_name(), "Buero-PC");
         assert_eq!(
-            Freund { online: true, ..Default::default() }.zuletzt(),
+            Friend { online: true, ..Default::default() }.zuletzt(),
             "online"
         );
     }
@@ -1882,7 +1886,7 @@ mod tests {
     #[test]
     fn namen_bleiben_harmlos() {
         let mut b = buch_mit_mir("111111111");
-        let a = b.anfrage_stellen("222222222", "  Pa\"tis {Laptop}  ").unwrap();
+        let a = b.submit_request("222222222", "  Pa\"tis {Laptop}  ").unwrap();
         assert_eq!(a.name, "Patis Laptop");
     }
 
@@ -1909,52 +1913,52 @@ mod tests {
     #[test]
     fn der_stand_aus_dem_adressbuch_wird_ganz_uebernommen() {
         let b = buch_aus_dem_adressbuch();
-        assert_eq!(b.konto, "anna");
+        assert_eq!(b.account, "anna");
         // Carla hat keinen PC - frueher waere sie still weggefallen
-        assert_eq!(b.freunde.len(), 3);
-        let carla = b.freund("k:u_CARLA").expect("Carla fehlt");
+        assert_eq!(b.friends.len(), 3);
+        let carla = b.friend("k:u_CARLA").expect("Carla fehlt");
         assert!(!carla.hat_pc());
         assert!(!carla.erreichbar());
         assert_eq!(carla.schluessel(), "k:u_CARLA");
         // requests without a PC number stay, via the account
         assert_eq!(b.eingehende().len(), 1);
         assert_eq!(b.eingehende()[0].gegenueber(), "k:u_EMIL");
-        assert_eq!(b.ausgehende()[0].anzeige(), "@frida");
+        assert_eq!(b.ausgehende()[0].display_name(), "@frida");
         assert!(b.ist_blockiert("@gustav"));
         assert!(b.ist_blockiert("k:u_GUSTAV"));
     }
 
     #[test]
-    fn ein_freund_ist_ueber_jeden_seiner_pcs_und_seinen_namen_zu_finden() {
+    fn friend_is_found_by_any_pc_and_name() {
         let b = buch_aus_dem_adressbuch();
-        assert!(b.ist_freund("222 222 222"));
-        assert!(b.ist_freund("333333333")); // sein Laptop
-        assert!(b.ist_freund("@Bert"));
-        assert!(b.ist_freund("k:u_BERT"));
-        assert_eq!(b.freund("333333333").unwrap().name, "Bert");
-        assert!(!b.ist_freund("555555555"));
-        assert!(!b.ist_freund("@niemand"));
+        assert!(b.is_friend("222 222 222"));
+        assert!(b.is_friend("333333333")); // sein Laptop
+        assert!(b.is_friend("@Bert"));
+        assert!(b.is_friend("k:u_BERT"));
+        assert_eq!(b.friend("333333333").unwrap().name, "Bert");
+        assert!(!b.is_friend("555555555"));
+        assert!(!b.is_friend("@niemand"));
         // the old friend without account stays as it was
-        assert!(b.ist_freund("444444444"));
+        assert!(b.is_friend("444444444"));
     }
 
     #[test]
-    fn annehmen_ueber_das_konto() {
+    fn accept_via_account() {
         let mut b = buch_aus_dem_adressbuch();
         let f = b.annehmen("k:u_EMIL").unwrap();
         assert_eq!(f.person, "u_EMIL");
         assert_eq!(f.handle, "emil");
         assert!(b.eingehende().is_empty());
-        assert!(b.ist_freund("@emil"));
+        assert!(b.is_friend("@emil"));
         assert_eq!(b.annehmen("@emil").unwrap().person, "u_EMIL"); // zweiter Klick
     }
 
     #[test]
-    fn entfernen_ablehnen_blockieren_ueber_das_konto() {
+    fn remove_reject_block_via_account() {
         let mut b = buch_aus_dem_adressbuch();
         b.entfernen("k:u_CARLA").unwrap();
-        assert!(!b.ist_freund("k:u_CARLA"));
-        assert_eq!(b.entfernen("k:u_CARLA"), Err(Fehler::KeinFreund));
+        assert!(!b.is_friend("k:u_CARLA"));
+        assert_eq!(b.entfernen("k:u_CARLA"), Err(FriendError::NotFriend));
         b.ablehnen("@frida").unwrap();
         assert!(b.ausgehende().is_empty());
         b.blockieren("k:u_EMIL", true).unwrap();
@@ -1967,15 +1971,15 @@ mod tests {
     }
 
     #[test]
-    fn anfrage_per_name_wird_als_name_gemerkt() {
+    fn request_by_name_is_stored_as_name() {
         let mut b = buch_mit_mir("111111111");
-        let a = b.anfrage_stellen("@Zora", "").unwrap();
+        let a = b.submit_request("@Zora", "").unwrap();
         assert_eq!(a.handle, "zora");
         assert_eq!(a.von_fvid, "");
         assert_eq!(a.gegenueber(), "@zora");
-        assert_eq!(b.anfrage_stellen("@zora", ""), Err(Fehler::SchonAngefragt));
-        assert_eq!(b.anfrage_stellen("@", ""), Err(Fehler::UngueltigeId));
-        assert_eq!(b.anfrage_stellen("hallo", ""), Err(Fehler::UngueltigeId));
+        assert_eq!(b.submit_request("@zora", ""), Err(FriendError::SchonAngefragt));
+        assert_eq!(b.submit_request("@", ""), Err(FriendError::UngueltigeId));
+        assert_eq!(b.submit_request("hallo", ""), Err(FriendError::UngueltigeId));
     }
 
     #[test]
@@ -1990,16 +1994,16 @@ mod tests {
         assert!(ist_ziel("497628420"));
         assert!(!ist_ziel("@"));
         assert!(!ist_ziel("12"));
-        assert_eq!(ziel_anzeige("497628420"), "497 628 420");
-        assert_eq!(ziel_anzeige("@Anna"), "@anna");
+        assert_eq!(target_label("497628420"), "497 628 420");
+        assert_eq!(target_label("@Anna"), "@anna");
     }
 
     #[test]
-    fn name_und_konto_brauchen_eine_anmeldung() {
-        eigener_ordner("konto-noetig");
+    fn name_and_account_need_a_login() {
+        own_dir("konto-noetig");
         let d = Dienst::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
-        assert_eq!(d.anfragen("@anna"), Err(Fehler::KontoNoetig));
-        assert_eq!(d.anfragen("k:u_ANNA"), Err(Fehler::KontoNoetig));
+        assert_eq!(d.anfragen("@anna"), Err(FriendError::AccountRequired));
+        assert_eq!(d.anfragen("k:u_ANNA"), Err(FriendError::AccountRequired));
         assert!(d.liste().is_empty());
     }
 
@@ -2011,20 +2015,20 @@ mod tests {
         let s: Stand = serde_json::from_str(roh).unwrap();
         let mut b = buch_mit_mir("111111111");
         b.uebernehmen(&s);
-        assert!(b.ist_freund("222222222"));
-        assert_eq!(b.freunde[0].schluessel(), "222222222");
+        assert!(b.is_friend("222222222"));
+        assert_eq!(b.friends[0].schluessel(), "222222222");
         assert!(b.ist_blockiert("333333333"));
     }
 
     // ------------------------------------------------ r32: Meeting-Einladung
 
-    fn freund_mit(fvid: &str, geraete: &[(&str, bool)]) -> Freund {
-        Freund {
+    fn friend_with(fvid: &str, geraete: &[(&str, bool)]) -> Friend {
+        Friend {
             fvid: fvid.to_string(),
             name: "Anna".to_string(),
             geraete: geraete
                 .iter()
-                .map(|(id, on)| FreundGeraet {
+                .map(|(id, on)| FriendDevice {
                     fvid: id.to_string(),
                     label: String::new(),
                     online: *on,
@@ -2083,21 +2087,21 @@ mod tests {
 
     #[test]
     fn die_einladung_geht_an_den_erreichbaren_pc() {
-        let f = freund_mit("111111111", &[("111111111", false), ("222222222", true)]);
+        let f = friend_with("111111111", &[("111111111", false), ("222222222", true)]);
         assert_eq!(einladung_ziel(&f), "222222222");
-        let f = freund_mit("111111111", &[("111111111", false), ("222222222", false)]);
+        let f = friend_with("111111111", &[("111111111", false), ("222222222", false)]);
         assert_eq!(einladung_ziel(&f), "111111111");
     }
 
     #[test]
     fn ohne_pc_gibt_es_kein_ziel() {
-        let f = Freund {
+        let f = Friend {
             person: "u_anna".into(),
             ..Default::default()
         };
         assert_eq!(einladung_ziel(&f), "");
         // only the old list: the ID itself
-        let f = Freund {
+        let f = Friend {
             fvid: "333 444 555".into(),
             ..Default::default()
         };
@@ -2105,7 +2109,7 @@ mod tests {
     }
 
     #[test]
-    fn ein_link_mit_schluessel_geht_nie_zum_relay() {
+    fn link_with_key_never_goes_to_relay() {
         assert_eq!(
             link_fuer_relay(" https://meet.fleitec.com/?room=1&pass=2 ").as_deref(),
             Some("https://meet.fleitec.com/?room=1&pass=2")
@@ -2132,7 +2136,7 @@ mod tests {
     }
 
     #[test]
-    fn die_antwort_mit_einladungen_laesst_sich_lesen() {
+    fn invites_reply_is_parseable() {
         let roh = r#"{"ok":true,"fvid":"1","konto":"","einladungen":[
             {"id":"a1","fvid":"222222222","name":"Anna","titel":"Mit Justin","link":"https://meet.fleitec.com/?room=1&pass=2","wann":5,"online":true,"neues_feld":1}]}"#;
         let a: EinladungenAntwort = serde_json::from_str(roh).unwrap();
@@ -2146,7 +2150,7 @@ mod tests {
 
     #[test]
     fn jede_neue_einladung_wird_nur_einmal_gemeldet() {
-        eigener_ordner("einl-melden");
+        own_dir("einl-melden");
         let d = Dienst::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
         let e = |id: &str| Einladung {
             id: id.into(),
@@ -2162,8 +2166,8 @@ mod tests {
         assert_eq!(d.einladungen_uebernehmen(vec![e("a"), e("b")]), 0);
         assert_eq!(d.einladungen_uebernehmen(vec![e("a"), e("b"), e("c")]), 1);
         let mut erhalten = 0;
-        while let Some(m) = d.meldung() {
-            if let Meldung::EinladungErhalten(von, titel) = m {
+        while let Some(m) = d.notice() {
+            if let Notice::EinladungErhalten(von, titel) = m {
                 assert_eq!(von, "Anna");
                 assert_eq!(titel, "Mit Justin");
                 erhalten += 1;
@@ -2179,21 +2183,21 @@ mod tests {
     }
 
     #[test]
-    fn der_einladungslink_mit_schluessel_wird_schon_vor_dem_senden_abgewiesen() {
-        eigener_ordner("einl-schluessel");
+    fn invite_link_with_key_rejected_before_send() {
+        own_dir("einl-schluessel");
         let d = Dienst::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
-        let f = freund_mit("111111111", &[("111111111", true)]);
+        let f = friend_with("111111111", &[("111111111", true)]);
         assert_eq!(
             d.meeting_einladen(&f, "x", "https://meet.fleitec.com/?room=1#k=abc"),
-            Err(Fehler::LinkMitSchluessel)
+            Err(FriendError::LinkWithKey)
         );
-        let ohne_pc = Freund {
+        let ohne_pc = Friend {
             person: "u_anna".into(),
             ..Default::default()
         };
         assert_eq!(
             d.meeting_einladen(&ohne_pc, "x", "https://meet.fleitec.com/?room=1"),
-            Err(Fehler::KeinGeraet)
+            Err(FriendError::KeinGeraet)
         );
     }
 
@@ -2203,7 +2207,7 @@ mod tests {
         let (port, rx) = mini_relay(404, r#"{"error":"unbekannt"}"#);
         let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
         let r = sende_einladung(&relay, &"ab".repeat(16), "", "Test", "222222222", "T", "https://meet.fleitec.com/?room=1");
-        assert_eq!(r, Err(Fehler::KeinKanal));
+        assert_eq!(r, Err(FriendError::KeinKanal));
         let roh = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(roh.starts_with("POST /fv/freunde/einladen "), "{}", roh);
 
@@ -2211,7 +2215,7 @@ mod tests {
         let (port, _rx) = mini_relay(404, r#"{"error":"Diese FreeViewer-ID gibt es nicht"}"#);
         let relay = format!("ws://127.0.0.1:{}/fv/ws", port);
         let r = sende_einladung(&relay, &"ab".repeat(16), "", "Test", "222222222", "T", "https://meet.fleitec.com/?room=1");
-        assert_eq!(r, Err(Fehler::Netz("Diese FreeViewer-ID gibt es nicht".into())));
+        assert_eq!(r, Err(FriendError::Netz("Diese FreeViewer-ID gibt es nicht".into())));
     }
 
     #[test]

@@ -250,7 +250,7 @@ pub fn login(relay_url: &str, user: &str, pass: &str) -> Result<Session> {
     })
 }
 
-/// Abgleich in einem Rutsch: eigene Liste hoch, zusammengefuehrte zurueck.
+/// Abgleich in einem Rutsch: eigene Liste hoch, zusammengefuehrte go_back.
 pub fn sync(relay_url: &str, token: &str, devices: Vec<SyncDevice>) -> Result<SyncReply> {
     let body = serde_json::to_string(&SyncReq { devices }).map_err(|e| anyhow!("{}", e))?;
     let (status, text) = authed_call(Verb::Post, &url(relay_url, "data"), token, &body)?;
@@ -541,7 +541,7 @@ pub enum SetupOut {
     Failed(String),
 }
 
-/// Code erzeugen im Hintergrund (Oberflaeche wartet nie).
+/// Code erzeugen im Background (Oberflaeche wartet nie).
 pub fn setup_create_async(
     relay_url: String,
     token: String,
@@ -565,7 +565,7 @@ pub fn setup_create_async(
     });
 }
 
-/// Posteingang holen im Hintergrund.
+/// Posteingang holen im Background.
 pub fn setup_inbox_async(
     relay_url: String,
     token: String,

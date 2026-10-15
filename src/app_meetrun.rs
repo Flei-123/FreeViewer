@@ -9,7 +9,7 @@ impl App {
         let bilder: meetfenster::Bilder;
         // Whose screen is currently seen large - this determines
         // who we send our zoom request to.
-        let mut haupt_schirm_peer: Option<u64> = None;
+        let mut main_screen_peer: Option<u64> = None;
         {
             let n = match self.nativ_meet.as_mut() {
                 Some(n) => n,
@@ -24,7 +24,7 @@ impl App {
                     n.kamera_schalten(true);
                 }
             }
-            let z = n.zustand();
+            let z = n.state();
             // Only when taking images (--meetshot): let waiting people in right away.
             // Otherwise you would never see a second participant in the proof image.
             if self.meet_shot_join && !z.wartende.is_empty() {
@@ -90,12 +90,12 @@ impl App {
                 .retain(|k, _| n.schirme.bilder.contains_key(k));
             // The own shared image. Without this tile you see nothing
             // at all when sharing - the button then seems to have no effect.
-            match n.eigen_schirm.as_ref() {
+            match n.own_screen.as_ref() {
                 Some((w, h, px)) => {
                     let frisch = self
-                        .nativ_eigen_schirm
+                        .native_own_screen
                         .as_ref()
-                        .map(|(alt, _)| *alt != n.eigen_schirm_stand)
+                        .map(|(alt, _)| *alt != n.own_screen_state)
                         .unwrap_or(true);
                     if frisch {
                         let bild = egui::ColorImage::from_rgba_unmultiplied(
@@ -107,10 +107,10 @@ impl App {
                             bild,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.nativ_eigen_schirm = Some((n.eigen_schirm_stand, tex));
+                        self.native_own_screen = Some((n.own_screen_state, tex));
                     }
                 }
-                None => self.nativ_eigen_schirm = None,
+                None => self.native_own_screen = None,
             }
 
             // ---- Sicht zusammenstellen
@@ -122,19 +122,19 @@ impl App {
             let mut leute = vec![meetfenster::Person {
                 id: z.ich,
                 name: ich_name,
-                stumm: n.stumm,
+                is_muted: n.is_muted,
                 kamera_aus: !n.kamera_an,
                 hand: n.hand,
                 gastgeber: z.gastgeber != 0 && z.gastgeber == z.ich,
                 fvid: String::new(),
                 ich: true,
-                spricht: !n.stumm && n.pegel > 0.06,
+                spricht: !n.is_muted && n.pegel > 0.06,
             }];
             for t in z.leute.iter() {
                 leute.push(meetfenster::Person {
                     id: t.id,
                     name: t.name.clone(),
-                    stumm: t.ton_aus,
+                    is_muted: t.ton_aus,
                     kamera_aus: t.bild_aus,
                     hand: t.hand,
                     gastgeber: z.gastgeber != 0 && z.gastgeber == t.id,
@@ -164,19 +164,19 @@ impl App {
             let ungelesen = chat.len().saturating_sub(self.meet_gelesen) as u32;
 
             let mut protokoll = n.protokoll.clone();
-            for meldung in [&n.meldung, &n.kamera_meldung, &n.schirm_meldung] {
-                if !meldung.is_empty() {
-                    protokoll.push(meldung.clone());
+            for notice in [&n.notice, &n.camera_notice, &n.screen_notice] {
+                if !notice.is_empty() {
+                    protokoll.push(notice.clone());
                 }
             }
             protokoll.push(format!(
                 "Ton: {} raus / {} rein · Bild: {} raus / {} rein",
-                zahlen.gesendet, zahlen.empfangen, zahlen.bild_gesendet, zahlen.bild_empfangen
+                zahlen.gesendet, zahlen.receive, zahlen.bild_gesendet, zahlen.frame_received
             ));
-            if n.schirm_an {
+            if n.screen_on {
                 protokoll.push(format!(
                     "Bildschirm geteilt: {} Bilder gesendet",
-                    n.schirm_gesendet
+                    n.screen_sent
                 ));
             }
             protokoll.push(format!("Meine Nummer: {}", n.meine_fvid()));
@@ -188,7 +188,7 @@ impl App {
             };
             let tippen: Vec<String> = n.tippen.iter().map(|id| n.name_von(*id)).collect();
             // The server text about the waiting room is in the last message.
-            let warte_text = if z.im_warteraum { n.meldung.clone() } else { String::new() };
+            let warte_text = if z.im_warteraum { n.notice.clone() } else { String::new() };
             let mut schirme: Vec<(u64, String)> = self
                 .nativ_schirme
                 .keys()
@@ -196,30 +196,30 @@ impl App {
                 .collect();
             // The OWN share belongs on the stage too - like in the
             // browser. Otherwise you click "Screen" and see nothing.
-            if n.schirm_an && self.nativ_eigen_schirm.is_some() {
+            if n.screen_on && self.native_own_screen.is_some() {
                 schirme.push((z.ich, "Du".to_string()));
             }
 
             let ton_namen = n.ton_namen();
             // Whose screen is the main content? The first foreign one.
-            let schirm_haupt: Option<u64> = schirme
+            let screen_main: Option<u64> = schirme
                 .iter()
                 .map(|(id, _)| *id)
                 .find(|id| *id != z.ich)
                 .or_else(|| schirme.first().map(|(id, _)| *id));
-            haupt_schirm_peer = schirm_haupt;
+            main_screen_peer = screen_main;
             sicht = meetfenster::Sicht {
                 raum: if z.raum.is_empty() { m.id.clone() } else { z.raum.clone() },
                 titel: if z.titel.is_empty() { m.titel.clone() } else { z.titel.clone() },
                 gastgeber: n.bin_gastgeber(),
-                verbindung: if zahlen.verbunden {
+                connection: if zahlen.verbunden {
                     "direkt verbunden".to_string()
                 } else if z.verbunden {
                     "Medien verbinden …".to_string()
                 } else {
                     "verbinde …".to_string()
                 },
-                verbindung_ton: if zahlen.verbunden {
+                connect_tone: if zahlen.verbunden {
                     meetfenster::Ton::Gut
                 } else {
                     meetfenster::Ton::Warn
@@ -234,16 +234,16 @@ impl App {
                 warteraum_an: z.warteraum_an,
                 chat,
                 protokoll,
-                stumm: n.stumm,
+                is_muted: n.is_muted,
                 kamera_an: n.kamera_an,
-                schirm_an: n.schirm_an,
+                screen_on: n.screen_on,
                 hand: n.hand,
                 steuer_frei: n.steuer_frei,
                 steuer_anfragen: n.steuer_anfragen(),
                 steuer_erlaubt: n.steuer_erlaubt(),
                 steuer_gefragt: n.steuer_gefragt,
                 steuer_zusage: n.steuer_zusage(),
-                fremd_schirm: n.fremder_teilt(),
+                foreign_screen: n.fremder_teilt(),
                 schirme,
                 ungelesen,
                 tippen,
@@ -261,7 +261,7 @@ impl App {
                 // Pointer OF THE ONE whose screen is currently seen large.
                 // If it is the OWN one, nothing comes back over the network -
                 // then look it up directly.
-                teiler_zeiger: match schirm_haupt {
+                teiler_zeiger: match screen_main {
                     Some(p) if p == z.ich => n.eigener_zeiger(),
                     Some(p) => n.zeiger_des_teilers(p),
                     None => None,
@@ -270,12 +270,12 @@ impl App {
                 // to the others. Whoever looks at the own share must still know the
                 // crop - otherwise it is zoomed TWICE and
                 // the image turns black from about 140 %.
-                schirm_bereich: match schirm_haupt {
-                    Some(p) if p == z.ich => Some(n.schirm_bereich),
+                screen_region: match screen_main {
+                    Some(p) if p == z.ich => Some(n.screen_region),
                     Some(p) => n.bereich_des_teilers(p),
                     None => None,
                 },
-                scharf_moeglich: match schirm_haupt {
+                scharf_moeglich: match screen_main {
                     Some(p) if p == z.ich => true,
                     Some(p) => n.kann_scharf(p),
                     None => false,
@@ -299,7 +299,7 @@ impl App {
                     .map(|(k, (_, t))| (*k, t.clone()))
                     .collect(),
                 schirme: self
-                    .nativ_eigen_schirm
+                    .native_own_screen
                     .as_ref()
                     .map(|(_, t)| (z.ich, t.clone()))
                     .into_iter()
@@ -366,7 +366,7 @@ impl App {
         // Tell the sender which crop we are looking at. It then cuts
         // exactly that from its native capture - same bandwidth, but
         // real pixels. Without this message it would stay with upscaling.
-        if let (Some(p), Some(n)) = (haupt_schirm_peer, self.nativ_meet.as_mut()) {
+        if let (Some(p), Some(n)) = (main_screen_peer, self.nativ_meet.as_mut()) {
             let f = self.meet_z.zoomfenster;
             let zoomt = self.meet_z.zoom > 1.001;
             n.zoom_wunsch(p, f, zoomt && self.meet_z.scharf);
@@ -377,31 +377,31 @@ impl App {
         // If sharing fails, it MUST become visible. Previously it was
         // only in the info tab - for the user it looked as if nothing
         // happened at all.
-        let mut schirm_fehler: Option<String> = None;
+        let mut screen_error: Option<String> = None;
         for a in aktionen {
             let n = match self.nativ_meet.as_mut() {
                 Some(n) => n,
                 None => break,
             };
             match a {
-                meetfenster::Aktion::Stumm(v) => n.stumm_schalten(v),
+                meetfenster::Aktion::Muted(v) => n.toggle_muted(v),
                 meetfenster::Aktion::Kamera(v) => n.kamera_schalten(v),
-                meetfenster::Aktion::Schirm(v) => {
-                    if let Some(m) = n.schirm_schalten_melden(v, 0) {
-                        schirm_fehler = Some(m);
+                meetfenster::Aktion::Screen(v) => {
+                    if let Some(m) = n.report_toggle_screen(v, 0) {
+                        screen_error = Some(m);
                     }
                 }
-                meetfenster::Aktion::SchirmWaehlen(i) => {
-                    if let Some(m) = n.schirm_schalten_melden(true, i) {
-                        schirm_fehler = Some(m);
+                meetfenster::Aktion::PickScreen(i) => {
+                    if let Some(m) = n.report_toggle_screen(true, i) {
+                        screen_error = Some(m);
                     }
                 }
-                meetfenster::Aktion::FensterWaehlen(k) => {
+                meetfenster::Aktion::PickWindow(k) => {
                     if let Some(m) = n.quelle_schalten_melden(
                         true,
                         meetschirm::Quelle::Fenster(k),
                     ) {
-                        schirm_fehler = Some(m);
+                        screen_error = Some(m);
                     }
                 }
                 meetfenster::Aktion::Rahmen(v) => n.rahmen_schalten(v),
@@ -409,23 +409,23 @@ impl App {
                 meetfenster::Aktion::Avatar(v) => n.avatar_schalten(v),
                 meetfenster::Aktion::AvatarAussehen(a) => n.avatar_setzen(a),
                 meetfenster::Aktion::Hand(v) => n.hand_heben(v),
-                meetfenster::Aktion::Steuerung(v) => n.steuerung_freigeben(v),
-                meetfenster::Aktion::SteuerungAnfragen => n.steuerung_anfragen(),
-                meetfenster::Aktion::SteuerungAntwort(id, ja) => n.steuerung_antworten(id, ja),
-                meetfenster::Aktion::SteuerungZurueck(p) => n.steuerung_zuruecknehmen(p),
-                meetfenster::Aktion::Senden(t) => {
-                    n.eingabe = t;
-                    n.senden();
+                meetfenster::Aktion::Control(v) => n.release_control(v),
+                meetfenster::Aktion::RequestControl => n.request_control(),
+                meetfenster::Aktion::ControlReply(id, ja) => n.reply_control(id, ja),
+                meetfenster::Aktion::ControlGiveBack(p) => n.revoke_control(p),
+                meetfenster::Aktion::Send(t) => {
+                    n.input_text = t;
+                    n.send_out();
                 }
                 meetfenster::Aktion::Tippt(v) => n.tippt(v),
                 meetfenster::Aktion::Einlassen(id) => n.einlassen(id),
                 meetfenster::Aktion::Abweisen(id) => n.abweisen(id),
                 meetfenster::Aktion::AlleEinlassen => n.alle_einlassen(),
                 meetfenster::Aktion::Warteraum(v) => n.warteraum(v),
-                meetfenster::Aktion::AlleStumm => n.gastgeber_aktion("mute-all", None),
+                meetfenster::Aktion::MuteAll => n.gastgeber_aktion("mute-all", None),
                 meetfenster::Aktion::Stummschalten(id) => n.gastgeber_aktion("mute", Some(id)),
                 meetfenster::Aktion::Rauswerfen(id) => n.gastgeber_aktion("kick", Some(id)),
-                meetfenster::Aktion::Beenden => {
+                meetfenster::Aktion::Leave => {
                     n.gastgeber_aktion("end", None);
                     verlassen = true;
                 }
@@ -468,7 +468,7 @@ impl App {
                     };
                     n.ton_waehlen(mik, spk);
                 }
-                meetfenster::Aktion::GeraeteNeuLesen => {
+                meetfenster::Aktion::ReloadDevices => {
                     // Re-reading runs in the background again - the
                     // PnP query takes almost a second on Windows.
                     self.meet_win.geraete_da = false;
@@ -493,7 +493,7 @@ impl App {
                 }
             }
         }
-        if let Some(m) = schirm_fehler {
+        if let Some(m) = screen_error {
             self.meet_win.toast = Some((m, std::time::Instant::now()));
         }
         // When sharing starts: small window opens, large window
@@ -507,7 +507,7 @@ impl App {
         // keeps running, drawing explicitly continues during the share
         // - Windows otherwise sends no draw requests to a
         // minimized window.
-        let teilt_jetzt = self.nativ_meet.as_ref().map(|n| n.schirm_an).unwrap_or(false);
+        let teilt_jetzt = self.nativ_meet.as_ref().map(|n| n.screen_on).unwrap_or(false);
         if teilt_jetzt != self.meet_teilt_war {
             self.meet_teilt_war = teilt_jetzt;
             if teilt_jetzt {

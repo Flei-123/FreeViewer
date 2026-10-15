@@ -112,7 +112,7 @@ pub(crate) fn cli_audioloop(i: usize) -> eframe::Result<()> {
 //   freeviewer --e2evektor
 pub(crate) fn cli_e2evektor() -> eframe::Result<()> {
     let roh: [u8; 32] = std::array::from_fn(|i| (i * 7 % 251) as u8);
-    let k = meete2e::Schluessel::aus_roh(roh);
+    let k = meete2e::Key::aus_roh(roh);
     // Fixed sender salt, so the output is reproducible (format v2).
     let salt: meete2e::Salt = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8];
     println!("SCHLUESSEL {}", k.als_text());
@@ -151,10 +151,10 @@ pub(crate) fn cli_e2evektor() -> eframe::Result<()> {
 // (including crop and painted mouse pointer) and save it as PNG.
 // Only that proves whether menus and pointer really make it
 // through - in a running meeting you only see it, you don't measure it.
-//   freeviewer --schirmshot <datei.png> [schirm-nr] [wartesekunden] [x y b h]
+//   freeviewer --schirmshot <file.png> [screen-nr] [wartesekunden] [x y b h]
 pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let datei = args
+    let file = args
         .get(i + 1)
         .cloned()
         .unwrap_or_else(|| "schirm.png".to_string());
@@ -194,8 +194,8 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
             if h264::nv12_to_rgba(&b.nv12, b.breite, b.hoehe, b.breite as usize, b.hoehe, &mut rgba)
             {
                 match image::RgbaImage::from_raw(b.breite, b.hoehe, rgba) {
-                    Some(img) => match img.save(&datei) {
-                        Ok(_) => println!("SCHIRMSHOT OK {} ({}x{})", datei, b.breite, b.hoehe),
+                    Some(img) => match img.save(&file) {
+                        Ok(_) => println!("SCHIRMSHOT OK {} ({}x{})", file, b.breite, b.hoehe),
                         Err(e) => println!("SCHIRMSHOT SCHREIBFEHLER {}", e),
                     },
                     None => println!("SCHIRMSHOT PUFFER PASST NICHT"),
@@ -264,7 +264,7 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
         ("Einstellungen", View::Settings, SettingsTab::General),
         ("Konto", View::Settings, SettingsTab::Account),
         ("Meet", View::Meet, SettingsTab::General),
-        ("Freunde", View::Freunde, SettingsTab::General),
+        ("Freunde", View::Friends, SettingsTab::General),
     ] {
         app.view = view;
         app.stab = stab;
@@ -316,7 +316,7 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     app.meet_win_open(meet::Meeting {
         id: "482-913-770".to_string(),
         titel: "Wochenbesprechung".to_string(),
-        passwort: "test1234".to_string(),
+        passphrase: "test1234".to_string(),
         termin_text: String::new(),
         e2e: String::new(),
     });

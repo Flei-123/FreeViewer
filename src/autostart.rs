@@ -1,4 +1,4 @@
-//! "Mit Windows starten" - the Run key of the logged in user.
+//! "Mit Windows launch" - the Run key of the logged in user.
 //!
 //! Deliberately HKCU and not a machine wide key: it needs no admin rights and
 //! the host then runs inside the user's own session, which is exactly what

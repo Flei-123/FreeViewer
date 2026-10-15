@@ -288,7 +288,7 @@ pub(crate) fn dot(ui: &mut egui::Ui, online: bool) {
     ui.painter().circle_filled(rect.center(), 4.0, c);
 }
 
-/// Zustand des eigenen Rechners, oben rechts.
+/// State des eigenen Rechners, oben rechts.
 pub(crate) fn status_pill(ui: &mut egui::Ui, ok: bool, text: &str) {
     egui::Frame::group(ui.style())
         .fill(if ok {

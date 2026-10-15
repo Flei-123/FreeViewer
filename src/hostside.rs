@@ -523,7 +523,7 @@ impl Session {
                 // already happened, so both sides can show the same four
                 // digit code and see they are talking to each other.
                 let from = clean_peer_name(&String::from_utf8_lossy(&data[1..]));
-                let friend_like = crate::freunde::has_friend_named(&from);
+                let friend_like = crate::friends::has_friend_named(&from);
                 let key = crypto::session_key(secret, client_pub, salt);
                 let code = crypto::session_code(&key);
                 shared.knock_answer.store(0, Ordering::Relaxed);
@@ -1063,7 +1063,7 @@ pub fn video_selftest(rounds: u32) -> String {
         #[cfg(windows)]
         let mut direkt: Option<crate::h264::Encoder> = None;
         #[cfg(windows)]
-        let (mut t_dir, mut b_dir, mut n_dir, mut dir_fehler) =
+        let (mut t_dir, mut b_dir, mut n_dir, mut dir_error) =
             (0u128, 0usize, 0u32, String::new());
         let (mut t_cap, mut t_scale, mut t_nv, mut t_264, mut t_jpg) =
             (0u128, 0u128, 0u128, 0u128, 0u128);
@@ -1136,7 +1136,7 @@ pub fn video_selftest(rounds: u32) -> String {
             {
                 let t = Instant::now();
                 if let Some((dev, tex)) = cap.nv12_gpu(dw, dh) {
-                    if direkt.is_none() && dir_fehler.is_empty() {
+                    if direkt.is_none() && dir_error.is_empty() {
                         match crate::h264::Encoder::new_d3d(
                             &dev,
                             dw,
@@ -1145,7 +1145,7 @@ pub fn video_selftest(rounds: u32) -> String {
                             prof.bitrate,
                         ) {
                             Ok(e) => direkt = Some(e),
-                            Err(e) => dir_fehler = e.to_string(),
+                            Err(e) => dir_error = e.to_string(),
                         }
                     }
                     if let Some(e) = direkt.as_mut() {
@@ -1158,15 +1158,15 @@ pub fn video_selftest(rounds: u32) -> String {
                                 }
                             }
                             Err(err) => {
-                                if dir_fehler.is_empty() {
-                                    dir_fehler = err.to_string();
+                                if dir_error.is_empty() {
+                                    dir_error = err.to_string();
                                 }
                                 direkt = None;
                             }
                         }
                     }
-                } else if dir_fehler.is_empty() {
-                    dir_fehler = "keine NV12-Textur von der Aufnahme".to_string();
+                } else if dir_error.is_empty() {
+                    dir_error = "keine NV12-Textur von der Aufnahme".to_string();
                 }
             }
 
@@ -1208,8 +1208,8 @@ pub fn video_selftest(rounds: u32) -> String {
                     n_dir,
                     b_dir as f32 / n_dir.max(1) as f32 / 1024.0,
                 ));
-            } else if !dir_fehler.is_empty() {
-                out.push_str(&format!("DIREKT: geht nicht - {}\n", dir_fehler));
+            } else if !dir_error.is_empty() {
+                out.push_str(&format!("DIREKT: geht nicht - {}\n", dir_error));
             }
         }
         out.push_str(&format!(
@@ -1245,7 +1245,7 @@ struct DirektZahlen {
 /// (`aus`) and the session continues without a break on the old way.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
-fn direkt_senden(
+fn send_direct(
     cap: &mut Box<dyn capture::Backend>,
     enc: &mut Option<crate::h264::Encoder>,
     aus: &mut bool,
@@ -1514,7 +1514,7 @@ fn capture_loop(
                     #[cfg(windows)]
                     if will_video {
                         let key = key_grab.swap(false, Ordering::Relaxed);
-                        erledigt = direkt_senden(
+                        erledigt = send_direct(
                             &mut cap,
                             &mut direkt_enc,
                             &mut direkt_aus,
@@ -1578,7 +1578,7 @@ fn capture_loop(
                         #[cfg(windows)]
                         if will_video {
                             key_grab.store(false, Ordering::Relaxed);
-                            erledigt = direkt_senden(
+                            erledigt = send_direct(
                                 &mut cap,
                                 &mut direkt_enc,
                                 &mut direkt_aus,

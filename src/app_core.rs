@@ -17,9 +17,9 @@ impl App {
             hint: String::new(),
             pw_fixed: ident::has_fixed_password(),
             book: partners::Book::load(),
-            freunde: None,
-            freunde_id: String::new(),
-            freunde_meldung: String::new(),
+            friends: None,
+            friends_id: String::new(),
+            friends_notice: String::new(),
             remember_pw: false,
             renaming: None,
             session: None,
@@ -81,7 +81,7 @@ impl App {
             nativ_schirme: std::collections::HashMap::new(),
             meet_teilt_war: false,
             nativ_eigen: None,
-            nativ_eigen_schirm: None,
+            native_own_screen: None,
             vorprobe: meetui::Vorprobe::default(),
             meet_z: meetfenster::Fensterzustand::default(),
             meet_gelesen: 0,
@@ -327,7 +327,7 @@ impl App {
                 self.meet_win_open(meet::Meeting {
                     id: room.clone(),
                     titel: String::new(),
-                    passwort: pass.clone(),
+                    passphrase: pass.clone(),
                     termin_text: String::new(),
                     e2e: String::new(),
                 });
@@ -586,11 +586,11 @@ impl App {
             // The counter on "Friends" matters: a friend
             // request nobody sees is not a request.
             let offen = self
-                .freunde
+                .friends
                 .as_ref()
                 .map(|d| d.eingehende().len() + d.einladungen().len())
                 .unwrap_or(0);
-            let freunde_text = if offen > 0 {
+            let friends_text = if offen > 0 {
                 format!("Freunde ({})", offen)
             } else {
                 "Freunde".to_string()
@@ -598,7 +598,7 @@ impl App {
             for (v, name) in [
                 (View::Start, i18n::t("nav.start").to_string()),
                 (View::Devices, i18n::t("nav.devices").to_string()),
-                (View::Freunde, freunde_text),
+                (View::Friends, friends_text),
                 (View::Settings, i18n::t("nav.settings").to_string()),
             ] {
                 if tab(ui, &name, self.view == v).clicked() {
@@ -606,14 +606,14 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let zustand = self.shared.net_state();
-                let online = online && zustand == 1;
+                let state = self.shared.net_state();
+                let online = online && state == 1;
                 status_pill(
                     ui,
                     online,
                     if online {
                         i18n::t("pill.ready")
-                    } else if zustand == 2 {
+                    } else if state == 2 {
                         i18n::t("st.no_net")
                     } else {
                         i18n::t("pill.connecting")
@@ -635,7 +635,7 @@ impl App {
         match self.view {
             View::Start => self.start_view(ui),
             View::Devices => self.devices_view(ui),
-            View::Freunde => self.freunde_view(ui),
+            View::Friends => self.friends_view(ui),
             View::Meet => self.meet_view(ui),
             View::Settings => self.settings_view(ui),
 

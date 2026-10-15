@@ -26,7 +26,7 @@ pub struct Meeting {
     pub id: String,
     pub titel: String,
     /// Empty in the list - it is deliberately not handed out.
-    pub passwort: String,
+    pub passphrase: String,
     pub termin_text: String,
     /// End-to-end key as text (43 characters), empty = none.
     ///
@@ -47,7 +47,7 @@ fn from_json(v: &serde_json::Value) -> Meeting {
     Meeting {
         id: s("id"),
         titel: s("titel"),
-        passwort: s("passwort"),
+        passphrase: s("passwort"),
         termin_text: s("termin_text"),
         // Only from the OWN list; the key never comes from the server.
         e2e: s("e2e"),
@@ -92,7 +92,7 @@ pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
     //
     // The key is rolled HERE, not on the server. It travels on only in the
     // fragment of the link - the server never gets to see it.
-    m.e2e = schluessel_fuer(e2e);
+    m.e2e = key_for(e2e);
     Ok(m)
 }
 
@@ -101,32 +101,32 @@ pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
 /// Separate function so the decision can be tested: without the tick
 /// NOTHING may be created, otherwise the invitation link silently carries a
 /// key and the meeting rejects older versions.
-pub fn schluessel_fuer(e2e: bool) -> String {
+pub fn key_for(e2e: bool) -> String {
     if e2e {
-        crate::meete2e::Schluessel::neu().als_text()
+        crate::meete2e::Key::neu().als_text()
     } else {
         String::new()
     }
 }
 
 /// Where the OWN meetings are stored.
-fn eigene_datei() -> std::path::PathBuf {
+fn own_file() -> std::path::PathBuf {
     crate::ident::config_dir().join("meine-meetings.json")
 }
 
-fn eigene_schreiben(liste: &[Meeting]) {
+fn write_own(liste: &[Meeting]) {
     let arr: Vec<serde_json::Value> = liste
         .iter()
         .map(|x| {
             serde_json::json!({
                 "id": x.id,
                 "titel": x.titel,
-                "passwort": x.passwort,
+                "passwort": x.passphrase,
                 "termin_text": x.termin_text,
             })
         })
         .collect();
-    let p = eigene_datei();
+    let p = own_file();
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -142,7 +142,7 @@ fn eigene_schreiben(liste: &[Meeting]) {
 /// the server still answers - but you have to already know the
 /// number for that.
 pub fn eigene() -> Vec<Meeting> {
-    let text = std::fs::read_to_string(eigene_datei()).unwrap_or_default();
+    let text = std::fs::read_to_string(own_file()).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     v.as_array()
         .map(|a| a.iter().map(from_json).collect())
@@ -158,14 +158,14 @@ pub fn merken(m: &Meeting) {
     liste.retain(|x| x.id != m.id);
     liste.insert(0, m.clone());
     let hoechstens: Vec<Meeting> = liste.into_iter().take(12).collect();
-    eigene_schreiben(&hoechstens);
+    write_own(&hoechstens);
 }
 
 /// Remove a meeting from the own list.
 pub fn vergessen(id: &str) {
     let mut liste = eigene();
     liste.retain(|x| x.id != id);
-    eigene_schreiben(&liste);
+    write_own(&liste);
 }
 
 /// The own meetings that are REALLY still running. The server is asked
@@ -209,7 +209,7 @@ pub fn join_url(id: &str, pass: &str) -> String {
 /// no server log and in no history at the provider. That is exactly
 /// why the server cannot know the key - and exactly why
 /// it must NEVER wander into the query (?...).
-pub fn mit_schluessel(url: &str, e2e: &str) -> String {
+pub fn with_key(url: &str, e2e: &str) -> String {
     let k = e2e.trim();
     if k.is_empty() {
         return url.to_string();
@@ -218,12 +218,12 @@ pub fn mit_schluessel(url: &str, e2e: &str) -> String {
 }
 
 /// Get the key from a link (fragment OR "k=" in it).
-pub fn schluessel_aus_link(link: &str) -> Option<String> {
+pub fn key_from_link(link: &str) -> Option<String> {
     let teil = link.split('#').nth(1)?;
     for kv in teil.split('&') {
         if let Some(v) = kv.strip_prefix("k=") {
             let v = v.trim();
-            if crate::meete2e::Schluessel::aus_text(v).is_some() {
+            if crate::meete2e::Key::aus_text(v).is_some() {
                 return Some(v.to_string());
             }
         }
@@ -251,8 +251,8 @@ pub fn invite(m: &Meeting) -> String {
         "{}\nMeeting-ID: {}\nPasswort: {}\n{}",
         titel,
         m.id,
-        m.passwort,
-        mit_schluessel(&join_url(&m.id, &m.passwort), &m.e2e)
+        m.passphrase,
+        with_key(&join_url(&m.id, &m.passphrase), &m.e2e)
     )
 }
 
@@ -408,7 +408,7 @@ mod tests {
         let m = Meeting {
             id: "111-222-333".into(),
             titel: "Testrunde".into(),
-            passwort: "geheim22".into(),
+            passphrase: "geheim22".into(),
             termin_text: String::new(),
             e2e: String::new(),
         };
@@ -427,7 +427,7 @@ mod tests {
         .unwrap();
         let m = from_json(&v);
         assert_eq!(m.id, "1-2-3");
-        assert_eq!(m.passwort, "p");
+        assert_eq!(m.passphrase, "p");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
 
 /// A participant, as the Meet server currently reports it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Teilnehmer {
+pub struct Participant {
     pub name: String,
     pub host: bool,
     pub mikro_aus: bool,
@@ -462,30 +462,30 @@ pub struct Teilnehmer {
     pub fv: bool,
 }
 
-fn tn_aus_json(v: &serde_json::Value) -> Vec<Teilnehmer> {
+fn tn_aus_json(v: &serde_json::Value) -> Vec<Participant> {
     let arr = v.as_array().cloned().unwrap_or_default();
-    let wahr = |x: &serde_json::Value, k: &str| {
+    let truthy = |x: &serde_json::Value, k: &str| {
         x.get(k).and_then(|b| b.as_bool()).unwrap_or(false)
     };
     arr.iter()
-        .map(|x| Teilnehmer {
+        .map(|x| Participant {
             name: x
                 .get("name")
                 .and_then(|s| s.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            host: wahr(x, "host"),
-            mikro_aus: wahr(x, "audio_muted"),
-            kamera_aus: wahr(x, "video_muted"),
-            hand: wahr(x, "hand"),
-            fv: wahr(x, "fv"),
+            host: truthy(x, "host"),
+            mikro_aus: truthy(x, "audio_muted"),
+            kamera_aus: truthy(x, "video_muted"),
+            hand: truthy(x, "hand"),
+            fv: truthy(x, "fv"),
         })
         .collect()
 }
 
 /// Who is currently in the room? The password belongs to the query - the ID
 /// alone must not reveal anything (same rule as for deleting).
-pub fn teilnehmer(id: &str, pass: &str) -> Result<Vec<Teilnehmer>> {
+pub fn participant(id: &str, pass: &str) -> Result<Vec<Participant>> {
     let url = format!(
         "{}/api/meeting/{}/teilnehmer?pass={}",
         base(),
@@ -582,7 +582,7 @@ pub fn join_url_ex(
     fvid: Option<&str>,
     mic: Option<&str>,
     cam: Option<&str>,
-    stumm: bool,
+    is_muted: bool,
     ohne_video: bool,
 ) -> String {
     let mut u = join_url(id, pass);
@@ -602,7 +602,7 @@ pub fn join_url_ex(
             u = format!("{}&cam={}", u, urlenc(c.trim()));
         }
     }
-    if stumm {
+    if is_muted {
         u = format!("{}&mute=1", u);
     }
     if ohne_video {
@@ -616,7 +616,7 @@ mod tests_meetwin {
     use super::*;
 
     #[test]
-    fn join_url_ex_traegt_geraete_und_zustand() {
+    fn join_url_ex_carries_devices_and_state() {
         let u = join_url_ex(
             "1-2-3",
             "pw",
@@ -671,54 +671,54 @@ mod e2e_link_tests {
     /// The key MUST be in the fragment - anything else ends up in the
     /// server's logs and would thus no longer be end-to-end.
     #[test]
-    fn der_schluessel_steht_hinter_der_raute() {
+    fn key_follows_the_hash() {
         let k = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
-        let u = mit_schluessel(&join_url("1-2-3", "pw"), k);
+        let u = with_key(&join_url("1-2-3", "pw"), k);
         let (vorn, hinten) = u.split_once('#').expect("kein Fragment");
         assert!(!vorn.contains(k), "Schluessel steht in der Abfrage: {}", vorn);
         assert_eq!(hinten, format!("k={}", k));
     }
 
     #[test]
-    fn ohne_schluessel_bleibt_der_link_unveraendert() {
+    fn without_key_link_is_unchanged() {
         let u = join_url("1-2-3", "pw");
-        assert_eq!(mit_schluessel(&u, ""), u);
-        assert_eq!(mit_schluessel(&u, "   "), u);
+        assert_eq!(with_key(&u, ""), u);
+        assert_eq!(with_key(&u, "   "), u);
     }
 
     #[test]
-    fn schluessel_kommt_aus_dem_link_zurueck() {
-        let k = crate::meete2e::Schluessel::neu().als_text();
-        let u = mit_schluessel(&join_url("1-2-3", "pw"), &k);
-        assert_eq!(schluessel_aus_link(&u).as_deref(), Some(k.as_str()));
+    fn key_comes_back_from_the_link() {
+        let k = crate::meete2e::Key::neu().als_text();
+        let u = with_key(&join_url("1-2-3", "pw"), &k);
+        assert_eq!(key_from_link(&u).as_deref(), Some(k.as_str()));
     }
 
     /// Nonsense in the fragment must NOT pass as a key - otherwise
     /// the client decrypts with garbage and shows garbled video.
     #[test]
     fn unsinn_im_fragment_wird_abgewiesen() {
-        assert!(schluessel_aus_link("https://x/?room=1#k=zukurz").is_none());
-        assert!(schluessel_aus_link("https://x/?room=1#k=").is_none());
-        assert!(schluessel_aus_link("https://x/?room=1").is_none());
-        assert!(schluessel_aus_link("https://x/?room=1#anderes=1").is_none());
+        assert!(key_from_link("https://x/?room=1#k=zukurz").is_none());
+        assert!(key_from_link("https://x/?room=1#k=").is_none());
+        assert!(key_from_link("https://x/?room=1").is_none());
+        assert!(key_from_link("https://x/?room=1#anderes=1").is_none());
     }
 
     /// WITHOUT the tick when creating, no key is created - and thus
     /// the invitation carries none either. Otherwise every new meeting would be silently
     /// encrypted and older versions would be standing at the door.
     #[test]
-    fn ohne_haken_kein_schluessel() {
-        assert_eq!(schluessel_fuer(false), "");
+    fn without_tick_no_key() {
+        assert_eq!(key_for(false), "");
         let m = Meeting {
             id: "482-913-770".into(),
             titel: "Test".into(),
-            passwort: "geheim".into(),
+            passphrase: "geheim".into(),
             termin_text: String::new(),
-            e2e: schluessel_fuer(false),
+            e2e: key_for(false),
         };
         let text = invite(&m);
         assert!(!text.contains("#k="), "Schluessel ohne Haken:\n{}", text);
-        assert!(schluessel_aus_link(&text).is_none());
+        assert!(key_from_link(&text).is_none());
     }
 
     /// LIVE against the real server - runs only on request:
@@ -735,35 +735,35 @@ mod e2e_link_tests {
         println!("OHNE Haken: {}", l1.lines().last().unwrap_or(""));
 
         let mit = create("Probe mit Haken", true).expect("Server nicht erreichbar");
-        assert!(crate::meete2e::Schluessel::aus_text(&mit.e2e).is_some());
+        assert!(crate::meete2e::Key::aus_text(&mit.e2e).is_some());
         let l2 = invite(&mit);
         assert!(l2.contains("#k="), "{}", l2);
         println!("MIT Haken:  {}", l2.lines().last().unwrap_or(""));
-        println!("RAUM_OHNE={} PASS_OHNE={}", ohne.id, ohne.passwort);
-        println!("RAUM_MIT={} PASS_MIT={} KEY={}", mit.id, mit.passwort, mit.e2e);
+        println!("RAUM_OHNE={} PASS_OHNE={}", ohne.id, ohne.passphrase);
+        println!("RAUM_MIT={} PASS_MIT={} KEY={}", mit.id, mit.passphrase, mit.e2e);
     }
 
     /// WITH the tick a valid key is created - and a different one every time.
     #[test]
-    fn mit_haken_ein_frischer_schluessel() {
-        let a = schluessel_fuer(true);
-        let b = schluessel_fuer(true);
-        assert!(crate::meete2e::Schluessel::aus_text(&a).is_some());
+    fn with_tick_a_fresh_key() {
+        let a = key_for(true);
+        let b = key_for(true);
+        assert!(crate::meete2e::Key::aus_text(&a).is_some());
         assert_ne!(a, b, "zweimal derselbe Schluessel");
     }
 
     /// The invitation contains the link WITH the key.
     #[test]
-    fn die_einladung_traegt_den_schluessel() {
+    fn invite_carries_the_key() {
         let m = Meeting {
             id: "482-913-770".into(),
             titel: "Test".into(),
-            passwort: "geheim".into(),
+            passphrase: "geheim".into(),
             termin_text: String::new(),
-            e2e: crate::meete2e::Schluessel::neu().als_text(),
+            e2e: crate::meete2e::Key::neu().als_text(),
         };
         let text = invite(&m);
         assert!(text.contains("#k="), "kein Schluessel in der Einladung:\n{}", text);
-        assert_eq!(schluessel_aus_link(&text).as_deref(), Some(m.e2e.as_str()));
+        assert_eq!(key_from_link(&text).as_deref(), Some(m.e2e.as_str()));
     }
 }

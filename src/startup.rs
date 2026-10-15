@@ -4,7 +4,7 @@ use super::*;
 
 /// The host already runs in its own threads - here we only wait and
 /// log so that the process stays alive.
-pub(crate) fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
+pub(crate) fn continue_without_window(shared: &Arc<Shared>) -> ! {
     capture::log_line("Oberflaeche geht nicht - laufe als Host ohne Fenster weiter");
     let mut zuletzt = String::new();
     loop {
@@ -26,7 +26,7 @@ pub(crate) static BILD_GEZEICHNET: std::sync::atomic::AtomicBool = std::sync::at
 
 /// Are all attempts (OpenGL, OpenGL without acceleration, DirectX) through?
 /// Then the main path reports the error - the watchdog stays out.
-pub(crate) static ANLAEUFE_FERTIG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static ATTEMPTS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Why the start went wrong - readable for humans.
 ///
@@ -34,7 +34,7 @@ pub(crate) static ANLAEUFE_FERTIG: std::sync::atomic::AtomicBool = std::sync::at
 /// Windows Server with "Microsoft Basic Display Adapter", an RDP session
 /// without graphics redirection, or a machine without a graphics driver. There
 /// the OpenGL context the UI needs fails.
-pub(crate) fn start_fehler_text(e: &str) -> String {
+pub(crate) fn start_error_text(e: &str) -> String {
     let low = e.to_lowercase();
     let grund = if low.contains("opengl")
         || low.contains("glutin")
@@ -66,8 +66,8 @@ pub(crate) fn start_fehler_text(e: &str) -> String {
 }
 
 /// Writes the error to the log and shows it as a window.
-pub(crate) fn start_fehler_melden(e: &str) {
-    let text = start_fehler_text(e);
+pub(crate) fn report_start_error(e: &str) {
+    let text = start_error_text(e);
     let pfad = ident::config_dir().join("start.log");
     let _ = std::fs::create_dir_all(ident::config_dir());
     if let Ok(mut f) = std::fs::OpenOptions::new()

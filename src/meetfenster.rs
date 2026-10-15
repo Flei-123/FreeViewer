@@ -26,7 +26,7 @@ use std::collections::HashMap;
 pub struct Person {
     pub id: u64,
     pub name: String,
-    pub stumm: bool,
+    pub is_muted: bool,
     pub kamera_aus: bool,
     pub hand: bool,
     pub gastgeber: bool,
@@ -130,8 +130,8 @@ pub struct Sicht {
     pub titel: String,
     pub gastgeber: bool,
     /// Text of the connection badge ("directly connected", "connecting ...").
-    pub verbindung: String,
-    pub verbindung_ton: Ton,
+    pub connection: String,
+    pub connect_tone: Ton,
     pub e2e: bool,
     /// Bandwidth as finished text ("340 kbit/s"); empty = do not show.
     pub bandbreite: String,
@@ -142,12 +142,12 @@ pub struct Sicht {
     pub chat: Vec<Chatzeile>,
     /// Was im Reiter "Info" steht (Protokoll, Meldungen).
     pub protokoll: Vec<String>,
-    pub stumm: bool,
+    pub is_muted: bool,
     pub kamera_an: bool,
-    pub schirm_an: bool,
+    pub screen_on: bool,
     pub hand: bool,
     pub steuer_frei: bool,
-    /// Offene Steuerungsanfragen AN MICH: (Teilnehmer, Name).
+    /// Offene Steuerungsanfragen AN MICH: (Participant, Name).
     pub steuer_anfragen: Vec<(u64, String)>,
     /// Whom I have allowed to control: (participant, name).
     pub steuer_erlaubt: Vec<(u64, String)>,
@@ -156,8 +156,8 @@ pub struct Sicht {
     /// Zusage bekommen: (Name des Teilenden, seine FreeViewer-Nummer).
     pub steuer_zusage: Option<(String, String)>,
     /// Is someone ELSE sharing? Only then is the request button worth it.
-    pub fremd_schirm: bool,
-    /// Wer teilt gerade einen Bildschirm: (Teilnehmer, Name).
+    pub foreign_screen: bool,
+    /// Wer teilt gerade einen Display: (Participant, Name).
     pub schirme: Vec<(u64, String)>,
     /// Ungelesene Chatnachrichten (Zaehler am Chat-Knopf).
     pub ungelesen: u32,
@@ -186,7 +186,7 @@ pub struct Sicht {
     /// Which part of their screen are they currently sending? (fractions 0..1)
     /// None or (0,0,1,1) = the whole thing. If it is smaller, the image is
     /// SHARP - then the magnifier must not zoom in once more.
-    pub schirm_bereich: Option<(f32, f32, f32, f32)>,
+    pub screen_region: Option<(f32, f32, f32, f32)>,
     /// The sender can deliver sections (new client). Only then is it worth
     /// offering "sharp" - otherwise the button would be a lie.
     pub scharf_moeglich: bool,
@@ -217,7 +217,7 @@ pub struct Sicht {
 pub struct Fensterzustand {
     pub seite_offen: bool,
     pub reiter: Reiter,
-    pub eingabe: String,
+    pub input_text: String,
     pub kameraplatz: Kameraplatz,
     pub vollbild: bool,
     pub pip: bool,
@@ -226,7 +226,7 @@ pub struct Fensterzustand {
     /// messages per word.
     pub tippt_gemeldet: bool,
     /// Einstellungen (Geraetewahl) sind aufgeklappt.
-    pub einstellungen_offen: bool,
+    pub settings_open: bool,
     /// The question "which screen?" is open.
     pub schirmwahl_offen: bool,
     /// Also show the OWN camera in picture-in-picture.
@@ -237,7 +237,7 @@ pub struct Fensterzustand {
     pub pip_auto: bool,
     /// The big window was minimised automatically when sharing.
     pub minimiert_auto: bool,
-    /// Vergroesserung im geteilten Bildschirm (1.0 = alles).
+    /// Vergroesserung im geteilten Display (1.0 = alles).
     pub zoom: f32,
     pub zoomanker: Zoomanker,
     /// Centre of the section (0..1) - only by hand with Zoomanker::Fest.
@@ -257,12 +257,12 @@ impl Default for Fensterzustand {
         Self {
             seite_offen: false,
             reiter: Reiter::Chat,
-            eingabe: String::new(),
+            input_text: String::new(),
             kameraplatz: Kameraplatz::Seite,
             vollbild: false,
             pip: false,
             tippt_gemeldet: false,
-            einstellungen_offen: false,
+            settings_open: false,
             schirmwahl_offen: false,
             // Seeing yourself in the small window is the normal case - when
             // sharing the screen you want to check whether the camera is running.
@@ -291,15 +291,15 @@ pub struct Bilder {
 /// we only draw.
 #[derive(Clone, PartialEq)]
 pub enum Aktion {
-    Stumm(bool),
+    Muted(bool),
     Kamera(bool),
-    Schirm(bool),
+    Screen(bool),
     Hand(bool),
-    Steuerung(bool),
+    Control(bool),
     Verlassen,
-    Beenden,
-    AlleStumm,
-    Senden(String),
+    Leave,
+    MuteAll,
+    Send(String),
     Tippt(bool),
     Einlassen(u64),
     Abweisen(u64),
@@ -315,11 +315,11 @@ pub enum Aktion {
     MikroGeraet(usize),
     LautsprecherGeraet(usize),
     /// Re-read the device list (after plugging/unplugging).
-    GeraeteNeuLesen,
-    /// Diesen Bildschirm teilen (Index aus `Sicht::monitore`).
-    SchirmWaehlen(usize),
+    ReloadDevices,
+    /// Diesen Display teilen (Index aus `Sicht::monitore`).
+    PickScreen(usize),
     /// Genau dieses Programmfenster teilen (Kennung aus `Sicht::fenster`).
-    FensterWaehlen(isize),
+    PickWindow(isize),
     /// Switch the red frame around what is shared on/off.
     Rahmen(bool),
     /// Noise gate: on/off and strictness (0..100).
@@ -329,11 +329,11 @@ pub enum Aktion {
     /// Aussehen des Avatars aendern.
     AvatarAussehen(crate::avatar::Aussehen),
     /// As viewer, ask the sharer for control.
-    SteuerungAnfragen,
+    RequestControl,
     /// As sharer, decide on a request.
-    SteuerungAntwort(u64, bool),
+    ControlReply(u64, bool),
     /// Erteilte Freigabe zuruecknehmen (None = alle).
-    SteuerungZurueck(Option<u64>),
+    ControlGiveBack(Option<u64>),
 }
 
 /// The join screen needs write access (name, device choice).
@@ -358,7 +358,7 @@ pub struct Beitritt {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Beitrittsaktion {
     Beitreten,
-    Zurueck,
+    Back,
     MikroUm,
     KameraUm,
 }
@@ -407,7 +407,7 @@ pub fn farben() -> Farben {
 }
 
 impl Farben {
-    fn ton_farbe(&self, t: Ton) -> Color32 {
+    fn tone_color(&self, t: Ton) -> Color32 {
         match t {
             Ton::Neutral => self.p.muted,
             Ton::Gut => self.p.green,
@@ -442,9 +442,9 @@ fn tag(
     ton: Ton,
     klickbar: bool,
 ) -> egui::Response {
-    let farbe = f.ton_farbe(ton);
+    let tint = f.tone_color(ton);
     let font = egui::FontId::proportional(12.0);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font, farbe);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, tint);
     let sym_b = if symbol.is_some() { 14.0 + 6.0 } else { 0.0 };
     let groesse = vec2(galley.size().x + sym_b + 22.0, 25.0);
     let sinn = if klickbar {
@@ -462,7 +462,7 @@ fn tag(
                 f.tief
             }
         }
-        _ => farbe.gamma_multiply(0.10),
+        _ => tint.gamma_multiply(0.10),
     };
     let rand = match ton {
         Ton::Neutral => {
@@ -472,7 +472,7 @@ fn tag(
                 f.p.line
             }
         }
-        _ => farbe.gamma_multiply(0.45),
+        _ => tint.gamma_multiply(0.45),
     };
     let mal = ui.painter();
     mal.rect_filled(rect, 12.5, grund);
@@ -485,13 +485,13 @@ fn tag(
     let mut x = rect.left() + 11.0;
     if let Some(s) = symbol {
         let r = Rect::from_min_size(pos2(x, rect.center().y - 7.0), vec2(14.0, 14.0));
-        icons::image(s, 14.0, farbe).paint_at(ui, r);
+        icons::image(s, 14.0, tint).paint_at(ui, r);
         x += 20.0;
     }
     ui.painter().galley(
         pos2(x, rect.center().y - galley.size().y / 2.0),
         galley,
-        farbe,
+        tint,
     );
     if klickbar {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -509,7 +509,7 @@ pub enum Ctl {
     An,
     /// Mic/camera switched off - that has to be red, not colourful
     Aus,
-    /// Verlassen/Beenden
+    /// Verlassen/Leave
     Gefahr,
 }
 
@@ -521,11 +521,11 @@ fn ctl_klein(
     f: &Farben,
     symbol: &str,
     wort: &str,
-    zustand: Ctl,
+    state: Ctl,
     zaehler: Option<u32>,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::click());
-    let (grund, rand, vorn) = match zustand {
+    let (grund, rand, vorn) = match state {
         Ctl::Normal => (
             f.p.card_hi,
             f.p.line,
@@ -574,11 +574,11 @@ fn ctl(
     f: &Farben,
     symbol: &str,
     wort: &str,
-    zustand: Ctl,
+    state: Ctl,
     zaehler: Option<u32>,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(74.0, 58.0), egui::Sense::click());
-    let (grund, rand, vorn, wortfarbe) = match zustand {
+    let (grund, rand, vorn, wortfarbe) = match state {
         Ctl::Normal => (
             f.p.card_hi,
             f.p.line,
@@ -643,7 +643,7 @@ fn ctl(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Runder Knopf (Vorschau, Senden) - 42 px wie im Browser.
+/// Runder Knopf (Vorschau, Send) - 42 px wie im Browser.
 fn rund(
     ui: &mut egui::Ui,
     f: &Farben,
@@ -677,9 +677,9 @@ fn rund(
 /// Small button in lists ("Let in", "Control").
 /// A small colour dot to click. The chosen one gets a ring -
 /// without it nobody knows which one is currently active.
-fn farbtupfer(ui: &mut egui::Ui, farbe: [u8; 3], gewaehlt: bool, f: &Farben) -> bool {
+fn farbtupfer(ui: &mut egui::Ui, tint: [u8; 3], gewaehlt: bool, f: &Farben) -> bool {
     let (r, antwort) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::click());
-    let c = Color32::from_rgb(farbe[0], farbe[1], farbe[2]);
+    let c = Color32::from_rgb(tint[0], tint[1], tint[2]);
     ui.painter().circle_filled(r.center(), 8.0, c);
     if gewaehlt {
         ui.painter()
@@ -739,7 +739,7 @@ fn bild_malen_zoom(
     let ar_bild = tex.aspect_ratio().max(0.05);
     let ar_rect = (rect.width() / rect.height().max(1.0)).max(0.05);
     let (ziel, mut uv) = if ganz {
-        // Alles zeigen: hineinpassen, Rand bleibt Hintergrund.
+        // Alles zeigen: hineinpassen, Rand bleibt Background.
         let mut b = rect.width();
         let mut h = b / ar_bild;
         if h > rect.height() {
@@ -830,7 +830,7 @@ fn passt_nicht(tex: &egui::TextureHandle, rect: Rect) -> bool {
 /// A screen tile gets exactly the shape of its image. Otherwise the
 /// name tag would sit below wide black bars instead of at the image - and the
 /// area would be wasted.
-fn schirm_rect(rect: Rect, tex: Option<&egui::TextureHandle>) -> Rect {
+fn screen_box(rect: Rect, tex: Option<&egui::TextureHandle>) -> Rect {
     let t = match tex {
         Some(t) => t,
         None => return rect,
@@ -849,11 +849,11 @@ fn schirm_rect(rect: Rect, tex: Option<&egui::TextureHandle>) -> Rect {
 pub struct Kachel {
     pub id: u64,
     pub name: String,
-    pub stumm: bool,
+    pub is_muted: bool,
     pub hand: bool,
     pub spricht: bool,
     pub ich: bool,
-    pub schirm: bool,
+    pub screen: bool,
     /// Camera switched off - then NEVER show an old still image, but
     /// the circle with the initials. A frozen face would be
     /// a lie about the state of the other person.
@@ -880,7 +880,7 @@ fn kachel_malen_zoom(
 ) -> egui::Response {
     let resp = ui.interact(
         rect,
-        ui.id().with(("kachel", k.id, k.schirm)),
+        ui.id().with(("kachel", k.id, k.screen)),
         egui::Sense::click_and_drag(),
     );
     let mal = ui.painter_at(rect);
@@ -889,8 +889,8 @@ fn kachel_malen_zoom(
         Some(t) => {
             // A shared screen is NEVER cropped - cropped
             // text is worthless.
-            let ganz = k.schirm || passt_nicht(t, rect);
-            bild_malen_zoom(&mal, rect, t, k.ich && !k.schirm, ganz, ausschnitt);
+            let ganz = k.screen || passt_nicht(t, rect);
+            bild_malen_zoom(&mal, rect, t, k.ich && !k.screen, ganz, ausschnitt);
         }
         None => {
             // No image: soft circle with the initials, as in the
@@ -904,19 +904,19 @@ fn kachel_malen_zoom(
                     f.p.card.gamma_multiply(0.16),
                 );
             }
-            let kreis = (rect.height() * 0.30).clamp(16.0, 34.0);
-            mal.circle_filled(rect.center(), kreis, f.p.card_hi);
-            mal.circle_stroke(rect.center(), kreis, egui::Stroke::new(1.0, f.p.line));
+            let circle = (rect.height() * 0.30).clamp(16.0, 34.0);
+            mal.circle_filled(rect.center(), circle, f.p.card_hi);
+            mal.circle_stroke(rect.center(), circle, egui::Stroke::new(1.0, f.p.line));
             mal.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 kuerzel(&k.name),
-                egui::FontId::proportional((kreis * 0.72).clamp(11.0, 24.0)),
+                egui::FontId::proportional((circle * 0.72).clamp(11.0, 24.0)),
                 f.p.text,
             );
             if k.kamera_aus && rect.height() > 120.0 {
                 mal.text(
-                    rect.center() + vec2(0.0, kreis + 16.0),
+                    rect.center() + vec2(0.0, circle + 16.0),
                     egui::Align2::CENTER_CENTER,
                     "Kamera aus",
                     egui::FontId::proportional(12.5),
@@ -927,13 +927,13 @@ fn kachel_malen_zoom(
     }
     // Name tag at the bottom left: name, plus mute and raised-hand icons.
     let font = egui::FontId::proportional(12.0);
-    let schild_text = if k.schirm {
+    let schild_text = if k.screen {
         format!("{} · Bildschirm", k.name)
     } else {
         k.name.clone()
     };
     let galley = mal.layout_no_wrap(schild_text, font, f.p.text);
-    let zeichen = (if k.stumm { 1 } else { 0 } + if k.hand { 1 } else { 0 }) as f32;
+    let zeichen = (if k.is_muted { 1 } else { 0 } + if k.hand { 1 } else { 0 }) as f32;
     let breite = (galley.size().x + 18.0 + zeichen * 19.0).min(rect.width() - 16.0);
     let schild = Rect::from_min_size(
         pos2(rect.left() + 8.0, rect.bottom() - 8.0 - 24.0),
@@ -963,7 +963,7 @@ fn kachel_malen_zoom(
         f.p.text,
     );
     x += galley.size().x + 5.0;
-    if k.stumm {
+    if k.is_muted {
         icons::image("mic-off", 13.0, f.bad).paint_at(
             ui,
             Rect::from_min_size(pos2(x, schild.center().y - 6.5), Vec2::splat(13.0)),
@@ -999,7 +999,7 @@ fn kachel_malen_zoom(
 pub fn beitritt_ui(
     ctx: &egui::Context,
     b: &mut Beitritt,
-    vorschau: Option<&egui::TextureHandle>,
+    preview: Option<&egui::TextureHandle>,
 ) -> Option<Beitrittsaktion> {
     let f = farben();
     let mut aktion = None;
@@ -1026,7 +1026,7 @@ pub fn beitritt_ui(
                                 ui.with_layout(
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        aktion = beitritt_karte(ui, &f, b, vorschau);
+                                        aktion = beitritt_karte(ui, &f, b, preview);
                                     },
                                 );
                             });
@@ -1041,7 +1041,7 @@ fn beitritt_karte(
     ui: &mut egui::Ui,
     f: &Farben,
     b: &mut Beitritt,
-    vorschau: Option<&egui::TextureHandle>,
+    preview: Option<&egui::TextureHandle>,
 ) -> Option<Beitrittsaktion> {
     let mut aktion = None;
     // Brand: glyph in a square + title, like ".marke klein" in the browser.
@@ -1073,7 +1073,7 @@ fn beitritt_karte(
     {
         let mal = ui.painter_at(rect);
         mal.rect_filled(rect, 14.0, f.tief);
-        match (b.kamera_an, vorschau) {
+        match (b.kamera_an, preview) {
             (true, Some(t)) => bild_malen(&mal, rect, t, true, passt_nicht(t, rect)),
             _ => {
                 mal.text(
@@ -1096,7 +1096,7 @@ fn beitritt_karte(
             egui::StrokeKind::Inside,
         );
     }
-    if !b.kamera_an || vorschau.is_none() {
+    if !b.kamera_an || preview.is_none() {
         icons::image("cam-off", 34.0, f.p.muted.gamma_multiply(0.6)).paint_at(
             ui,
             Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(34.0)),
@@ -1201,7 +1201,7 @@ fn beitritt_karte(
     }
     ui.add_space(14.0);
     ui.horizontal(|ui| {
-        let b_breite = (ui.available_width() - 10.0) * 0.62;
+        let b_width = (ui.available_width() - 10.0) * 0.62;
         let gross = egui::Button::image_and_text(
             icons::image("enter", 18.0, f.p.on_accent),
             egui::RichText::new(if b.laeuft {
@@ -1216,12 +1216,12 @@ fn beitritt_karte(
         .fill(f.p.accent)
         .stroke(egui::Stroke::NONE)
         .corner_radius(11)
-        .min_size(vec2(b_breite, 44.0));
+        .min_size(vec2(b_width, 44.0));
         if ui.add_enabled(!b.laeuft, gross).clicked() {
             aktion = Some(Beitrittsaktion::Beitreten);
         }
         ui.add_space(10.0);
-        let zurueck = egui::Button::image_and_text(
+        let go_back = egui::Button::image_and_text(
             icons::image("back", 16.0, f.p.text),
             egui::RichText::new("Zurück").size(14.0).color(f.p.text),
         )
@@ -1229,8 +1229,8 @@ fn beitritt_karte(
         .stroke(egui::Stroke::new(1.0, f.p.line))
         .corner_radius(11)
         .min_size(vec2(ui.available_width(), 44.0));
-        if ui.add(zurueck).clicked() {
-            aktion = Some(Beitrittsaktion::Zurueck);
+        if ui.add(go_back).clicked() {
+            aktion = Some(Beitrittsaktion::Back);
         }
     });
     aktion
@@ -1289,7 +1289,7 @@ fn kurz(s: &str, max: usize) -> String {
 /// not know whether something is broken or you simply have to wait.
 pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
     let f = farben();
-    let mut abbrechen = false;
+    let mut cancel = false;
     // The dots breathe - that needs a repaint.
     // 20 ms instead of 60. In this tick EVERYTHING in the meeting hangs: picking up the
     // microphone, encoding the camera image, audio to the speaker. With 60 ms
@@ -1370,13 +1370,13 @@ pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
                             .corner_radius(11)
                             .min_size(vec2(ui.available_width(), 40.0));
                             if ui.add(knopf).clicked() {
-                                abbrechen = true;
+                                cancel = true;
                             }
                         });
                     });
             });
         });
-    abbrechen
+    cancel
 }
 
 /// The running meeting: header, stage, sidebar, control bar.
@@ -1402,8 +1402,8 @@ pub fn meeting_ui(
     if !s.steuer_anfragen.is_empty() {
         steuer_leiste(ctx, s, &f, &mut aktionen);
     }
-    if z.einstellungen_offen {
-        einstellungen(ctx, s, z, &f, &mut aktionen);
+    if z.settings_open {
+        settings(ctx, s, z, &f, &mut aktionen);
     }
     if z.schirmwahl_offen {
         schirmwahl(ctx, s, z, &f, &mut aktionen);
@@ -1466,8 +1466,8 @@ fn kopf(
                     ui,
                     f,
                     Some("signal"),
-                    &s.verbindung,
-                    s.verbindung_ton,
+                    &s.connection,
+                    s.connect_tone,
                     false,
                 )
                 .on_hover_text("Welcher Weg gerade benutzt wird");
@@ -1497,12 +1497,12 @@ fn kopf(
                         if ctl_klein(ui, f, "end", "Meeting für ALLE beenden", Ctl::Gefahr, None)
                             .clicked()
                         {
-                            aktionen.push(Aktion::Beenden);
+                            aktionen.push(Aktion::Leave);
                         }
                         if ctl_klein(ui, f, "muteall", "Alle stummschalten", Ctl::Normal, None)
                             .clicked()
                         {
-                            aktionen.push(Aktion::AlleStumm);
+                            aktionen.push(Aktion::MuteAll);
                         }
                     }
                     if ctl_klein(
@@ -1523,12 +1523,12 @@ fn kopf(
                         f,
                         "settings",
                         "Kamera, Mikrofon und Lautsprecher umstellen",
-                        if z.einstellungen_offen { Ctl::An } else { Ctl::Normal },
+                        if z.settings_open { Ctl::An } else { Ctl::Normal },
                         None,
                     )
                     .clicked()
                     {
-                        z.einstellungen_offen = !z.einstellungen_offen;
+                        z.settings_open = !z.settings_open;
                     }
                     if ctl_klein(
                         ui,
@@ -1598,7 +1598,7 @@ fn kopf(
                         {
                             aktionen.push(Aktion::Steuern(fvid, wer));
                         }
-                    } else if s.fremd_schirm
+                    } else if s.foreign_screen
                         && ctl_klein(
                             ui,
                             f,
@@ -1614,7 +1614,7 @@ fn kopf(
                         .clicked()
                         && !s.steuer_gefragt
                     {
-                        aktionen.push(Aktion::SteuerungAnfragen);
+                        aktionen.push(Aktion::RequestControl);
                     }
                     if !s.steuer_erlaubt.is_empty() {
                         let namen: Vec<&str> =
@@ -1629,21 +1629,21 @@ fn kopf(
                         )
                         .clicked()
                         {
-                            aktionen.push(Aktion::SteuerungZurueck(None));
+                            aktionen.push(Aktion::ControlGiveBack(None));
                         }
                     }
                     if ctl_klein(
                         ui,
                         f,
-                        if s.schirm_an { "screen-off" } else { "screen" },
-                        if s.schirm_an { "Teilen beenden" } else { "Bildschirm teilen" },
-                        if s.schirm_an { Ctl::An } else { Ctl::Normal },
+                        if s.screen_on { "screen-off" } else { "screen" },
+                        if s.screen_on { "Teilen beenden" } else { "Bildschirm teilen" },
+                        if s.screen_on { Ctl::An } else { Ctl::Normal },
                         None,
                     )
                     .clicked()
                     {
-                        if s.schirm_an {
-                            aktionen.push(Aktion::Schirm(false));
+                        if s.screen_on {
+                            aktionen.push(Aktion::Screen(false));
                         } else if s.monitore.len() > 1 || !s.fenster.is_empty() {
                             // As soon as there is something to choose, we ask.
                             // Earlier, with a single screen, EVERYTHING went out
@@ -1651,7 +1651,7 @@ fn kopf(
                             // anymore.
                             z.schirmwahl_offen = true;
                         } else {
-                            aktionen.push(Aktion::SchirmWaehlen(0));
+                            aktionen.push(Aktion::PickScreen(0));
                         }
                     }
                     if ctl_klein(
@@ -1669,14 +1669,14 @@ fn kopf(
                     if ctl_klein(
                         ui,
                         f,
-                        if s.stumm { "mic-off" } else { "mic" },
-                        if s.stumm { "Stummschaltung aufheben" } else { "Stummschalten" },
-                        if s.stumm { Ctl::Aus } else { Ctl::Normal },
+                        if s.is_muted { "mic-off" } else { "mic" },
+                        if s.is_muted { "Stummschaltung aufheben" } else { "Stummschalten" },
+                        if s.is_muted { Ctl::Aus } else { Ctl::Normal },
                         None,
                     )
                     .clicked()
                     {
-                        aktionen.push(Aktion::Stumm(!s.stumm));
+                        aktionen.push(Aktion::Muted(!s.is_muted));
                     }
                     ui.add_space(6.0);
                     // Only icon and number - the word "participants" tells
@@ -1720,7 +1720,7 @@ fn schirmwahl(
             for (i, (name, b, h)) in s.monitore.iter().enumerate() {
                 let text = format!("{}  ·  {}×{}", kurz(name, 26), b, h);
                 if mini(ui, f, &text, i == 0).clicked() {
-                    aktionen.push(Aktion::SchirmWaehlen(i));
+                    aktionen.push(Aktion::PickScreen(i));
                     z.schirmwahl_offen = false;
                 }
             }
@@ -1750,7 +1750,7 @@ fn schirmwahl(
                                 format!("{}  ·  {}", kurz(titel, 32), kurz(prog, 14))
                             };
                             if mini(ui, f, &text, false).clicked() {
-                                aktionen.push(Aktion::FensterWaehlen(*k));
+                                aktionen.push(Aktion::PickWindow(*k));
                                 z.schirmwahl_offen = false;
                             }
                         }
@@ -1779,7 +1779,7 @@ fn schirmwahl(
 /// WHY as a separate window and not in the sidebar: the choice is
 /// a short interruption, afterwards you want it gone again. The
 /// browser client does it the same way (overlay above the stage).
-fn einstellungen(
+fn settings(
     ctx: &egui::Context,
     s: &Sicht,
     z: &mut Fensterzustand,
@@ -1985,10 +1985,10 @@ fn einstellungen(
 
             ui.horizontal(|ui| {
                 if mini(ui, f, "Geräte neu suchen", false).clicked() {
-                    aktionen.push(Aktion::GeraeteNeuLesen);
+                    aktionen.push(Aktion::ReloadDevices);
                 }
                 if mini(ui, f, "Fertig", true).clicked() {
-                    z.einstellungen_offen = false;
+                    z.settings_open = false;
                 }
             });
             // Stay honest: switching the audio devices resets the
@@ -2003,7 +2003,7 @@ fn einstellungen(
             );
         });
     if !offen {
-        z.einstellungen_offen = false;
+        z.settings_open = false;
     }
 }
 
@@ -2077,7 +2077,7 @@ fn reiter_knopf(
     breite: f32,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(breite.max(40.0), 44.0), egui::Sense::click());
-    let farbe = if aktiv {
+    let tint = if aktiv {
         f.p.accent
     } else if resp.hovered() {
         f.p.text
@@ -2096,7 +2096,7 @@ fn reiter_knopf(
         ui.painter()
             .rect_filled(rect, 10.0, f.p.card_hi.gamma_multiply(0.6));
     }
-    icons::image(symbol, 18.0, farbe).paint_at(
+    icons::image(symbol, 18.0, tint).paint_at(
         ui,
         Rect::from_center_size(pos2(rect.center().x, rect.top() + 14.0), Vec2::splat(18.0)),
     );
@@ -2105,7 +2105,7 @@ fn reiter_knopf(
         egui::Align2::CENTER_BOTTOM,
         wort,
         egui::FontId::proportional(11.0),
-        farbe,
+        tint,
     );
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -2118,10 +2118,10 @@ fn reiter_chat(
     aktionen: &mut Vec<Aktion>,
 ) {
     let hoehe = ui.available_height();
-    let eingabe_hoehe = 52.0;
+    let input_height = 52.0;
     egui::ScrollArea::vertical()
         .id_salt("meet_chat_log")
-        .max_height(hoehe - eingabe_hoehe)
+        .max_height(hoehe - input_height)
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show(ui, |ui| {
@@ -2152,7 +2152,7 @@ fn reiter_chat(
             }
             ui.add_space(6.0);
         });
-    // Eingabezeile unten - rundes Feld plus runder Senden-Knopf.
+    // Eingabezeile unten - rundes Feld plus runder Send-Knopf.
     ui.painter().hline(
         ui.max_rect().left()..=ui.max_rect().right(),
         ui.cursor().top(),
@@ -2162,23 +2162,23 @@ fn reiter_chat(
     ui.horizontal(|ui| {
         ui.add_space(9.0);
         let feld = ui.add(
-            egui::TextEdit::singleline(&mut z.eingabe)
+            egui::TextEdit::singleline(&mut z.input_text)
                 .desired_width((ui.available_width() - 58.0).max(60.0))
                 .hint_text("Nachricht …")
                 .margin(egui::Margin::symmetric(11, 7)),
         );
         let enter = feld.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let tippt = !z.eingabe.trim().is_empty();
+        let tippt = !z.input_text.trim().is_empty();
         if tippt != z.tippt_gemeldet {
             z.tippt_gemeldet = tippt;
             aktionen.push(Aktion::Tippt(tippt));
         }
-        let senden = rund(ui, f, "send", 34.0, false, true)
+        let send_out = rund(ui, f, "send", 34.0, false, true)
             .on_hover_text("Senden")
             .clicked();
-        if (enter || senden) && !z.eingabe.trim().is_empty() {
-            aktionen.push(Aktion::Senden(z.eingabe.trim().to_string()));
-            z.eingabe.clear();
+        if (enter || send_out) && !z.input_text.trim().is_empty() {
+            aktionen.push(Aktion::Send(z.input_text.trim().to_string()));
+            z.input_text.clear();
             z.tippt_gemeldet = false;
             if enter {
                 feld.request_focus();
@@ -2351,7 +2351,7 @@ fn reiter_leute(ui: &mut egui::Ui, s: &Sicht, f: &Farben, aktionen: &mut Vec<Akt
                     if p.kamera_aus {
                         symbol_klein(ui, "cam-off", f.p.muted);
                     }
-                    if p.stumm {
+                    if p.is_muted {
                         symbol_klein(ui, "mic-off", f.bad);
                     }
                     if p.hand {
@@ -2363,9 +2363,9 @@ fn reiter_leute(ui: &mut egui::Ui, s: &Sicht, f: &Farben, aktionen: &mut Vec<Akt
         });
 }
 
-fn symbol_klein(ui: &mut egui::Ui, name: &str, farbe: Color32) {
+fn symbol_klein(ui: &mut egui::Ui, name: &str, tint: Color32) {
     let (r, _) = ui.allocate_exact_size(Vec2::splat(15.0), egui::Sense::hover());
-    icons::image(name, 15.0, farbe).paint_at(ui, r);
+    icons::image(name, 15.0, tint).paint_at(ui, r);
 }
 
 fn person_zeile(
@@ -2478,10 +2478,10 @@ fn steuer_leiste(
                                 .color(f.p.text),
                             );
                             if mini(ui, f, "Erlauben", true).clicked() {
-                                aktionen.push(Aktion::SteuerungAntwort(*id, true));
+                                aktionen.push(Aktion::ControlReply(*id, true));
                             }
                             if mini(ui, f, "Ablehnen", false).clicked() {
-                                aktionen.push(Aktion::SteuerungAntwort(*id, false));
+                                aktionen.push(Aktion::ControlReply(*id, false));
                             }
                         });
                     });
@@ -2536,11 +2536,11 @@ fn kacheln_bauen(s: &Sicht) -> (Vec<Kachel>, Vec<Kachel>) {
         .map(|(id, name)| Kachel {
             id: *id,
             name: name.clone(),
-            stumm: false,
+            is_muted: false,
             hand: false,
             spricht: false,
             ich: s.leute.iter().any(|p| p.id == *id && p.ich),
-            schirm: true,
+            screen: true,
             kamera_aus: false,
         })
         .collect();
@@ -2552,11 +2552,11 @@ fn kacheln_bauen(s: &Sicht) -> (Vec<Kachel>, Vec<Kachel>) {
             // The own tile is called "Du" - just like in the browser. In the
             // participant list the real name is shown, where it is useful.
             name: if p.ich { "Du".to_string() } else { p.name.clone() },
-            stumm: p.stumm,
+            is_muted: p.is_muted,
             hand: p.hand,
-            spricht: p.spricht && !p.stumm,
+            spricht: p.spricht && !p.is_muted,
             ich: p.ich,
-            schirm: false,
+            screen: false,
             kamera_aus: p.kamera_aus,
         })
         .collect();
@@ -2567,7 +2567,7 @@ fn tex_fuer<'a>(k: &Kachel, b: &'a Bilder) -> Option<&'a egui::TextureHandle> {
     if k.kamera_aus {
         return None;
     }
-    if k.schirm {
+    if k.screen {
         b.schirme.get(&k.id)
     } else if k.ich {
         b.eigen.as_ref()
@@ -2581,7 +2581,7 @@ fn tex_fuer<'a>(k: &Kachel, b: &'a Bilder) -> Option<&'a egui::TextureHandle> {
 /// Wheel = larger/smaller, dragging = move the section (and thereby set it to
 /// "fixed"), double click = back to whole. At the top right sits a
 /// small bar with the same in button form so that you also find it.
-fn schirm_kachel(
+fn screen_tile(
     ui: &mut egui::Ui,
     rect: Rect,
     k: &Kachel,
@@ -2609,7 +2609,7 @@ fn schirm_kachel(
     // following calculations run in THEIR screen coordinates - only this
     // way the magnifier is right even when they already deliver a section.
     let ber = s
-        .schirm_bereich
+        .screen_region
         .map(|(x, y, w, h)| Rect::from_min_size(pos2(x, y), vec2(w, h)))
         .unwrap_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
 
@@ -2647,7 +2647,7 @@ fn schirm_kachel(
     // sharp.
     let fenster = zoom_ausschnitt(z.zoom, mitte);
     z.zoomfenster = (fenster.min.x, fenster.min.y, fenster.width(), fenster.height());
-    let ausschnitt = if z.zoom > 1.0 || s.schirm_bereich.is_some() {
+    let ausschnitt = if z.zoom > 1.0 || s.screen_region.is_some() {
         Some(zoom_uv(fenster, ber))
     } else {
         None
@@ -2682,7 +2682,7 @@ fn schirm_kachel(
     zoomleiste(ui, rect, s, z, f);
 }
 
-/// Kleine Leiste oben rechts im geteilten Bild: -, Stufe, +, Anker, zurueck.
+/// Kleine Leiste oben rechts im geteilten Bild: -, Stufe, +, Anker, go_back.
 fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, f: &Farben) {
     if rect.width() < 260.0 || rect.height() < 120.0 {
         return; // in einem Briefmarkenbild waere die Leiste nur im Weg
@@ -2762,7 +2762,7 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
             )
         } else if !z.scharf {
             ("nur vergroessert", "Klicken: den Sender bitten, diesen Ausschnitt scharf zu schicken")
-        } else if s.schirm_bereich.map(|(_, _, w, _)| w < 0.95).unwrap_or(false) {
+        } else if s.screen_region.map(|(_, _, w, _)| w < 0.95).unwrap_or(false) {
             ("scharf", "Der Sender schickt genau diesen Ausschnitt - echte Bildpunkte. Klicken zum Abschalten.")
         } else {
             ("scharf (kommt)", "Angefragt - der Sender stellt gerade um")
@@ -2781,16 +2781,16 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
 }
 
 fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &Farben) {
-    let flaeche = ui.available_rect_before_wrap();
-    ui.allocate_rect(flaeche, egui::Sense::hover());
-    if flaeche.width() < 40.0 || flaeche.height() < 40.0 {
+    let area = ui.available_rect_before_wrap();
+    ui.allocate_rect(area, egui::Sense::hover());
+    if area.width() < 40.0 || area.height() < 40.0 {
         return;
     }
     let (schirme, kameras) = kacheln_bauen(s);
 
     if schirme.is_empty() {
         z.vollbild = false;
-        raster(ui, flaeche, &kameras, b, f);
+        raster(ui, area, &kameras, b, f);
         return;
     }
     // A shared screen is THE content: large and complete.
@@ -2800,14 +2800,14 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
         .unwrap_or(0);
     if z.vollbild {
         let t = tex_fuer(&schirme[haupt], b);
-        let r = schirm_rect(flaeche.shrink(6.0), t);
-        schirm_kachel(ui, r, &schirme[haupt], t, s, z, f);
+        let r = screen_box(area.shrink(6.0), t);
+        screen_tile(ui, r, &schirme[haupt], t, s, z, f);
         return;
     }
     let lueck = 10.0;
     let rand = 10.0;
-    let innen = flaeche.shrink(rand);
-    let (schirm_flaeche, streifen) = match z.kameraplatz {
+    let innen = area.shrink(rand);
+    let (screen_area, streifen) = match z.kameraplatz {
         Kameraplatz::Aus => (innen, None),
         Kameraplatz::Seite => {
             let sb = (innen.width() * 0.28).min(232.0).max(120.0);
@@ -2840,11 +2840,11 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
     };
     // Mehrere Freigaben: untereinander, jede vollstaendig.
     let n = schirme.len().max(1);
-    let h = (schirm_flaeche.height() - lueck * (n as f32 - 1.0)) / n as f32;
+    let h = (screen_area.height() - lueck * (n as f32 - 1.0)) / n as f32;
     for (i, k) in schirme.iter().enumerate() {
         let r = Rect::from_min_size(
-            pos2(schirm_flaeche.left(), schirm_flaeche.top() + i as f32 * (h + lueck)),
-            vec2(schirm_flaeche.width(), h),
+            pos2(screen_area.left(), screen_area.top() + i as f32 * (h + lueck)),
+            vec2(screen_area.width(), h),
         );
         if r.height() > 20.0 {
             let t = tex_fuer(k, b);
@@ -2852,9 +2852,9 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
             // shares at once a common zoom state would be
             // confusing - you would not know which image it means.
             if i == haupt {
-                schirm_kachel(ui, schirm_rect(r, t), k, t, s, z, f);
+                screen_tile(ui, screen_box(r, t), k, t, s, z, f);
             } else {
-                kachel_malen(ui, schirm_rect(r, t), k, t, f);
+                kachel_malen(ui, screen_box(r, t), k, t, f);
             }
         }
     }
@@ -2904,38 +2904,38 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
 /// How many columns? Zoom and Meet try every column count and
 /// take the one where the single tile becomes LARGEST - with a fixed
 /// 16:9, so that no faces are cropped. Exactly that here.
-pub fn beste_aufteilung(flaeche: Vec2, anzahl: usize) -> (usize, f32) {
+pub fn beste_aufteilung(area: Vec2, anzahl: usize) -> (usize, f32) {
     if anzahl == 0 {
         return (1, 0.0);
     }
     let lueck = 10.0;
     let rand = 20.0;
-    let platz_b = flaeche.x - rand;
-    let platz_h = flaeche.y - rand;
+    let platz_b = area.x - rand;
+    let platz_h = area.y - rand;
     // Alone in the meeting the own tile should not fill the whole area.
     let grenze = if anzahl == 1 {
-        (flaeche.x * 0.7).min(880.0)
+        (area.x * 0.7).min(880.0)
     } else {
         f32::INFINITY
     };
-    let (mut beste_spalten, mut beste_breite) = (1usize, 0.0f32);
+    let (mut beste_spalten, mut best_width) = (1usize, 0.0f32);
     for s in 1..=anzahl {
         let zeilen = anzahl.div_ceil(s) as f32;
-        let aus_breite = (platz_b - lueck * (s as f32 - 1.0)) / s as f32;
-        let aus_hoehe = ((platz_h - lueck * (zeilen - 1.0)) / zeilen) * (16.0 / 9.0);
-        let breite = aus_breite.min(aus_hoehe).min(grenze);
-        if breite > beste_breite {
-            beste_breite = breite;
+        let from_width = (platz_b - lueck * (s as f32 - 1.0)) / s as f32;
+        let from_height = ((platz_h - lueck * (zeilen - 1.0)) / zeilen) * (16.0 / 9.0);
+        let breite = from_width.min(from_height).min(grenze);
+        if breite > best_width {
+            best_width = breite;
             beste_spalten = s;
         }
     }
-    (beste_spalten, beste_breite.max(80.0))
+    (beste_spalten, best_width.max(80.0))
 }
 
-fn raster(ui: &mut egui::Ui, flaeche: Rect, kacheln: &[Kachel], b: &Bilder, f: &Farben) {
+fn raster(ui: &mut egui::Ui, area: Rect, kacheln: &[Kachel], b: &Bilder, f: &Farben) {
     if kacheln.is_empty() {
         ui.painter().text(
-            flaeche.center(),
+            area.center(),
             egui::Align2::CENTER_CENTER,
             "Noch niemand im Raum.",
             egui::FontId::proportional(14.0),
@@ -2944,16 +2944,16 @@ fn raster(ui: &mut egui::Ui, flaeche: Rect, kacheln: &[Kachel], b: &Bilder, f: &
         return;
     }
     let lueck = 10.0;
-    let (spalten, breite) = beste_aufteilung(flaeche.size(), kacheln.len());
+    let (spalten, breite) = beste_aufteilung(area.size(), kacheln.len());
     let hoehe = breite * 9.0 / 16.0;
     let zeilen = kacheln.len().div_ceil(spalten);
     let gesamt_h = zeilen as f32 * hoehe + (zeilen as f32 - 1.0) * lueck;
-    let mut y = flaeche.center().y - gesamt_h / 2.0;
+    let mut y = area.center().y - gesamt_h / 2.0;
     let mut i = 0usize;
     for _ in 0..zeilen {
         let in_zeile = spalten.min(kacheln.len() - i);
         let gesamt_b = in_zeile as f32 * breite + (in_zeile as f32 - 1.0) * lueck;
-        let mut x = flaeche.center().x - gesamt_b / 2.0;
+        let mut x = area.center().x - gesamt_b / 2.0;
         for _ in 0..in_zeile {
             let r = Rect::from_min_size(pos2(x, y), vec2(breite, hoehe));
             kachel_malen(ui, r, &kacheln[i], tex_fuer(&kacheln[i], b), f);
@@ -2985,22 +2985,22 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
             zeigen.push(ich);
         }
     }
-    let flaeche = ui.available_rect_before_wrap();
-    ui.allocate_rect(flaeche, egui::Sense::hover());
-    ui.painter().rect_filled(flaeche, 0.0, f.p.bg);
+    let area = ui.available_rect_before_wrap();
+    ui.allocate_rect(area, egui::Sense::hover());
+    ui.painter().rect_filled(area, 0.0, f.p.bg);
 
     // --- Bar at the bottom: icons only, so that it fits in 260 px width ---
     let leiste_h = 34.0;
     let leiste = Rect::from_min_size(
-        pos2(flaeche.left(), flaeche.bottom() - leiste_h),
-        vec2(flaeche.width(), leiste_h),
+        pos2(area.left(), area.bottom() - leiste_h),
+        vec2(area.width(), leiste_h),
     );
     ui.painter().rect_filled(leiste, 0.0, f.p.card);
     let knoepfe: [(&str, bool, &str); 4] = [
         (
-            if s.stumm { "mic-off" } else { "mic" },
-            s.stumm,
-            if s.stumm { "Stummschaltung aufheben" } else { "Stummschalten" },
+            if s.is_muted { "mic-off" } else { "mic" },
+            s.is_muted,
+            if s.is_muted { "Stummschaltung aufheben" } else { "Stummschalten" },
         ),
         (
             if s.kamera_an { "cam" } else { "cam-off" },
@@ -3033,7 +3033,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
         };
         let grund = if antwort.hovered() { dunkler(grund, 1.25) } else { grund };
         ui.painter().circle_filled(r.center(), gr * 0.5, grund);
-        let farbe = if i == 3 {
+        let tint = if i == 3 {
             Color32::WHITE
         } else if *aus {
             f.bad
@@ -3041,10 +3041,10 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
             f.p.text
         };
         let ir = Rect::from_center_size(r.center(), Vec2::splat(gr * 0.58));
-        icons::image(name, gr * 0.58, farbe).paint_at(ui, ir);
+        icons::image(name, gr * 0.58, tint).paint_at(ui, ir);
         if antwort.clicked() {
             match i {
-                0 => aktionen.push(Aktion::Stumm(!s.stumm)),
+                0 => aktionen.push(Aktion::Muted(!s.is_muted)),
                 1 => aktionen.push(Aktion::Kamera(!s.kamera_an)),
                 2 => *selbst = !*selbst,
                 _ => aktionen.push(Aktion::Verlassen),
@@ -3070,8 +3070,8 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
         hinweise.push((
             format!("{} möchte steuern", kurz(name, 18)),
             Some((
-                Aktion::SteuerungAntwort(*id, true),
-                Aktion::SteuerungAntwort(*id, false),
+                Aktion::ControlReply(*id, true),
+                Aktion::ControlReply(*id, false),
             )),
         ));
     }
@@ -3091,13 +3091,13 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
     }
     // At most three - more would wall in the small window.
     hinweise.truncate(3);
-    let mut hin_hoehe = 0.0;
+    let mut hint_height = 0.0;
     if !hinweise.is_empty() {
         let zeile = 46.0;
-        hin_hoehe = hinweise.len() as f32 * zeile + 6.0;
+        hint_height = hinweise.len() as f32 * zeile + 6.0;
         let bereich = Rect::from_min_max(
-            pos2(flaeche.left() + 6.0, leiste.top() - hin_hoehe),
-            pos2(flaeche.right() - 6.0, leiste.top() - 4.0),
+            pos2(area.left() + 6.0, leiste.top() - hint_height),
+            pos2(area.right() - 6.0, leiste.top() - 4.0),
         );
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -3134,8 +3134,8 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 
     // --- Kacheln darueber ---
     let oben = Rect::from_min_max(
-        flaeche.min,
-        pos2(flaeche.right(), leiste.top() - hin_hoehe),
+        area.min,
+        pos2(area.right(), leiste.top() - hint_height),
     );
     if zeigen.is_empty() {
         ui.painter().text(
@@ -3196,13 +3196,13 @@ pub fn beispiel_beitritt() -> Beitritt {
 /// window than the one the customer gets.
 pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     let namen = ["Justin", "Anna Berger", "Cem", "Dora", "Emil", "Frida"];
-    let mach = |anzahl: usize, mit_schirm: bool, warteraum: bool| {
+    let mach = |anzahl: usize, with_screen: bool, warteraum: bool| {
         let mut leute = Vec::new();
         for i in 0..anzahl {
             leute.push(Person {
                 id: i as u64 + 1,
                 name: namen[i % namen.len()].to_string(),
-                stumm: i % 3 == 1,
+                is_muted: i % 3 == 1,
                 kamera_aus: i % 4 == 2,
                 hand: i % 5 == 3,
                 gastgeber: i == 0,
@@ -3225,12 +3225,12 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             steuer_erlaubt: Vec::new(),
             steuer_gefragt: false,
             steuer_zusage: None,
-            fremd_schirm: false,
+            foreign_screen: false,
             raum: "482-913-770".into(),
             titel: "Wochenbesprechung".into(),
             gastgeber: true,
-            verbindung: "direkt verbunden".into(),
-            verbindung_ton: Ton::Gut,
+            connection: "direkt verbunden".into(),
+            connect_tone: Ton::Gut,
             e2e: false,
             bandbreite: "742 kbit/s".into(),
             leute,
@@ -3266,12 +3266,12 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 "Kamera: Integrated Webcam".into(),
                 "Ton: 1204 raus / 3611 rein · Bild: 890 raus / 2670 rein".into(),
             ],
-            stumm: false,
+            is_muted: false,
             kamera_an: true,
-            schirm_an: mit_schirm,
+            screen_on: with_screen,
             hand: false,
             steuer_frei: true,
-            schirme: if mit_schirm {
+            schirme: if with_screen {
                 vec![(1, "Justin".to_string())]
             } else {
                 Vec::new()
@@ -3289,9 +3289,9 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             kamera_name: "Integrated Webcam (1280x720 -> 640x360)".into(),
             ton_ein: "Mikrofonarray".into(),
             ton_aus: "Lautsprecher (Realtek)".into(),
-            teiler_zeiger: if mit_schirm { Some((0.62, 0.41)) } else { None },
-            schirm_bereich: None,
-            scharf_moeglich: mit_schirm,
+            teiler_zeiger: if with_screen { Some((0.62, 0.41)) } else { None },
+            screen_region: None,
+            scharf_moeglich: with_screen,
             monitore: vec![
                 ("Surface Panel".to_string(), 2496, 1664),
                 ("Generic PnP Monitor".to_string(), 2160, 1440),
@@ -3309,8 +3309,8 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     // The settings screen needs its own example state, otherwise it
     // would never be drawn in --uitest and an error in it would only be
     // noticed by the user.
-    let mit_einstellungen = || Fensterzustand {
-        einstellungen_offen: true,
+    let with_settings = || Fensterzustand {
+        settings_open: true,
         ..Default::default()
     };
     match nr {
@@ -3352,7 +3352,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         8 => (
             "Einstellungen offen",
             mach(3, false, false),
-            mit_einstellungen(),
+            with_settings(),
         ),
         // The zoom in the shared screen - otherwise the magnifier together with
         // its bar would never be drawn and an error in it would only be
@@ -3382,7 +3382,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             "Bildschirm scharf gezoomt",
             {
                 let mut v = mach(3, true, false);
-                v.schirm_bereich = Some((0.47, 0.26, 0.4, 0.4));
+                v.screen_region = Some((0.47, 0.26, 0.4, 0.4));
                 v
             },
             Fensterzustand {
@@ -3418,7 +3418,7 @@ pub fn pruefbilder(ctx: &egui::Context) -> Bilder {
         egui::ColorImage::from_rgba_unmultiplied([b, h], &px)
     };
     let kam = ctx.load_texture("pruef_kam", muster(640, 360, 90), Default::default());
-    let schirm = ctx.load_texture("pruef_schirm", muster(1920, 1080, 40), Default::default());
+    let screen = ctx.load_texture("pruef_schirm", muster(1920, 1080, 40), Default::default());
     let mut b = Bilder {
         eigen: Some(kam.clone()),
         ..Default::default()
@@ -3426,7 +3426,7 @@ pub fn pruefbilder(ctx: &egui::Context) -> Bilder {
     for i in 1..=6u64 {
         b.kameras.insert(i, kam.clone());
     }
-    b.schirme.insert(1, schirm);
+    b.schirme.insert(1, screen);
     b
 }
 
@@ -3512,7 +3512,7 @@ mod tests {
     /// If the viewer drags faster than the sender switches, nothing may
     /// run out of the image - better to stay at the edge.
     #[test]
-    fn fenster_ausserhalb_bleibt_im_bild() {
+    fn window_outside_stays_in_frame() {
         let bereich = Rect::from_min_size(pos2(0.5, 0.5), vec2(0.2, 0.2));
         let fenster = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.2, 0.2));
         let uv = zoom_uv(fenster, bereich);
@@ -3535,7 +3535,7 @@ mod tests {
     }
 
     #[test]
-    fn zoomanker_dreht_sich_im_kreis() {
+    fn zoom_anchor_rotates_in_circle() {
         let mut a = Zoomanker::Eigene;
         for _ in 0..3 {
             a = a.weiter();
@@ -3545,7 +3545,7 @@ mod tests {
     }
 
     #[test]
-    fn kameraplatz_dreht_sich_im_kreis() {
+    fn camera_slot_rotates_in_circle() {
         let mut k = Kameraplatz::Seite;
         k = k.weiter();
         assert_eq!(k, Kameraplatz::Unten);

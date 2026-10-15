@@ -548,7 +548,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("dev.stats", "Verbindungen", "Connections"),
     ("dev.last", "Zuletzt", "Last"),
     ("dev.nosel", "Links ein Gerät anklicken.", "Pick a device on the left."),
-    // Sitzung
+    // Session
     ("sess.mic_on", "Mikrofon an", "Microphone on"),
     ("sess.mic_off", "Mikrofon aus", "Microphone off"),
     ("sess.snd_on", "Ton an", "Sound on"),

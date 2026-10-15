@@ -5,7 +5,7 @@ use super::*;
 // audio, camera, screen, remote-control release - through
 // EXACTLY the class the window also uses (NativMeet). This measures
 // what the app really does, not a side path next to it.
-//   freeviewer --meetalles <raum> <passwort> [name] [sekunden]
+//   freeviewer --meetalles <raum> <passphrase> [name] [sekunden]
 pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     // Optional end-to-end key as the last argument - this
@@ -13,7 +13,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
     let e2e_arg = args
         .iter()
         .skip(i + 1)
-        .find(|a| a.len() == 43 && crate::meete2e::Schluessel::aus_text(a).is_some())
+        .find(|a| a.len() == 43 && crate::meete2e::Key::aus_text(a).is_some())
         .cloned();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
@@ -44,9 +44,9 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
         }
     };
     println!("ALLES E2E {}", m.e2e_an);
-    println!("ALLES START {}", m.meldung);
+    println!("ALLES START {}", m.notice);
     let start = std::time::Instant::now();
-    let (mut kamera_an, mut schirm_an, mut frei) = (false, false, false);
+    let (mut kamera_an, mut screen_on, mut frei) = (false, false, false);
     while start.elapsed().as_secs() < dauer {
         m.pumpe();
         // Switch on one after another so that it is visible in the browser
@@ -55,35 +55,35 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
         if !kamera_an && s >= 3 {
             kamera_an = true;
             m.kamera_schalten(true);
-            println!("ALLES KAMERA {} ({})", m.kamera_an, m.kamera_meldung);
+            println!("ALLES KAMERA {} ({})", m.kamera_an, m.camera_notice);
         }
-        if !schirm_an && s >= 8 {
-            schirm_an = true;
-            m.schirm_schalten(true, 0);
-            println!("ALLES SCHIRM {} ({})", m.schirm_an, m.schirm_meldung);
+        if !screen_on && s >= 8 {
+            screen_on = true;
+            m.toggle_screen(true, 0);
+            println!("ALLES SCHIRM {} ({})", m.screen_on, m.screen_notice);
         }
         if !frei && s >= 12 {
             frei = true;
-            m.steuerung_freigeben(true);
+            m.release_control(true);
             println!("ALLES STEUERUNG {}", m.steuer_frei);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let z = m.zustand();
+    let z = m.state();
     let zahlen = m.zahlen();
     println!(
         "ALLES ERGEBNIS leute={} ton_gesendet={} ton_empfangen={} kamera_gesendet={} schirm_gesendet={} bild_empfangen={} codec={}",
         z.leute.len(),
         zahlen.gesendet,
-        zahlen.empfangen,
+        zahlen.receive,
         m.bild_gesendet,
-        m.schirm_gesendet,
-        m.bild_zaehler,
+        m.screen_sent,
+        m.image_counter,
         m.bild_codec
     );
     println!(
         "ALLES ZUSTAND kamera={} schirm={} steuerung={} meldung={} kamera_meldung={} schirm_meldung={}",
-        m.kamera_an, m.schirm_an, m.steuer_frei, m.meldung, m.kamera_meldung, m.schirm_meldung
+        m.kamera_an, m.screen_on, m.steuer_frei, m.notice, m.camera_notice, m.screen_notice
     );
     m.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(600));
@@ -94,7 +94,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
 // Control test (stage 4): does the native client release remote control,
 // and does it notice when someone else releases it? The browser gets
 // its "Control" button from this - and we get the counter-check here.
-//   freeviewer --meetsteuer <raum> <passwort> [name] [sekunden] [fvid]
+//   freeviewer --meetsteuer <raum> <passphrase> [name] [sekunden] [fvid]
 pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -119,7 +119,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
     };
     let start = std::time::Instant::now();
     let mut freigegeben = false;
-    let mut zurueck = false;
+    let mut go_back = false;
     let mut angebote = 0u32;
     while start.elapsed().as_secs() < dauer {
         for e in sig.abholen() {
@@ -141,7 +141,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
                 _ => {}
             }
         }
-        if !freigegeben && sig.zustand().ich != 0 && start.elapsed().as_secs() >= 3 {
+        if !freigegeben && sig.state().ich != 0 && start.elapsed().as_secs() >= 3 {
             freigegeben = true;
             sig.fernsteuerung(true, &fvid);
             println!("STEUERTEST FREIGEGEBEN {}", fvid);
@@ -151,16 +151,16 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         // we left for that, it would be no proof, just the
         // usual cleanup.
         if freigegeben
-            && !zurueck
+            && !go_back
             && start.elapsed().as_secs() >= dauer.saturating_sub(8).max(9)
         {
-            zurueck = true;
+            go_back = true;
             sig.fernsteuerung(false, "");
             println!("STEUERTEST ZURUECKGENOMMEN");
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let z = sig.zustand();
+    let z = sig.state();
     for t in z.leute.iter() {
         if !t.fvid.is_empty() {
             println!("STEUERTEST STEUERBAR {} {}", t.name, t.fvid);
@@ -172,7 +172,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         z.leute.len(),
         angebote
     );
-    if !zurueck {
+    if !go_back {
         sig.fernsteuerung(false, "");
         std::thread::sleep(std::time::Duration::from_millis(800));
     }
@@ -184,7 +184,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
 
 // Receive test (stage 3b): what ARRIVES at the native client - and is
 // the camera cleanly separated from the screen?
-//   freeviewer --meetempfang <raum> <passwort> [name] [sekunden]
+//   freeviewer --meetempfang <raum> <passphrase> [name] [sekunden]
 pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -201,7 +201,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("EMPFANGSTEST FEHLER RTC: {}", e);
@@ -211,7 +211,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
     let mut kameras = meetvideo::Dekodierer::neu();
     let mut schirme = meetvideo::Dekodierer::neu();
     let mut angeboten = false;
-    let (mut kam_rahmen, mut schirm_rahmen) = (0u64, 0u64);
+    let (mut kam_rahmen, mut screen_frame) = (0u64, 0u64);
     let start = std::time::Instant::now();
     while start.elapsed().as_secs() < dauer {
         for e in sig.abholen() {
@@ -255,7 +255,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
             } = te
             {
                 if bildschirm {
-                    schirm_rahmen += 1;
+                    screen_frame += 1;
                     schirme.rahmen(quelle, &daten);
                 } else {
                     kam_rahmen += 1;
@@ -279,12 +279,12 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
         kam_rahmen,
         kameras.gezaehlt,
         masse(&kameras),
-        schirm_rahmen,
+        screen_frame,
         schirme.gezaehlt,
         masse(&schirme),
-        if schirme.letzter_fehler.is_empty() { kameras.letzter_fehler.clone() } else { schirme.letzter_fehler.clone() }
+        if schirme.last_error.is_empty() { kameras.last_error.clone() } else { schirme.last_error.clone() }
     );
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(300));
     println!("EMPFANGSTEST FERTIG");
@@ -293,7 +293,7 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
 
 // Screen test (stage 3): send the REAL screen as its own track into the
 // meeting - without a browser.
-//   freeviewer --meetschirm <raum> <passwort> [name] [sekunden] [schirm-nr]
+//   freeviewer --meetschirm <raum> <passphrase> [name] [sekunden] [screen-nr]
 pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -332,7 +332,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("SCHIRMTEST FEHLER RTC: {}", e);
@@ -371,7 +371,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
                 // Do NOT swallow errors - otherwise at the end you only see
                 // "nothing sent" and guess what the cause was.
                 meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
-                meetsig::Ereignis::Fehler { code, text } => {
+                meetsig::Ereignis::FriendError { code, text } => {
                     println!("EREIGNIS Fehler {}: {}", code, text)
                 }
                 meetsig::Ereignis::Abgewiesen(m) => println!("EREIGNIS Abgewiesen: {}", m),
@@ -384,7 +384,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         for te in ton.abholen() {
             match te {
                 meetrtc::TonEreignis::Verbunden => println!("EREIGNIS RTC verbunden"),
-                meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS RTC-Fehler: {}", f),
+                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS RTC-Fehler: {}", f),
                 _ => {}
             }
         }
@@ -412,7 +412,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
                     Ok(teile) => {
                         for t in teile {
                             pakete += 1;
-                            ton.schirm_senden(t.data);
+                            ton.screen_send(t.data);
                         }
                     }
                     Err(e) => println!("KODIER-FEHLER {}", e),
@@ -431,8 +431,8 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         gesendet,
         koder.bilder,
         pakete,
-        z.schirm_gesendet,
-        z.bild_empfangen,
+        z.screen_sent,
+        z.frame_received,
         z.bytes_raus,
         if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
         if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
@@ -441,7 +441,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
     auf.stoppen();
     sig.roh(serde_json::json!({"t":"screen","on":false}));
     std::thread::sleep(std::time::Duration::from_millis(200));
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("SCHIRMTEST FERTIG");
@@ -449,7 +449,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
 }
 
 // Kameratest (Stufe 2d): ECHTES Kamerabild als H.264 ins Meeting.
-//   freeviewer --meetkamera <raum> <passwort> [name] [sekunden] [kamera]
+//   freeviewer --meetkamera <raum> <passphrase> [name] [sekunden] [kamera]
 pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -463,7 +463,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
     for (n, k) in meetcam::liste().iter().enumerate() {
         println!("KAMERA {} name={}", n, k.name);
     }
-    let kam = match meetcam::oeffnen(welche, meetvideo::BREITE, meetvideo::HOEHE, 30) {
+    let kam = match meetcam::oeffnen(welche, meetvideo::WIDTH, meetvideo::HEIGHT, 30) {
         Ok(k) => k,
         Err(e) => {
             println!("KAMERATEST FEHLER Kamera: {}", e);
@@ -485,7 +485,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("KAMERATEST FEHLER Ton: {}", e);
@@ -552,7 +552,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
                     Ok(teile) => {
                         for t in teile {
                             pakete += 1;
-                            ton.bild_senden(t.data);
+                            ton.send_frame(t.data);
                         }
                     }
                     Err(e) => println!("KODIER-FEHLER {}", e),
@@ -570,14 +570,14 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         koder.bilder,
         pakete,
         z.bild_gesendet,
-        z.bild_empfangen,
+        z.frame_received,
         z.bytes_raus,
         if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
         if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
         kam.fehler()
     );
     kam.stoppen();
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("KAMERATEST FERTIG");
@@ -586,7 +586,7 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
 
 // Video test (stage 2b): sends a moving test pattern as H.264 into the
 // meeting. This measures the whole chain without a camera.
-//   freeviewer --meetbild <raum> <passwort> [name] [sekunden]
+//   freeviewer --meetbild <raum> <passphrase> [name] [sekunden]
 pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -594,8 +594,8 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativBild".to_string());
     let dauer: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let mut koder = match meetvideo::Kodierer::neu(
-        meetvideo::BREITE,
-        meetvideo::HOEHE,
+        meetvideo::WIDTH,
+        meetvideo::HEIGHT,
         15,
         1_500_000,
     ) {
@@ -605,7 +605,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut muster = meetvideo::Muster::neu(meetvideo::BREITE, meetvideo::HOEHE);
+    let mut muster = meetvideo::Muster::neu(meetvideo::WIDTH, meetvideo::HEIGHT);
     let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
@@ -613,7 +613,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("BILDTEST FEHLER Ton: {}", e);
@@ -661,7 +661,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
                 Ok(teile) => {
                     for t in teile {
                         pakete += 1;
-                        ton.bild_senden(t.data);
+                        ton.send_frame(t.data);
                     }
                 }
                 Err(e) => println!("KODIER-FEHLER {}", e),
@@ -672,9 +672,9 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
     let z = ton.zahlen();
     println!(
         "ZAHLEN verbunden={} bilder_kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={}",
-        z.verbunden, koder.bilder, pakete, z.bild_gesendet, z.bild_empfangen, z.bytes_raus
+        z.verbunden, koder.bilder, pakete, z.bild_gesendet, z.frame_received, z.bytes_raus
     );
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("BILDTEST FERTIG");
@@ -682,7 +682,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
 }
 
 // Practical test with REAL devices (stage 1c):
-//   freeviewer --meetmik <raum> <passwort> [name] [sekunden]
+//   freeviewer --meetmik <raum> <passphrase> [name] [sekunden]
 // Takes the default microphone, plays the others through the speaker
 // and switches the echo suppression in between.
 pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
@@ -694,7 +694,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
     let (ein_liste, aus_liste) = meetaudio::geraete_liste();
     println!("MIKROFONE {:?}", ein_liste);
     println!("LAUTSPRECHER {:?}", aus_liste);
-    let geraete = match meetaudio::geraete_starten(None, None) {
+    let geraete = match meetaudio::start_devices(None, None) {
         Ok(g) => g,
         Err(e) => {
             println!("MIKROTEST FEHLER Geraete: {}", e);
@@ -709,7 +709,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("MIKROTEST FEHLER Ton: {}", e);
@@ -750,7 +750,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
                 .fold(0.0f32, f32::max);
             mikro_pegel = mikro_pegel.max(spitze);
             mikro_rahmen += 1;
-            ton.senden(rahmen);
+            ton.send_out(rahmen);
         }
         // Netz -> Lautsprecher
         for te in ton.abholen() {
@@ -762,7 +762,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
                 }
                 meetrtc::TonEreignis::Bild { .. } => {}
                 meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
-                meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
                 meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
             }
         }
@@ -771,9 +771,9 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
     let z = ton.zahlen();
     println!(
         "ZAHLEN verbunden={} gesendet={} empfangen={} mikro_rahmen={} mikro_pegel={:.3} pegel_rein={:.3}",
-        z.verbunden, z.gesendet, z.empfangen, mikro_rahmen, mikro_pegel, z.pegel_rein
+        z.verbunden, z.gesendet, z.receive, mikro_rahmen, mikro_pegel, z.pegel_rein
     );
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("MIKROTEST FERTIG");
@@ -783,7 +783,7 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
 // Native AUDIO test (stage 1b): join, build a real WebRTC connection to the
 // media server and send a test tone or measure the audio of the
 // others.
-//   freeviewer --meetton <raum> <passwort> [name] [sekunden]
+//   freeviewer --meetton <raum> <passphrase> [name] [sekunden]
 pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let raum = args.get(i + 1).cloned().unwrap_or_default();
@@ -797,7 +797,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let ton = match meetrtc::starten() {
+    let ton = match meetrtc::launch() {
         Ok(t) => t,
         Err(e) => {
             println!("TONTEST FEHLER Ton: {}", e);
@@ -850,7 +850,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
         for te in ton.abholen() {
             match te {
                 meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
-                meetrtc::TonEreignis::Fehler(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
                 meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
                 meetrtc::TonEreignis::Rahmen { .. } => {}
                 meetrtc::TonEreignis::Bild {
@@ -879,7 +879,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
             geschwallt = true;
             if schwall > 0 {
                 for _ in 0..schwall {
-                    ton.senden(meetrtc::testton(&mut phase, 440.0));
+                    ton.send_out(meetrtc::testton(&mut phase, 440.0));
                 }
                 println!("SCHWALL {} Rahmen auf einmal eingespeist ({} ms Ton)", schwall, schwall * 20);
             }
@@ -887,7 +887,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
         // every 20 ms one frame of test tone (440 Hz)
         while std::time::Instant::now() >= naechster {
             naechster += std::time::Duration::from_millis(20);
-            ton.senden(meetrtc::testton(&mut phase, 440.0));
+            ton.send_out(meetrtc::testton(&mut phase, 440.0));
         }
         let z = ton.zahlen();
         pegel_max = pegel_max.max(z.pegel_rein);
@@ -897,7 +897,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
     let z = ton.zahlen();
     println!(
         "ZAHLEN verbunden={} gesendet={} empfangen={} bild_gesendet={} bild_empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3} bandbreite={} ton_verworfen={} ton_stau={}",
-        z.verbunden, z.gesendet, z.empfangen, z.bild_gesendet, z.bild_empfangen,
+        z.verbunden, z.gesendet, z.receive, z.bild_gesendet, z.frame_received,
         z.bytes_raus, z.bytes_rein, pegel_max, z.bandbreite, z.ton_verworfen, z.ton_stau
     );
     println!(
@@ -905,7 +905,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
         stau_max,
         stau_max * 20
     );
-    ton.beenden();
+    ton.finish();
     sig.verlassen();
     std::thread::sleep(std::time::Duration::from_millis(500));
     println!("TONTEST FERTIG");
@@ -913,7 +913,7 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
 }
 
 // Native meeting test (stage 1, without UI):
-//   freeviewer --meettest <raum> <passwort> [name] [sekunden]
+//   freeviewer --meettest <raum> <passphrase> [name] [sekunden]
 // Joins, reports every event, sends a chat message and leaves again.
 pub(crate) fn cli_meettest(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -942,14 +942,14 @@ pub(crate) fn cli_meettest(i: usize) -> eframe::Result<()> {
                         s.chat("Willkommen im nativen Meeting");
                     }
                 }
-                if !chat_geschickt && s.zustand().ich != 0 {
+                if !chat_geschickt && s.state().ich != 0 {
                     s.chat("Hallo aus dem nativen Client");
                     s.hand(true);
                     chat_geschickt = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            println!("ZUSTAND {:?}", s.zustand());
+            println!("ZUSTAND {:?}", s.state());
             s.verlassen();
             std::thread::sleep(std::time::Duration::from_millis(600));
             println!("MEETTEST FERTIG");

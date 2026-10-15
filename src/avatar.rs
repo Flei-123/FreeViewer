@@ -28,7 +28,7 @@ pub struct Aussehen {
     pub form: u8,
     /// Augenfarbe 0..3
     pub augen: u8,
-    /// Hintergrund 0..5
+    /// Background 0..5
     pub grund: u8,
     pub brille: bool,
     pub bart: bool,
@@ -48,9 +48,9 @@ impl Default for Aussehen {
     }
 }
 
-type Farbe = [u8; 3];
+type Color = [u8; 3];
 
-pub const HAUTTOENE: [Farbe; 6] = [
+pub const HAUTTOENE: [Color; 6] = [
     [0xF7, 0xD9, 0xC4],
     [0xEA, 0xC0, 0x9C],
     [0xD2, 0xA0, 0x7A],
@@ -58,7 +58,7 @@ pub const HAUTTOENE: [Farbe; 6] = [
     [0x7B, 0x4F, 0x33],
     [0x4E, 0x31, 0x1F],
 ];
-pub const HAARFARBEN: [Farbe; 6] = [
+pub const HAARFARBEN: [Color; 6] = [
     [0x1B, 0x1B, 0x1F],
     [0x4A, 0x33, 0x24],
     [0x8B, 0x5A, 0x2B],
@@ -66,13 +66,13 @@ pub const HAARFARBEN: [Farbe; 6] = [
     [0xB0, 0x3A, 0x2E],
     [0x9A, 0x9A, 0xA6],
 ];
-pub const AUGENFARBEN: [Farbe; 4] = [
+pub const AUGENFARBEN: [Color; 4] = [
     [0x3A, 0x2A, 0x1E],
     [0x2F, 0x6B, 0xA8],
     [0x35, 0x7A, 0x4E],
     [0x6B, 0x5A, 0x8C],
 ];
-pub const GRUNDFARBEN: [Farbe; 6] = [
+pub const GRUNDFARBEN: [Color; 6] = [
     [0x11, 0x18, 0x28],
     [0x0E, 0x2A, 0x2E],
     [0x24, 0x16, 0x2E],
@@ -83,12 +83,12 @@ pub const GRUNDFARBEN: [Farbe; 6] = [
 
 pub const HAARFORMEN: [&str; 4] = ["kurz", "lang", "ohne", "Pony"];
 
-fn hole(t: &[Farbe], i: u8) -> Farbe {
+fn hole(t: &[Color], i: u8) -> Color {
     t[(i as usize).min(t.len() - 1)]
 }
 
-/// Farbe aufhellen (>1) oder abdunkeln (<1).
-fn tonen(c: Farbe, f: f32) -> Farbe {
+/// Color aufhellen (>1) oder abdunkeln (<1).
+fn tonen(c: Color, f: f32) -> Color {
     [
         (c[0] as f32 * f).clamp(0.0, 255.0) as u8,
         (c[1] as f32 * f).clamp(0.0, 255.0) as u8,
@@ -103,7 +103,7 @@ struct Blatt<'a> {
 }
 
 impl Blatt<'_> {
-    fn punkt(&mut self, x: i32, y: i32, c: Farbe, deckung: f32) {
+    fn punkt(&mut self, x: i32, y: i32, c: Color, deckung: f32) {
         if x < 0 || y < 0 || x >= self.b || y >= self.h || deckung <= 0.0 {
             return;
         }
@@ -117,7 +117,7 @@ impl Blatt<'_> {
 
     /// Filled ellipse with a soft edge (one pixel of transition) -
     /// without it a face looks like made of building blocks.
-    fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Farbe) {
+    fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Color) {
         if rx <= 0.0 || ry <= 0.0 {
             return;
         }
@@ -139,7 +139,7 @@ impl Blatt<'_> {
     }
 
     /// Only the upper half of an ellipse (for hair and eyelids).
-    fn halbellipse_oben(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Farbe) {
+    fn halbellipse_oben(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Color) {
         let x0 = (cx - rx - 1.0).floor() as i32;
         let x1 = (cx + rx + 1.0).ceil() as i32;
         let y0 = (cy - ry - 1.0).floor() as i32;
@@ -155,7 +155,7 @@ impl Blatt<'_> {
         }
     }
 
-    fn rechteck(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, c: Farbe) {
+    fn rechteck(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, c: Color) {
         for y in (y0.floor() as i32)..=(y1.ceil() as i32) {
             for x in (x0.floor() as i32)..=(x1.ceil() as i32) {
                 self.punkt(x, y, c, 1.0);
@@ -363,7 +363,7 @@ pub fn mundstellung(pegel: f32, vorher: f32) -> f32 {
 mod tests {
     use super::*;
 
-    fn punkt(px: &[u8], b: u32, x: u32, y: u32) -> Farbe {
+    fn punkt(px: &[u8], b: u32, x: u32, y: u32) -> Color {
         let i = ((y * b + x) * 3) as usize;
         [px[i], px[i + 1], px[i + 2]]
     }
@@ -376,11 +376,11 @@ mod tests {
     }
 
     #[test]
-    fn in_der_mitte_steht_ein_gesicht_und_nicht_der_hintergrund() {
+    fn face_is_in_the_middle_not_the_background() {
         let a = Aussehen::default();
         let mut px = Vec::new();
         zeichnen(&a, 320, 320, 0.0, 0.0, 0.0, &mut px);
-        // Ecke = Hintergrund, Mitte = Haut. Waeren beide gleich, waere
+        // Ecke = Background, Mitte = Haut. Waeren beide gleich, waere
         // gar nichts gezeichnet worden.
         let ecke = punkt(&px, 320, 3, 3);
         // Deliberately the CHEEK: depending on the hairstyle, hair sits in the
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn jede_einstellung_aendert_das_bild_wirklich() {
+    fn every_setting_really_changes_the_image() {
         // A choice that changes nothing would be worse than none.
         let grund = Aussehen::default();
         let mut a_px = Vec::new();

@@ -24,9 +24,9 @@ use std::sync::{Arc, Mutex};
 
 pub use crate::meetcam::Bild;
 
-/// Ein teilbarer Bildschirm.
+/// Ein teilbarer Display.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Schirm {
+pub struct Screen {
     pub name: String,
     pub breite: u32,
     pub hoehe: u32,
@@ -42,7 +42,7 @@ pub struct Schirm {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Quelle {
     /// Index aus `liste()`.
-    Bildschirm(usize),
+    Display(usize),
     /// Fensterkennung aus `crate::fenster::liste()`.
     Fenster(isize),
 }
@@ -50,7 +50,7 @@ pub enum Quelle {
 impl Quelle {
     fn oeffnen(&self) -> Option<Box<dyn crate::capture::Backend>> {
         match self {
-            Quelle::Bildschirm(i) => crate::capture::open_index(true, *i),
+            Quelle::Display(i) => crate::capture::open_index(true, *i),
             Quelle::Fenster(k) => crate::fenster::aufnahme(*k),
         }
     }
@@ -59,7 +59,7 @@ impl Quelle {
     /// Needed for the red frame.
     pub fn lage(&self) -> Option<(i32, i32, i32, i32)> {
         match self {
-            Quelle::Bildschirm(i) => crate::capture::list_monitors(true)
+            Quelle::Display(i) => crate::capture::list_monitors(true)
                 .get(*i)
                 .map(|m| (m.x, m.y, m.w as i32, m.h as i32)),
             Quelle::Fenster(k) => crate::fenster::lage(*k),
@@ -68,10 +68,10 @@ impl Quelle {
 }
 
 /// All screens of this machine, the main screen first.
-pub fn liste() -> Vec<Schirm> {
+pub fn liste() -> Vec<Screen> {
     crate::capture::list_monitors(true)
         .into_iter()
-        .map(|m| Schirm {
+        .map(|m| Screen {
             name: m.name,
             breite: m.w,
             hoehe: m.h,
@@ -255,7 +255,7 @@ pub fn bild_nach_nv12_teil(
 /// worse than none at all.
 pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
     match q {
-        Quelle::Bildschirm(i) => zeiger_anteil(i),
+        Quelle::Display(i) => zeiger_anteil(i),
         Quelle::Fenster(_) => {
             #[cfg(windows)]
             {
@@ -436,11 +436,11 @@ impl Drop for Aufnahme {
 /// `max_b`/`max_h` limit the transmission size (aspect ratio
 /// is preserved), `fps` is the upper limit of the frame rate.
 pub fn oeffnen(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
-    oeffnen_quelle(Quelle::Bildschirm(index), max_b, max_h, fps)
+    open_source(Quelle::Display(index), max_b, max_h, fps)
 }
 
 /// Like `oeffnen`, but the source may also be a single window.
-pub fn oeffnen_quelle(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
+pub fn open_source(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
     let fps = fps.clamp(1, 60);
     let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
     let zaehler = Arc::new(AtomicU64::new(0));
@@ -491,7 +491,7 @@ fn schleife(
         Some(b) => b,
         None => {
             let _ = tx.send(Err(match quelle {
-                Quelle::Bildschirm(_) => "kein Bildschirm aufnehmbar".to_string(),
+                Quelle::Display(_) => "kein Bildschirm aufnehmbar".to_string(),
                 Quelle::Fenster(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
             }));
             return;
@@ -499,8 +499,8 @@ fn schleife(
     };
     let (sb, sh) = backend.size();
     let (zb, zh) = zielgroesse(sb, sh, max_b, max_h);
-    let anzeige = match quelle {
-        Quelle::Bildschirm(index) => crate::capture::list_monitors(true)
+    let display_name = match quelle {
+        Quelle::Display(index) => crate::capture::list_monitors(true)
             .get(index)
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("Bildschirm {}", index + 1)),
@@ -510,7 +510,7 @@ fn schleife(
             .map(|f| f.titel)
             .unwrap_or_else(|| "Fenster".to_string()),
     };
-    let name = format!("{} ({}x{} -> {}x{}, {})", anzeige, sb, sh, zb, zh, backend.name());
+    let name = format!("{} ({}x{} -> {}x{}, {})", display_name, sb, sh, zb, zh, backend.name());
     if tx.send(Ok((name, zb, zh))).is_err() {
         return;
     }
@@ -545,7 +545,7 @@ fn schleife(
                     None => {
                         if let Ok(mut f) = fehler.lock() {
                             *f = match quelle {
-                                Quelle::Bildschirm(_) => "Bildschirm nicht mehr aufnehmbar".into(),
+                                Quelle::Display(_) => "Bildschirm nicht mehr aufnehmbar".into(),
                                 // For a window the most common reason
                                 // is simply: it was closed.
                                 Quelle::Fenster(_) => "Das geteilte Fenster ist weg".to_string(),
@@ -672,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn ohne_wunsch_geht_der_ganze_schirm_raus() {
+    fn without_wish_the_whole_screen_goes_out() {
         assert_eq!(bereich_vereinen(&[]), GANZ);
         assert_eq!(bereich_vereinen(&[(0.0, 0.0, 1.0, 1.0)]), GANZ);
         // Almost everything is also everything - otherwise the fast path via the
@@ -757,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn bild_nach_nv12_hat_die_richtige_groesse_und_farbe() {
+    fn image_to_nv12_has_right_size_and_color() {
         // Ein reines Rot in BGRA: B=0, G=0, R=255.
         let (sb, sh) = (64u32, 32u32);
         let mut px = vec![0u8; (sb * sh * 4) as usize];
@@ -809,7 +809,7 @@ mod tests {
     /// and Mac; where there is no screen (server), it is honestly
     /// skipped instead of falsely reporting green.
     #[test]
-    fn bildschirm_bis_h264_durch() {
+    fn display_through_h264() {
         let schirme = liste();
         if schirme.is_empty() {
             println!("kein Bildschirm auf dieser Maschine - uebersprungen");

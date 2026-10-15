@@ -38,7 +38,7 @@ if let Some(path) = self.shot.clone() {
     }
 
     /// Only for images: draw an example state of the meeting
-    /// (`--meetdemo N --shot datei.jpg`). Without this path there would never be a
+    /// (`--meetdemo N --shot file.jpg`). Without this path there would never be a
     /// real image of the stage - the build server has neither a camera nor a second
     /// participant.
     pub(crate) fn meet_demo_ui(&mut self, ctx: &egui::Context, nr: usize) {
@@ -97,7 +97,7 @@ if let Some(path) = self.shot.clone() {
         }
     }
 
-    /// Kopfzeile: Seitenname, Suche, eigener Zustand.
+    /// Kopfzeile: Seitenname, Suche, eigener State.
     pub(crate) fn header(&mut self, ctx: &egui::Context) {
         let p = theme::palette();
         let my_id = self.shared.my_id.lock_ok().clone();
@@ -115,7 +115,7 @@ if let Some(path) = self.shot.clone() {
                         View::Start => i18n::t("nav.start"),
                         View::Devices => i18n::t("nav.devices"),
                         View::Meet => i18n::t("nav.meet"),
-                        View::Freunde => i18n::t("nav.friends"),
+                        View::Friends => i18n::t("nav.friends"),
                         View::Settings => i18n::t("nav.settings"),
                     };
                     ui.label(egui::RichText::new(title).size(16.0).strong().color(p.text));
@@ -140,14 +140,14 @@ if let Some(path) = self.shot.clone() {
                         // The state comes from the line itself, not from
                         // "we once had a number": 0 connecting, 1 ready,
                         // 2 offline.
-                        let zustand = self.shared.net_state();
-                        let online = online && zustand == 1;
+                        let state = self.shared.net_state();
+                        let online = online && state == 1;
                         status_pill(
                             ui,
                             online,
                             if online {
                                 i18n::t("st.ready")
-                            } else if zustand == 2 {
+                            } else if state == 2 {
                                 i18n::t("st.no_net")
                             } else {
                                 i18n::t("st.connecting")
@@ -173,18 +173,18 @@ if let Some(path) = self.shot.clone() {
     /// Why not already at program start: that costs a request to the relay
     /// every 20 seconds. Whoever never opens the page should not
     /// be burdened with it either.
-    pub(crate) fn freunde_dienst(&mut self) -> std::sync::Arc<freunde::Dienst> {
-        if let Some(d) = &self.freunde {
+    pub(crate) fn friends_service(&mut self) -> std::sync::Arc<friends::Dienst> {
+        if let Some(d) = &self.friends {
             return d.clone();
         }
-        let d = freunde::Dienst::vom_geraet(self.shared.relay_url.clone());
+        let d = friends::Dienst::vom_geraet(self.shared.relay_url.clone());
         // With an account the list works across devices, without an account it is local -
         // both must work, so the symbol is only an extra.
         if let Some(sess) = &self.acc {
-            d.konto_setzen(Some(&sess.token));
+            d.set_account(Some(&sess.token));
         }
-        d.starten();
-        self.freunde = Some(d.clone());
+        d.launch();
+        self.friends = Some(d.clone());
         d
     }
 
@@ -194,44 +194,44 @@ if let Some(path) = self.shot.clone() {
     /// WHY mutual: a friendship that one side can establish alone
     /// is none - it would just be a list everybody enters themselves into.
     /// The relay enforces this, not this window.
-    pub(crate) fn freunde_view(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn friends_view(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette();
-        let d = self.freunde_dienst();
-        while let Some(m) = d.meldung() {
+        let d = self.friends_service();
+        while let Some(m) = d.notice() {
             // Show only the messages that really concern the user.
-            self.freunde_meldung = match m {
+            self.friends_notice = match m {
                 // The sync runs every 20 seconds - turning each one into
                 // a message would be pure noise.
-                freunde::Meldung::Abgeglichen { .. } => continue,
-                freunde::Meldung::Angefragt(w) => {
+                friends::Notice::Abgeglichen { .. } => continue,
+                friends::Notice::Angefragt(w) => {
                     format!("Anfrage an {} ist raus.", w)
                 }
-                freunde::Meldung::SofortBefreundet(w) => {
+                friends::Notice::SofortBefreundet(w) => {
                     format!("{} hatte dich auch gefragt - ihr seid jetzt Freunde.", w)
                 }
-                freunde::Meldung::Angenommen(w) => format!("{} ist jetzt dein Freund.", w),
-                freunde::Meldung::Abgelehnt(w) => format!("Anfrage von {} abgelehnt.", w),
-                freunde::Meldung::Entfernt(w) => format!("{} entfernt.", w),
-                freunde::Meldung::EinladungGesendet(w) => {
+                friends::Notice::Angenommen(w) => format!("{} ist jetzt dein Freund.", w),
+                friends::Notice::Abgelehnt(w) => format!("Anfrage von {} abgelehnt.", w),
+                friends::Notice::Entfernt(w) => format!("{} entfernt.", w),
+                friends::Notice::EinladungGesendet(w) => {
                     format!("Einladung ist bei {} angekommen (Link liegt zusätzlich in der Zwischenablage).", w)
                 }
-                freunde::Meldung::EinladungNurLink(w) => format!(
+                friends::Notice::EinladungNurLink(w) => format!(
                     "Der Relay kann noch keine Einladungen zustellen – der Link liegt in der Zwischenablage, schick ihn {} (z. B. per Chat).",
                     w
                 ),
-                freunde::Meldung::EinladungErhalten(w, t) => {
+                friends::Notice::EinladungErhalten(w, t) => {
                     if t.trim().is_empty() {
                         format!("{} lädt dich in ein Meeting ein.", w)
                     } else {
                         format!("{} lädt dich ein: {}", w, t)
                     }
                 }
-                freunde::Meldung::Fehlgeschlagen(t) => t,
+                friends::Notice::Fehlgeschlagen(t) => t,
             };
         }
 
-        let mut verbinden: Option<String> = None;
-        let mut meeting_mit: Option<freunde::Freund> = None;
+        let mut connect_now: Option<String> = None;
+        let mut meeting_mit: Option<friends::Friend> = None;
         // Invitations a friend has sent: (number, address, true = join)
         let mut einladung_aktion: Option<(String, String, bool)> = None;
 
@@ -243,14 +243,14 @@ if let Some(path) = self.shot.clone() {
                     .color(p.text),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (text, farbe) = if !d.verbunden() {
+                let (text, tint) = if !d.verbunden() {
                     ("Relay nicht erreicht", p.muted)
                 } else if d.angemeldet() {
                     ("mit Konto – auf allen Geräten", p.accent)
                 } else {
                     ("ohne Konto – nur dieses Gerät", p.muted)
                 };
-                ui.label(egui::RichText::new(text).size(11.0).color(farbe));
+                ui.label(egui::RichText::new(text).size(11.0).color(tint));
             });
         });
         ui.add_space(2.0);
@@ -298,7 +298,7 @@ if let Some(path) = self.shot.clone() {
             ui.add_space(5.0);
         }
 
-        // ------------------------------------------------ neue Anfrage
+        // ------------------------------------------------ neue Request
         egui::Frame::NONE
             .fill(p.card)
             .stroke(egui::Stroke::new(1.0, p.line))
@@ -316,29 +316,29 @@ if let Some(path) = self.shot.clone() {
                 );
                 ui.horizontal(|ui| {
                     let feld = ui.add(
-                        egui::TextEdit::singleline(&mut self.freunde_id)
+                        egui::TextEdit::singleline(&mut self.friends_id)
                             .desired_width(190.0)
                             .hint_text(if d.angemeldet() { "497 628 420 oder @anna" } else { "497 628 420" }),
                     );
-                    let senden = ui.button("Anfrage senden").clicked()
+                    let send_out = ui.button("Anfrage senden").clicked()
                         || (feld.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                    if senden {
-                        match d.anfragen(&self.freunde_id) {
+                    if send_out {
+                        match d.anfragen(&self.friends_id) {
                             Ok(()) => {
-                                self.freunde_meldung = format!(
+                                self.friends_notice = format!(
                                     "Anfrage an {} unterwegs - sie gilt erst, wenn er zustimmt.",
-                                    freunde::ziel_anzeige(&self.freunde_id)
+                                    friends::target_label(&self.friends_id)
                                 );
-                                self.freunde_id.clear();
+                                self.friends_id.clear();
                             }
-                            Err(e) => self.freunde_meldung = format!("{}", e),
+                            Err(e) => self.friends_notice = format!("{}", e),
                         }
                     }
                 });
-                if !self.freunde_meldung.is_empty() {
+                if !self.friends_notice.is_empty() {
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(&self.freunde_meldung)
+                        egui::RichText::new(&self.friends_notice)
                             .size(11.0)
                             .color(p.muted),
                     );
@@ -361,7 +361,7 @@ if let Some(path) = self.shot.clone() {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("{} möchte dein Freund sein", a.anzeige()))
+                                egui::RichText::new(format!("{} möchte dein Freund sein", a.display_name()))
                                     .size(12.5)
                                     .color(p.text),
                             );
@@ -370,30 +370,30 @@ if let Some(path) = self.shot.clone() {
                                 |ui| {
                                     if ui.button("Ablehnen").clicked() {
                                         if let Err(e) = d.ablehnen(&a.gegenueber()) {
-                                            self.freunde_meldung = format!("{}", e);
+                                            self.friends_notice = format!("{}", e);
                                         }
                                     }
                                     if ui.button("Annehmen").clicked() {
                                         match d.annehmen(&a.gegenueber()) {
                                             Ok(()) => {
-                                                self.freunde_meldung =
-                                                    format!("{} ist jetzt dein Freund.", a.anzeige())
+                                                self.friends_notice =
+                                                    format!("{} ist jetzt dein Freund.", a.display_name())
                                             }
-                                            Err(e) => self.freunde_meldung = format!("{}", e),
+                                            Err(e) => self.friends_notice = format!("{}", e),
                                         }
                                     }
                                 },
                             );
                         });
-                        if !a.nachricht.is_empty() {
+                        if !a.message.is_empty() {
                             ui.label(
-                                egui::RichText::new(if a.nachricht.chars().count() > 90 {
+                                egui::RichText::new(if a.message.chars().count() > 90 {
                                     format!(
                                         "{}…",
-                                        a.nachricht.chars().take(89).collect::<String>()
+                                        a.message.chars().take(89).collect::<String>()
                                     )
                                 } else {
-                                    a.nachricht.clone()
+                                    a.message.clone()
                                 })
                                     .size(11.0)
                                     .color(p.muted),
@@ -405,14 +405,14 @@ if let Some(path) = self.shot.clone() {
             for a in ausgehend.iter() {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(format!("an {} – wartet auf Zustimmung", a.anzeige()))
+                        egui::RichText::new(format!("an {} – wartet auf Zustimmung", a.display_name()))
                             .size(11.5)
                             .color(p.muted),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Zurücknehmen").clicked() {
                             if let Err(e) = d.ablehnen(&a.gegenueber()) {
-                                self.freunde_meldung = format!("{}", e);
+                                self.friends_notice = format!("{}", e);
                             }
                         }
                     });
@@ -450,7 +450,7 @@ if let Some(path) = self.shot.clone() {
                             ui.add_space(14.0);
                             ui.vertical(|ui| {
                                 ui.label(
-                                    egui::RichText::new(fr.anzeige()).size(13.0).color(p.text),
+                                    egui::RichText::new(fr.display_name()).size(13.0).color(p.text),
                                 );
                                 // With an account: @name, then the PC (with several
                                 // "+N"), otherwise "no FreeViewer PC".
@@ -496,7 +496,7 @@ if let Some(path) = self.shot.clone() {
                                 |ui| {
                                     if ui.button("Entfernen").clicked() {
                                         if let Err(e) = d.entfernen(&fr.schluessel()) {
-                                            self.freunde_meldung = format!("{}", e);
+                                            self.friends_notice = format!("{}", e);
                                         }
                                     }
                                     // Only offer what actually works:
@@ -508,7 +508,7 @@ if let Some(path) = self.shot.clone() {
                                             .on_hover_text("Sofort verbinden – zulassen muss er es trotzdem")
                                             .clicked()
                                         {
-                                            verbinden = Some(fr.fvid.clone());
+                                            connect_now = Some(fr.fvid.clone());
                                         }
                                     });
                                     if ui
@@ -526,7 +526,7 @@ if let Some(path) = self.shot.clone() {
             }
         });
 
-        if let Some(id) = verbinden {
+        if let Some(id) = connect_now {
             self.view = View::Start;
             self.hint = i18n::tf("link.control", &partners::pretty_id(&id));
             self.connect_to(&id);
@@ -535,16 +535,16 @@ if let Some(path) = self.shot.clone() {
             if beitreten {
                 // Only open the meeting page of this brand - never an arbitrary
                 // address a friend (or a stranger in their name) sends.
-                if freunde::einladung_link_ok(&link, &meet::base()) {
+                if friends::einladung_link_ok(&link, &meet::base()) {
                     match meet::open_window(&link) {
                         Ok(()) => {
-                            self.freunde_meldung = "Meeting wird geöffnet.".to_string();
+                            self.friends_notice = "Meeting wird geöffnet.".to_string();
                             d.einladung_erledigt(&id);
                         }
-                        Err(e) => self.freunde_meldung = format!("Meeting geht nicht: {}", e),
+                        Err(e) => self.friends_notice = format!("Meeting geht nicht: {}", e),
                     }
                 } else {
-                    self.freunde_meldung =
+                    self.friends_notice =
                         "Dieser Einladungslink zeigt nicht auf die Meeting-Seite - nicht geöffnet.".to_string();
                     d.einladung_erledigt(&id);
                 }
@@ -553,7 +553,7 @@ if let Some(path) = self.shot.clone() {
             }
         }
         if let Some(fr) = meeting_mit {
-            let wer = fr.anzeige();
+            let wer = fr.display_name();
             match meet::create(&format!("Mit {}", wer), false) {
                 Ok(m) => {
                     // The link is ALWAYS in the clipboard: if delivery
@@ -564,11 +564,11 @@ if let Some(path) = self.shot.clone() {
                     // Only the bare address goes to the relay - and only without an
                     // end-to-end key (the relay must never see that).
                     let relay_link = if m.e2e.is_empty() {
-                        Some(meet::join_url(&m.id, &m.passwort))
+                        Some(meet::join_url(&m.id, &m.passphrase))
                     } else {
                         None
                     };
-                    self.freunde_meldung = match relay_link
+                    self.friends_notice = match relay_link
                         .as_deref()
                         .map(|l| d.meeting_einladen(&fr, &format!("Mit {}", wer), l))
                     {
@@ -588,7 +588,7 @@ if let Some(path) = self.shot.clone() {
                     self.meet_win.meeting = Some(m);
                     self.view = View::Meet;
                 }
-                Err(e) => self.freunde_meldung = format!("Meeting geht nicht: {}", e),
+                Err(e) => self.friends_notice = format!("Meeting geht nicht: {}", e),
             }
         }
     }

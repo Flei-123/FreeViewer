@@ -26,7 +26,7 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
         // The meeting window is a window of its own - it never got the colour
         // and therefore always wore the white default title bar, whatever
         // look was set. That is exactly what Justin saw.
-        for hwnd in eigene_fenster() {
+        for hwnd in own_windows() {
         let d = BOOL::from(dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -52,14 +52,14 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
 
 /// All visible top-level windows of THIS program.
 #[cfg(windows)]
-fn eigene_fenster() -> Vec<windows::Win32::Foundation::HWND> {
+fn own_windows() -> Vec<windows::Win32::Foundation::HWND> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
     /// # Safety
-    /// Only valid as the EnumWindows callback: `l` must be the `*mut Vec<HWND>` passed by `eigene_fenster`.
+    /// Only valid as the EnumWindows callback: `l` must be the `*mut Vec<HWND>` passed by `own_windows`.
     unsafe extern "system" fn sammeln(h: HWND, l: LPARAM) -> BOOL {
         let liste = &mut *(l.0 as *mut Vec<HWND>);
         let mut pid = 0u32;

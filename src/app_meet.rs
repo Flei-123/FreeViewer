@@ -60,7 +60,7 @@ impl App {
                     match meet::create(&self.meet_title, self.meet_e2e) {
                         Ok(m) => {
                             self.meet_id = m.id.clone();
-                            self.meet_pw = m.passwort.clone();
+                            self.meet_pw = m.passphrase.clone();
                             self.meet_last = Some(m.clone());
                             // Sofort ins eigene Meeting-Fenster wechseln.
                             self.meet_win_open(m);
@@ -88,7 +88,7 @@ impl App {
                     label_small(ui, i18n::t("meet.pw"));
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(&m.passwort)
+                            egui::RichText::new(&m.passphrase)
                                 .size(18.0)
                                 .family(egui::FontFamily::Monospace)
                                 .color(p.text),
@@ -141,7 +141,7 @@ impl App {
                         self.meet_win_open(meet::Meeting {
                             id,
                             titel: String::new(),
-                            passwort: self.meet_pw.clone(),
+                            passphrase: self.meet_pw.clone(),
                             termin_text: String::new(),
                             e2e: String::new(),
                         });
@@ -243,8 +243,8 @@ impl App {
             .into_iter()
             .map(|m| (m.name, m.breite, m.hoehe))
             .collect();
-        if std::time::Instant::now() >= self.meet_win.fenster_naechste {
-            self.meet_win.fenster_naechste =
+        if std::time::Instant::now() >= self.meet_win.next_window {
+            self.meet_win.next_window =
                 std::time::Instant::now() + std::time::Duration::from_millis(1500);
             self.meet_win.fenster = fenster::liste()
                 .into_iter()
@@ -279,7 +279,7 @@ impl App {
             return;
         }
         let (id, pass) = match self.meet_win.meeting.as_ref() {
-            Some(m) => (m.id.clone(), m.passwort.clone()),
+            Some(m) => (m.id.clone(), m.passphrase.clone()),
             None => return,
         };
         if pass.is_empty() {
@@ -291,7 +291,7 @@ impl App {
         let tn = self.meet_win.tn.clone();
         let busy = self.meet_win.tn_busy.clone();
         std::thread::spawn(move || {
-            if let Ok(v) = meet::teilnehmer(&id, &pass) {
+            if let Ok(v) = meet::participant(&id, &pass) {
                 *tn.lock_ok() = v;
             }
             busy.store(false, Ordering::Relaxed);
@@ -313,7 +313,7 @@ impl App {
     /// Previously the camera kept running after closing (light on) and
     /// the server kept considering us present - exactly what Justin
     /// reported. The cross must do the same as "Leave".
-    pub(crate) fn meet_win_schliessen(&mut self) {
+    pub(crate) fn close_meet_win(&mut self) {
         // The preview before joining holds camera AND microphone.
         self.vorprobe.aus();
         if let Some(n) = self.nativ_meet.take() {
@@ -367,7 +367,7 @@ impl App {
         } else {
             self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
         };
-        let will_mikro = !self.meet_win.stumm;
+        let will_mikro = !self.meet_win.is_muted;
         if will_mikro != self.vorprobe.wunsch_mikro || mic != self.vorprobe.mikro_geraet {
             self.vorprobe.mikro(will_mikro, mic.clone());
         }
@@ -404,7 +404,7 @@ impl App {
             kamera_an: will_kamera,
             geraete_da: self.meet_win.geraete_da,
             pegel: self.vorprobe.pegel,
-            hinweis: self.vorprobe.meldung.clone(),
+            hinweis: self.vorprobe.notice.clone(),
             laeuft: self.meet_win.nativ_start,
         };
         let tex = self.nativ_eigen.as_ref().map(|(_, t)| t.clone());
@@ -415,13 +415,13 @@ impl App {
 
         match aktion {
             Some(meetfenster::Beitrittsaktion::MikroUm) => {
-                self.meet_win.stumm = !self.meet_win.stumm;
+                self.meet_win.is_muted = !self.meet_win.is_muted;
             }
             Some(meetfenster::Beitrittsaktion::KameraUm) => {
                 self.meet_win.ohne_video = !self.meet_win.ohne_video;
             }
-            Some(meetfenster::Beitrittsaktion::Zurueck) => {
-                self.meet_win_schliessen();
+            Some(meetfenster::Beitrittsaktion::Back) => {
+                self.close_meet_win();
             }
             Some(meetfenster::Beitrittsaktion::Beitreten) => {
                 self.meet_win.nativ_start = true;
@@ -449,7 +449,7 @@ impl App {
             match meetui::NativMeet::beitreten(
                 &meet::base(),
                 &m.id,
-                &m.passwort,
+                &m.passphrase,
                 &name,
                 &me,
                 self.meet_offer_control,
@@ -460,8 +460,8 @@ impl App {
                 if m.e2e.trim().is_empty() { None } else { Some(m.e2e.clone()) },
             ) {
                 Ok(mut n) => {
-                    if self.meet_win.stumm {
-                        n.stumm_schalten(true);
+                    if self.meet_win.is_muted {
+                        n.toggle_muted(true);
                     }
                     self.meet_kam_start = if self.meet_win.ohne_video {
                         None

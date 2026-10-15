@@ -28,7 +28,7 @@ pub const PROTO_VERSION: u16 = 1;
 
 /// A participant, as the server describes it.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Teilnehmer {
+pub struct Participant {
     pub id: u64,
     pub name: String,
     pub ton_aus: bool,
@@ -38,9 +38,9 @@ pub struct Teilnehmer {
     pub fvid: String,
 }
 
-impl Teilnehmer {
-    fn aus_json(v: &serde_json::Value) -> Teilnehmer {
-        Teilnehmer {
+impl Participant {
+    fn aus_json(v: &serde_json::Value) -> Participant {
+        Participant {
             id: v.get("id").and_then(|x| x.as_u64()).unwrap_or(0),
             name: v
                 .get("name")
@@ -74,10 +74,10 @@ pub enum Ereignis {
         raum: String,
         titel: String,
         gastgeber: u64,
-        leute: Vec<Teilnehmer>,
+        leute: Vec<Participant>,
         server: String,
     },
-    Dazu(Teilnehmer),
+    Dazu(Participant),
     Weg(u64),
     Chat {
         von: u64,
@@ -92,13 +92,13 @@ pub enum Ereignis {
         peer: u64,
         an: bool,
     },
-    Stumm {
+    Muted {
         peer: u64,
         art: String,
         an: bool,
     },
     /// The host has muted US - the track must really be off.
-    ZwangStumm {
+    ForceMuted {
         art: String,
     },
     Gastgeber(u64),
@@ -110,7 +110,7 @@ pub enum Ereignis {
     /// Someone asks ME for control of my shared screen.
     /// Arrives only at the sharer; the server checks from the tracks
     /// who is really sharing.
-    SteuerungAngefragt {
+    ControlRequested {
         peer: u64,
         name: String,
     },
@@ -118,14 +118,14 @@ pub enum Ereignis {
     /// With an approval `fvid` is the FreeViewer number of the sharer -
     /// without it the approval would be inconsequential, because the client would not know
     /// where to connect. Empty for a refusal.
-    SteuerungBeantwortet {
+    ControlAnswered {
         von: u64,
         gewaehrt: bool,
         fvid: String,
     },
     /// A release was withdrawn - either by the sharer or
     /// because they stopped sharing.
-    SteuerungZurueck {
+    ControlGiveBack {
         peer: u64,
     },
     /// Where is the mouse pointer of whoever is currently sharing (0..1 in THEIR
@@ -164,7 +164,7 @@ pub enum Ereignis {
     WarteWeg {
         peer: u64,
     },
-    WarteZustand {
+    WaitState {
         an: bool,
     },
     Abgewiesen(String),
@@ -184,7 +184,7 @@ pub enum Ereignis {
         art: String,
         sdp: String,
     },
-    Fehler {
+    FriendError {
         code: String,
         text: String,
     },
@@ -197,10 +197,10 @@ enum Befehl {
     Chat(String),
     Tippt(bool),
     Hand(bool),
-    Stumm { art: String, an: bool },
+    Muted { art: String, an: bool },
     Warteraum { aktion: String, peer: Option<u64> },
     Gastgeber { aktion: String, peer: Option<u64> },
-    Bildschirm(bool),
+    Display(bool),
     /// Fernsteuerung anbieten/zurueckziehen. Leere fvid = zurueckgezogen.
     Fernsteuerung { an: bool, fvid: String },
     /// Raw JSON - there so that stage 2 (offer/answer) does not have to rebuild anything.
@@ -209,28 +209,28 @@ enum Befehl {
 }
 
 /// A running meeting session. Is ended cleanly when dropped.
-pub struct Sitzung {
+pub struct Session {
     befehle: UnboundedSender<Befehl>,
     ereignisse: Receiver<Ereignis>,
     /// Last seen state - so the UI does not have to do its own bookkeeping.
-    zustand: Arc<Mutex<Zustand>>,
+    state: Arc<Mutex<State>>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Zustand {
+pub struct State {
     pub ich: u64,
     pub raum: String,
     pub titel: String,
     pub gastgeber: u64,
-    pub leute: Vec<Teilnehmer>,
+    pub leute: Vec<Participant>,
     pub wartende: Vec<(u64, String)>,
     pub warteraum_an: bool,
     pub im_warteraum: bool,
     pub verbunden: bool,
-    pub letzter_fehler: String,
+    pub last_error: String,
 }
 
-impl Sitzung {
+impl Session {
     /// Neue Ereignisse abholen (blockiert nie).
     pub fn abholen(&self) -> Vec<Ereignis> {
         let mut aus = Vec::new();
@@ -240,8 +240,8 @@ impl Sitzung {
         aus
     }
 
-    pub fn zustand(&self) -> Zustand {
-        self.zustand.lock().map(|z| z.clone()).unwrap_or_default()
+    pub fn state(&self) -> State {
+        self.state.lock().map(|z| z.clone()).unwrap_or_default()
     }
 
     pub fn chat(&self, text: &str) {
@@ -254,14 +254,14 @@ impl Sitzung {
         let _ = self.befehle.send(Befehl::Hand(an));
     }
     /// kind: "audio" or "video"; an = switched off (as in the protocol).
-    pub fn stumm(&self, art: &str, an: bool) {
-        let _ = self.befehle.send(Befehl::Stumm {
+    pub fn is_muted(&self, art: &str, an: bool) {
+        let _ = self.befehle.send(Befehl::Muted {
             art: art.to_string(),
             an,
         });
     }
     pub fn bildschirm(&self, an: bool) {
-        let _ = self.befehle.send(Befehl::Bildschirm(an));
+        let _ = self.befehle.send(Befehl::Display(an));
     }
     /// Report the own pointer position in the shared image (0..1). Only useful
     /// while sharing is really going on.
@@ -288,7 +288,7 @@ impl Sitzung {
     /// As viewer: ask the sharer for control. The server
     /// finds out for itself who is sharing - we do not have to (and
     /// cannot) claim that.
-    pub fn steuerung_anfragen(&self) {
+    pub fn request_control(&self) {
         let _ = self
             .befehle
             .send(Befehl::Roh(serde_json::json!({"t":"control-request"})));
@@ -297,7 +297,7 @@ impl Sitzung {
     /// As sharer: answer a request. `gewaehrt=false` refuses.
     /// `fvid` is the OWN FreeViewer number; the server passes it on only
     /// to the approved person, not into the room.
-    pub fn steuerung_beantworten(&self, peer: u64, gewaehrt: bool, fvid: &str) {
+    pub fn answer_control(&self, peer: u64, gewaehrt: bool, fvid: &str) {
         let _ = self.befehle.send(Befehl::Roh(serde_json::json!({
             "t": "control-answer",
             "peer": peer,
@@ -307,7 +307,7 @@ impl Sitzung {
     }
 
     /// As sharer: withdraw a granted release. `None` = all.
-    pub fn steuerung_zuruecknehmen(&self, peer: Option<u64>) {
+    pub fn revoke_control(&self, peer: Option<u64>) {
         let mut v = serde_json::json!({"t":"control-revoke"});
         if let (Some(p), Some(o)) = (peer, v.as_object_mut()) {
             o.insert("peer".into(), serde_json::json!(p));
@@ -345,7 +345,7 @@ impl Sitzung {
     }
 }
 
-impl Drop for Sitzung {
+impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.befehle.send(Befehl::Verlassen);
     }
@@ -384,16 +384,16 @@ pub fn beitreten(
     name: &str,
     fvid: &str,
     e2e: bool,
-) -> Result<Sitzung> {
+) -> Result<Session> {
     let url = ws_adresse(basis);
     let (bef_tx, bef_rx) = unbounded_channel::<Befehl>();
     let (ev_tx, ev_rx) = channel::<Ereignis>();
-    let zustand = Arc::new(Mutex::new(Zustand {
+    let state = Arc::new(Mutex::new(State {
         raum: raum.to_string(),
         ..Default::default()
     }));
 
-    let z2 = zustand.clone();
+    let z2 = state.clone();
     let (raum, pass, name, fvid) = (
         raum.to_string(),
         pass.to_string(),
@@ -422,7 +422,7 @@ pub fn beitreten(
                 {
                     if let Ok(mut z) = z2.lock() {
                         z.verbunden = false;
-                        z.letzter_fehler = e.to_string();
+                        z.last_error = e.to_string();
                     }
                     let _ = ev_tx.send(Ereignis::Getrennt(e.to_string()));
                 } else {
@@ -435,10 +435,10 @@ pub fn beitreten(
         })
         .map_err(|e| anyhow!("Faden laesst sich nicht starten: {}", e))?;
 
-    Ok(Sitzung {
+    Ok(Session {
         befehle: bef_tx,
         ereignisse: ev_rx,
-        zustand,
+        state,
     })
 }
 
@@ -452,10 +452,10 @@ async fn lauf(
     e2e: bool,
     mut befehle: UnboundedReceiver<Befehl>,
     ev: &Sender<Ereignis>,
-    zustand: &Arc<Mutex<Zustand>>,
+    state: &Arc<Mutex<State>>,
 ) -> Result<()> {
-    let (mut ws, _) = verbinden(url).await?;
-    if let Ok(mut z) = zustand.lock() {
+    let (mut ws, _) = connect_now(url).await?;
+    if let Ok(mut z) = state.lock() {
         z.verbunden = true;
     }
 
@@ -483,12 +483,12 @@ async fn lauf(
     loop {
         tokio::select! {
             // ---- vom Server ------------------------------------------------
-            nachricht = ws.next() => {
-                let Some(nachricht) = nachricht else { break };
-                match nachricht {
+            message = ws.next() => {
+                let Some(message) = message else { break };
+                match message {
                     Ok(Message::Text(t)) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
-                            if verarbeiten(&v, ev, zustand) {
+                            if verarbeiten(&v, ev, state) {
                                 // Session is over (kick/end/rejection)
                                 let _ = ws.close(None).await;
                                 return Ok(());
@@ -507,8 +507,8 @@ async fn lauf(
                     Befehl::Chat(text) => Some(json!({"t":"chat","text":text})),
                     Befehl::Tippt(an) => Some(json!({"t":"typing","on":an})),
                     Befehl::Hand(an) => Some(json!({"t":"hand","on":an})),
-                    Befehl::Stumm { art, an } => Some(json!({"t":"mute","kind":art,"on":an})),
-                    Befehl::Bildschirm(an) => Some(json!({"t":"screen","on":an})),
+                    Befehl::Muted { art, an } => Some(json!({"t":"mute","kind":art,"on":an})),
+                    Befehl::Display(an) => Some(json!({"t":"screen","on":an})),
                     Befehl::Fernsteuerung { an, fvid } => {
                         // Only digits out - the number comes from the own
                         // setting, but the server expects it clean.
@@ -545,7 +545,7 @@ async fn lauf(
 fn verarbeiten(
     v: &serde_json::Value,
     ev: &Sender<Ereignis>,
-    zustand: &Arc<Mutex<Zustand>>,
+    state: &Arc<Mutex<State>>,
 ) -> bool {
     let t = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
     let u64f = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -559,12 +559,12 @@ fn verarbeiten(
 
     match t {
         "welcome" => {
-            let leute: Vec<Teilnehmer> = v
+            let leute: Vec<Participant> = v
                 .get("peers")
                 .and_then(|x| x.as_array())
-                .map(|a| a.iter().map(Teilnehmer::aus_json).collect())
+                .map(|a| a.iter().map(Participant::aus_json).collect())
                 .unwrap_or_default();
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.ich = u64f("you");
                 z.raum = strf("room");
                 z.titel = strf("titel");
@@ -584,9 +584,9 @@ fn verarbeiten(
         "peer-join" => {
             let p = v
                 .get("peer")
-                .map(Teilnehmer::aus_json)
+                .map(Participant::aus_json)
                 .unwrap_or_default();
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.leute.retain(|x| x.id != p.id);
                 z.leute.push(p.clone());
             }
@@ -594,7 +594,7 @@ fn verarbeiten(
         }
         "peer-leave" => {
             let id = u64f("id");
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.leute.retain(|x| x.id != id);
             }
             let _ = ev.send(Ereignis::Weg(id));
@@ -647,7 +647,7 @@ fn verarbeiten(
         }
         "hand" => {
             let (peer, an) = (u64f("peer"), boolf("on"));
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 if let Some(p) = z.leute.iter_mut().find(|x| x.id == peer) {
                     p.hand = an;
                 }
@@ -656,7 +656,7 @@ fn verarbeiten(
         }
         "mute" => {
             let (peer, art, an) = (u64f("peer"), strf("kind"), boolf("on"));
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 if let Some(p) = z.leute.iter_mut().find(|x| x.id == peer) {
                     if art == "audio" {
                         p.ton_aus = an;
@@ -665,14 +665,14 @@ fn verarbeiten(
                     }
                 }
             }
-            let _ = ev.send(Ereignis::Stumm { peer, art, an });
+            let _ = ev.send(Ereignis::Muted { peer, art, an });
         }
         "force-mute" => {
-            let _ = ev.send(Ereignis::ZwangStumm { art: strf("kind") });
+            let _ = ev.send(Ereignis::ForceMuted { art: strf("kind") });
         }
         "host" => {
             let peer = u64f("peer");
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.gastgeber = peer;
             }
             let _ = ev.send(Ereignis::Gastgeber(peer));
@@ -683,7 +683,7 @@ fn verarbeiten(
         }
         "remote" => {
             let (peer, fvid) = (u64f("peer"), strf("fvid"));
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 if let Some(p) = z.leute.iter_mut().find(|x| x.id == peer) {
                     p.fvid = fvid.clone();
                 }
@@ -691,23 +691,23 @@ fn verarbeiten(
             let _ = ev.send(Ereignis::Fernsteuerung { peer, fvid });
         }
         "control-requested" => {
-            let _ = ev.send(Ereignis::SteuerungAngefragt {
+            let _ = ev.send(Ereignis::ControlRequested {
                 peer: u64f("peer"),
                 name: strf("name"),
             });
         }
         "control-answered" => {
-            let _ = ev.send(Ereignis::SteuerungBeantwortet {
+            let _ = ev.send(Ereignis::ControlAnswered {
                 von: u64f("by"),
                 gewaehrt: boolf("grant"),
                 fvid: strf("fvid"),
             });
         }
         "control-revoked" => {
-            let _ = ev.send(Ereignis::SteuerungZurueck { peer: u64f("peer") });
+            let _ = ev.send(Ereignis::ControlGiveBack { peer: u64f("peer") });
         }
         "waiting" => {
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.im_warteraum = true;
             }
             let _ = ev.send(Ereignis::Wartet {
@@ -717,7 +717,7 @@ fn verarbeiten(
         }
         "lobby-add" => {
             let (peer, name) = (u64f("peer"), strf("name"));
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.wartende.retain(|(id, _)| *id != peer);
                 z.wartende.push((peer, name.clone()));
             }
@@ -725,17 +725,17 @@ fn verarbeiten(
         }
         "lobby-del" => {
             let peer = u64f("peer");
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.wartende.retain(|(id, _)| *id != peer);
             }
             let _ = ev.send(Ereignis::WarteWeg { peer });
         }
         "lobby-state" => {
             let an = boolf("on");
-            if let Ok(mut z) = zustand.lock() {
+            if let Ok(mut z) = state.lock() {
                 z.warteraum_an = an;
             }
-            let _ = ev.send(Ereignis::WarteZustand { an });
+            let _ = ev.send(Ereignis::WaitState { an });
         }
         "denied" => {
             let _ = ev.send(Ereignis::Abgewiesen(strf("msg")));
@@ -764,10 +764,10 @@ fn verarbeiten(
             });
         }
         "error" => {
-            if let Ok(mut z) = zustand.lock() {
-                z.letzter_fehler = format!("{}: {}", strf("code"), strf("msg"));
+            if let Ok(mut z) = state.lock() {
+                z.last_error = format!("{}: {}", strf("code"), strf("msg"));
             }
-            let _ = ev.send(Ereignis::Fehler {
+            let _ = ev.send(Ereignis::FriendError {
                 code: strf("code"),
                 text: strf("msg"),
             });
@@ -787,7 +787,7 @@ fn verarbeiten(
 /// hangs for 20 seconds in the timeout error 10060 - exactly that
 /// happened on FLEI-ONE. So: try all addresses, public ones
 /// first, 4 seconds of patience each.
-async fn verbinden(
+async fn connect_now(
     url: &str,
 ) -> Result<(
     tokio_tungstenite::WebSocketStream<
@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn jede_nachricht_traegt_die_protokollversion() {
+    fn every_message_carries_the_protocol_version() {
         let s = umschlag(json!({"t":"hand","on":true}));
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["v"], 1);
@@ -886,11 +886,11 @@ mod tests {
     #[test]
     fn steuerungsanfrage_kommt_als_ereignis_an() {
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         let v = json!({"v":1,"t":"control-requested","peer":9,"name":"Ben"});
         assert!(!verarbeiten(&v, &tx, &z));
         match rx.try_recv().unwrap() {
-            Ereignis::SteuerungAngefragt { peer, name } => {
+            Ereignis::ControlRequested { peer, name } => {
                 assert_eq!(peer, 9);
                 assert_eq!(name, "Ben");
             }
@@ -903,11 +903,11 @@ mod tests {
         // Without the number an approval would be inconsequential - the client would not know
         // where to connect. Exactly that must arrive.
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         let v = json!({"v":1,"t":"control-answered","by":4,"grant":true,"fvid":"497628420"});
         assert!(!verarbeiten(&v, &tx, &z));
         match rx.try_recv().unwrap() {
-            Ereignis::SteuerungBeantwortet { von, gewaehrt, fvid } => {
+            Ereignis::ControlAnswered { von, gewaehrt, fvid } => {
                 assert_eq!(von, 4);
                 assert!(gewaehrt);
                 assert_eq!(fvid, "497628420");
@@ -919,11 +919,11 @@ mod tests {
     #[test]
     fn absage_kommt_ohne_nummer_an() {
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         let v = json!({"v":1,"t":"control-answered","by":4,"grant":false});
         assert!(!verarbeiten(&v, &tx, &z));
         match rx.try_recv().unwrap() {
-            Ereignis::SteuerungBeantwortet { gewaehrt, fvid, .. } => {
+            Ereignis::ControlAnswered { gewaehrt, fvid, .. } => {
                 assert!(!gewaehrt);
                 assert!(fvid.is_empty(), "bei einer Absage darf keine Nummer kommen");
             }
@@ -934,15 +934,15 @@ mod tests {
     #[test]
     fn ruecknahme_kommt_an() {
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         assert!(!verarbeiten(&json!({"v":1,"t":"control-revoked","peer":3}), &tx, &z));
-        assert_eq!(rx.try_recv().unwrap(), Ereignis::SteuerungZurueck { peer: 3 });
+        assert_eq!(rx.try_recv().unwrap(), Ereignis::ControlGiveBack { peer: 3 });
     }
 
     #[test]
-    fn willkommen_fuellt_den_zustand() {
+    fn welcome_fills_the_state() {
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         let v = json!({
             "v":1,"t":"welcome","you":7,"room":"111-222-333","titel":"Test",
             "host":7,"server_version":"1.0",
@@ -966,9 +966,9 @@ mod tests {
     }
 
     #[test]
-    fn teilnehmer_kommen_und_gehen() {
+    fn participants_come_and_go() {
         let (tx, rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         verarbeiten(
             &json!({"t":"peer-join","peer":{"id":3,"name":"Cara"}}),
             &tx,
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn warteraum_wird_mitgefuehrt() {
         let (tx, _rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         verarbeiten(&json!({"t":"lobby-add","peer":5,"name":"Dora"}), &tx, &z);
         verarbeiten(&json!({"t":"lobby-state","on":true}), &tx, &z);
         {
@@ -997,9 +997,9 @@ mod tests {
     }
 
     #[test]
-    fn stumm_und_hand_aendern_den_teilnehmer() {
+    fn muted_and_hand_change_the_participant() {
         let (tx, _rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         verarbeiten(&json!({"t":"peer-join","peer":{"id":4,"name":"Eva"}}), &tx, &z);
         verarbeiten(&json!({"t":"mute","peer":4,"kind":"audio","on":true}), &tx, &z);
         verarbeiten(&json!({"t":"hand","peer":4,"on":true}), &tx, &z);
@@ -1009,9 +1009,9 @@ mod tests {
     }
 
     #[test]
-    fn rauswurf_beendet_die_sitzung() {
+    fn kick_ends_the_session() {
         let (tx, _rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         assert!(verarbeiten(&json!({"t":"kicked","msg":"tschuess"}), &tx, &z));
         assert!(verarbeiten(&json!({"t":"ended","msg":"vorbei"}), &tx, &z));
         assert!(verarbeiten(&json!({"t":"denied","msg":"nein"}), &tx, &z));
@@ -1019,9 +1019,9 @@ mod tests {
     }
 
     #[test]
-    fn unbekannte_nachricht_stoert_nicht() {
+    fn unknown_message_does_not_disturb() {
         let (tx, _rx) = channel();
-        let z = Arc::new(Mutex::new(Zustand::default()));
+        let z = Arc::new(Mutex::new(State::default()));
         assert!(!verarbeiten(&json!({"t":"gibt-es-nicht","x":1}), &tx, &z));
     }
 }

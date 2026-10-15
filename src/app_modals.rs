@@ -213,7 +213,7 @@ impl App {
             return;
         };
         let mut offen = true;
-        let mut verbinden = false;
+        let mut connect_now = false;
         let mut anfragen = false;
         let mut weg = false;
         let name = self
@@ -257,7 +257,7 @@ impl App {
                     if accent_button(ui, i18n::t("start.connect"), hat_pw).clicked()
                         || (enter && hat_pw)
                     {
-                        verbinden = true;
+                        connect_now = true;
                     }
                     if ghost_button(ui, i18n::t("pwask.ask")).clicked() {
                         anfragen = true;
@@ -267,7 +267,7 @@ impl App {
                     }
                 });
             });
-        if verbinden {
+        if connect_now {
             self.pw_ask = None;
             self.start_session();
         } else if anfragen {

@@ -113,7 +113,7 @@ pub struct Shared {
     pub update_status: Mutex<String>,
     pub auto_update: AtomicBool,
     /// Microphone/speaker of the running session (voice link).
-    pub voice: std::sync::Arc<crate::audio::VoiceState>,    /// Zwischenablage in beide Richtungen abgleichen?
+    pub voice: std::sync::Arc<crate::audio::VoiceState>,    /// Clipboard in beide Richtungen abgleichen?
     pub clip_on: AtomicBool,
     pub stats: Mutex<Stats>,
 }

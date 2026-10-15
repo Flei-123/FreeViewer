@@ -219,7 +219,7 @@ impl Book {
     fn entry(&mut self, id: &str) -> &mut Partner {
         if let Some(i) = self.entries.iter().position(|p| p.id == id) {
             let e = &mut self.entries[i];
-            // wer einen Eintrag anfasst, holt ihn zurueck
+            // wer einen Eintrag anfasst, holt ihn go_back
             e.deleted = false;
             e.at = now();
             return &mut self.entries[i];
@@ -489,7 +489,7 @@ mod tests {
     use super::*;
 
     /// Own folder just for this test.
-    fn eigener_ordner(name: &str) -> std::path::PathBuf {
+    fn own_dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("fv-book-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
         crate::ident::set_test_config_dir(d.clone());
@@ -500,7 +500,7 @@ mod tests {
     /// via merge_remote() -> save().
     #[test]
     fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
-        eigener_ordner("isoliert");
+        own_dir("isoliert");
         let mut b = Book::default();
         b.merge_remote(&[dev("111111111", "Neu", 200)]);
         assert!(Book::path().starts_with(std::env::temp_dir()));
@@ -513,7 +513,7 @@ mod tests {
     /// A filled list must never be replaced by an empty one.
     #[test]
     fn eine_leere_liste_ueberschreibt_keine_gefuellte() {
-        eigener_ordner("nichtleeren");
+        own_dir("nichtleeren");
         let mut voll = Book::default();
         voll.entries = vec![Partner {
             id: "123456789".into(),
@@ -530,8 +530,8 @@ mod tests {
 
     /// Broken file -> the backup copy rescues the list.
     #[test]
-    fn eine_kaputte_datei_faellt_auf_die_sicherung_zurueck() {
-        eigener_ordner("sicherung");
+    fn broken_file_falls_back_to_backup() {
+        own_dir("sicherung");
         let mut b = Book::default();
         b.entries = vec![Partner {
             id: "222222222".into(),
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn der_neuere_eintrag_gewinnt() {
+    fn newer_entry_wins() {
         let mut b = Book::default();
         b.entries = vec![Partner {
             id: "111111111".into(),
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn passwoerter_gehen_nie_zum_konto() {
+    fn passwords_never_go_to_account() {
         let mut b = Book::default();
         b.started("555555555", "geheim", true);
         assert!(b.password("555555555").is_some());
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn suche_ignoriert_trennzeichen_und_grossbuchstaben() {
+    fn search_ignores_separators_and_case() {
         assert_eq!(search_norm("flei one"), "fleione");
         assert_eq!(search_norm("FLEI-ONE"), "fleione");
         assert_eq!(search_norm(" 497 628 420 "), "497628420");

@@ -13,8 +13,8 @@
 
 use anyhow::{anyhow, Result};
 
-pub const BREITE: u32 = 640;
-pub const HOEHE: u32 = 360;
+pub const WIDTH: u32 = 640;
+pub const HEIGHT: u32 = 360;
 
 /// Erzeugt Bilder in RGB (3 Bytes je Punkt).
 pub struct Muster {
@@ -138,10 +138,10 @@ impl Kodierer {
 /// decoder per participant, because each can send a different size.
 pub struct Dekodierer {
     leute: std::collections::HashMap<u64, crate::h264::Decoder>,
-    /// Letztes fertiges Bild je Teilnehmer: (Breite, Hoehe, RGBA).
+    /// Letztes fertiges Bild je Participant: (Breite, Hoehe, RGBA).
     pub bilder: std::collections::HashMap<u64, (u32, u32, Vec<u8>)>,
     pub gezaehlt: u64,
-    pub letzter_fehler: String,
+    pub last_error: String,
     /// Counts up per participant as soon as a NEW image is finished. The
     /// UI reloads the graphics card only then - otherwise it would
     /// upload every image several times.
@@ -160,7 +160,7 @@ impl Dekodierer {
             leute: std::collections::HashMap::new(),
             bilder: std::collections::HashMap::new(),
             gezaehlt: 0,
-            letzter_fehler: String::new(),
+            last_error: String::new(),
             stand: std::collections::HashMap::new(),
         }
     }
@@ -173,10 +173,10 @@ impl Dekodierer {
                 // The others send whatever they want (phone in portrait,
                 // screen at 1920x1080) - the decoder takes the
                 // size from the stream, otherwise you only see a section.
-                match crate::h264::Decoder::new_auto(BREITE, HOEHE) {
+                match crate::h264::Decoder::new_auto(WIDTH, HEIGHT) {
                     Ok(d) => e.insert(d),
                     Err(err) => {
-                        self.letzter_fehler = format!("Dekodierer: {}", err);
+                        self.last_error = format!("Dekodierer: {}", err);
                         return false;
                     }
                 }
@@ -192,7 +192,7 @@ impl Dekodierer {
             }
             Ok(None) => false,
             Err(e) => {
-                self.letzter_fehler = format!("dekodieren: {}", e);
+                self.last_error = format!("dekodieren: {}", e);
                 false
             }
         }
@@ -228,10 +228,10 @@ mod tests {
 
     #[test]
     fn muster_hat_die_richtige_groesse_und_bewegt_sich() {
-        let mut m = Muster::neu(BREITE, HOEHE);
+        let mut m = Muster::neu(WIDTH, HEIGHT);
         let a = m.naechstes();
         let b = m.naechstes();
-        assert_eq!(a.len(), (BREITE * HOEHE * 3) as usize);
+        assert_eq!(a.len(), (WIDTH * HEIGHT * 3) as usize);
         assert_ne!(a, b, "das Bild bewegt sich nicht");
         // It is not black.
         let hell = a.iter().filter(|v| **v > 200).count();

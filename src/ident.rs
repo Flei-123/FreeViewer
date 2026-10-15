@@ -321,7 +321,7 @@ mod config_dir_tests {
     /// Protection against the data loss of 31.07.2026: in a test run the
     /// configuration folder must never be the real one.
     #[test]
-    fn tests_schreiben_nie_in_die_echte_konfiguration() {
+    fn tests_never_write_to_the_real_config() {
         let d = config_dir();
         assert_eq!(d, test_config_dir());
         assert!(d.starts_with(std::env::temp_dir()));

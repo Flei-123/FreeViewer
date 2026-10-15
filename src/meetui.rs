@@ -24,14 +24,14 @@ pub const KAMERA_BITRATE: u32 = 700_000;
 pub const AVATAR_BITRATE: u32 = 400_000;
 /// Screen up to 1920x1080 at 20 frames/s. Screen content is
 /// largely uniform and compresses well.
-pub const SCHIRM_BITRATE: u32 = 1_800_000;
+pub const SCREEN_BITRATE: u32 = 1_800_000;
 
 /// Lower and upper bounds - below the lower it looks like mush,
 /// above the upper more brings nothing.
 pub const KAMERA_MIN: u32 = 150_000;
 pub const KAMERA_MAX: u32 = 1_200_000;
-pub const SCHIRM_MIN: u32 = 300_000;
-pub const SCHIRM_MAX: u32 = 3_000_000;
+pub const SCREEN_MIN: u32 = 300_000;
+pub const SCREEN_MAX: u32 = 3_000_000;
 
 /// Splits the measured send bandwidth between camera and screen.
 ///
@@ -46,20 +46,20 @@ pub const SCHIRM_MAX: u32 = 3_000_000;
 ///
 /// `schaetzung` = 0 means "no measurement" - then the
 /// defaults stay in place.
-pub fn bitraten_verteilen(schaetzung: u64, kamera: bool, schirm: bool) -> (u32, u32) {
+pub fn bitraten_verteilen(schaetzung: u64, kamera: bool, screen: bool) -> (u32, u32) {
     if schaetzung == 0 {
-        return (KAMERA_BITRATE, SCHIRM_BITRATE);
+        return (KAMERA_BITRATE, SCREEN_BITRATE);
     }
     let nutzbar = (schaetzung as f64 * 0.85) as u32;
-    let (k, s) = match (kamera, schirm) {
+    let (k, s) = match (kamera, screen) {
         (true, true) => ((nutzbar as f64 * 0.30) as u32, (nutzbar as f64 * 0.70) as u32),
-        (true, false) => (nutzbar, SCHIRM_BITRATE),
+        (true, false) => (nutzbar, SCREEN_BITRATE),
         (false, true) => (KAMERA_BITRATE, nutzbar),
-        (false, false) => (KAMERA_BITRATE, SCHIRM_BITRATE),
+        (false, false) => (KAMERA_BITRATE, SCREEN_BITRATE),
     };
     (
         k.clamp(KAMERA_MIN, KAMERA_MAX),
-        s.clamp(SCHIRM_MIN, SCHIRM_MAX),
+        s.clamp(SCREEN_MIN, SCREEN_MAX),
     )
 }
 
@@ -72,29 +72,29 @@ pub fn bitrate_lohnt_wechsel(jetzt: u32, ziel: u32) -> bool {
 }
 
 pub struct NativMeet {
-    sig: meetsig::Sitzung,
+    sig: meetsig::Session,
     ton: meetrtc::Ton,
     geraete: Option<meetaudio::Geraete>,
     /// Chatverlauf: (Absender, Text) - Absender 0 = System.
     pub chat: Vec<(u64, String)>,
-    pub eingabe: String,
+    pub input_text: String,
     angeboten: bool,
     pub hand: bool,
-    pub stumm: bool,
+    pub is_muted: bool,
     /// Level of the own microphone (0..1), for display.
     pub pegel: f32,
-    /// Letzte Meldung (Fehler, Hinweise).
-    pub meldung: String,
+    /// Letzte Notice (FriendError, Hinweise).
+    pub notice: String,
     pub raum: String,
     /// How many video frames have arrived so far (stage 2 shows them later).
-    pub bild_zaehler: u64,
+    pub image_counter: u64,
     /// Format of the incoming frames ("H264"/"Vp8") - for display.
     pub bild_codec: String,
     /// Decoded CAMERA frames of the others (the latest per participant).
     /// What the camera is currently encoding at (bit/s).
     pub koder_bitrate: u32,
     /// What the screen is currently encoding at (bit/s).
-    pub schirm_bitrate: u32,
+    pub screen_bitrate: u32,
     /// Wann zuletzt nachgerechnet wurde.
     bitrate_geprueft: std::time::Instant,
     /// How often the bitrate has been adjusted - for measuring only.
@@ -130,7 +130,7 @@ pub struct NativMeet {
     pub kamera_geraet: Option<String>,
     pub mikro_geraet: Option<String>,
     pub lautsprecher_geraet: Option<String>,
-    pub kamera_meldung: String,
+    pub camera_notice: String,
     /// Own image for the preview: (width, height, RGBA).
     pub eigen: Option<(u32, u32, Vec<u8>)>,
     /// Counts up when the preview has a new image (texture reload).
@@ -142,9 +142,9 @@ pub struct NativMeet {
     /// Video track is registered with the server.
     video_gemeldet: bool,
     /// Screen share (stage 3) - own track next to the camera.
-    schirm: Option<crate::meetschirm::Aufnahme>,
-    schirm_koder: Option<crate::meetvideo::Kodierer>,
-    pub schirm_an: bool,
+    screen: Option<crate::meetschirm::Aufnahme>,
+    screen_encoder: Option<crate::meetvideo::Kodierer>,
+    pub screen_on: bool,
     /// The red frame around whatever is currently going out. Lives exactly as long
     /// as the share; it disappears by itself when dropped.
     rahmen: Option<crate::fenster::Rahmen>,
@@ -158,20 +158,20 @@ pub struct NativMeet {
     /// Where the frame was last placed - needless moving
     /// would be flicker.
     rahmen_lage: Option<(i32, i32, i32, i32)>,
-    pub schirm_meldung: String,
-    pub schirm_gesendet: u64,
+    pub screen_notice: String,
+    pub screen_sent: u64,
     /// The own shared image as RGBA - so you can see for YOURSELF what you
     /// are sharing. The browser client does exactly that ("otherwise you do not
     /// see WHAT you are sharing"); native lacked it, and a click on
     /// "Screen" therefore looked as if nothing happened at all.
-    pub eigen_schirm: Option<(u32, u32, Vec<u8>)>,
-    pub eigen_schirm_stand: u64,
+    pub own_screen: Option<(u32, u32, Vec<u8>)>,
+    pub own_screen_state: u64,
     naechstes_schirmbild: std::time::Instant,
     /// Wishes of the viewers: who wants which section of my
     /// screen? (participant -> area, plus when last heard from)
     wunsch_von: std::collections::HashMap<u64, (crate::meetschirm::Bereich, std::time::Instant)>,
     /// Welchen Ausschnitt SENDE ich gerade?
-    pub schirm_bereich: crate::meetschirm::Bereich,
+    pub screen_region: crate::meetschirm::Bereich,
     /// Which section are the OTHERS currently sending (for drawing)?
     pub bereich_von: std::collections::HashMap<u64, crate::meetschirm::Bereich>,
     /// Who can deliver sections at all (new client)? Whoever has
@@ -243,7 +243,7 @@ impl NativMeet {
         // who may enter the room. Without a key everything stays as before.
         let schluessel = e2e
             .as_deref()
-            .and_then(crate::meete2e::Schluessel::aus_text);
+            .and_then(crate::meete2e::Key::aus_text);
         let e2e_an = schluessel.is_some();
         let sig = meetsig::beitreten(
             basis,
@@ -253,11 +253,11 @@ impl NativMeet {
             if steuerung { fvid } else { "" },
             e2e_an,
         )?;
-        let ton = meetrtc::starten_mit(schluessel)?;
+        let ton = meetrtc::start_with(schluessel)?;
         // Without a sound card (server, test machine) the meeting still runs -
         // you just hear nothing. Report honestly instead of aborting.
         let (mikro_merk, lautsprecher_merk) = (mikro.clone(), lautsprecher.clone());
-        let (geraete, meldung) = match meetaudio::geraete_starten(mikro, lautsprecher) {
+        let (geraete, notice) = match meetaudio::start_devices(mikro, lautsprecher) {
             Ok(g) => {
                 let m = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
                 (Some(g), m)
@@ -269,17 +269,17 @@ impl NativMeet {
             ton,
             geraete,
             chat: Vec::new(),
-            eingabe: String::new(),
+            input_text: String::new(),
             angeboten: false,
             hand: false,
-            stumm: false,
+            is_muted: false,
             pegel: 0.0,
-            meldung,
+            notice,
             raum: raum.to_string(),
-            bild_zaehler: 0,
+            image_counter: 0,
             bild_codec: String::new(),
             koder_bitrate: KAMERA_BITRATE,
-            schirm_bitrate: SCHIRM_BITRATE,
+            screen_bitrate: SCREEN_BITRATE,
             bitrate_geprueft: std::time::Instant::now(),
             bitrate_wechsel: 0,
             bilder: crate::meetvideo::Dekodierer::neu(),
@@ -299,27 +299,27 @@ impl NativMeet {
             kamera_geraet: None,
             mikro_geraet: mikro_merk,
             lautsprecher_geraet: lautsprecher_merk,
-            kamera_meldung: String::new(),
+            camera_notice: String::new(),
             eigen: None,
             eigen_stand: 0,
             bild_gesendet: 0,
             naechstes_bild: std::time::Instant::now(),
             video_gemeldet: false,
-            schirm: None,
-            schirm_koder: None,
-            schirm_an: false,
+            screen: None,
+            screen_encoder: None,
+            screen_on: false,
             rahmen: None,
             sperre_an: true,
             sperre_staerke: 45,
             rahmen_an: true,
             rahmen_lage: None,
-            schirm_meldung: String::new(),
-            schirm_gesendet: 0,
-            eigen_schirm: None,
-            eigen_schirm_stand: 0,
+            screen_notice: String::new(),
+            screen_sent: 0,
+            own_screen: None,
+            own_screen_state: 0,
             naechstes_schirmbild: std::time::Instant::now(),
             wunsch_von: std::collections::HashMap::new(),
-            schirm_bereich: crate::meetschirm::GANZ,
+            screen_region: crate::meetschirm::GANZ,
             bereich_von: std::collections::HashMap::new(),
             scharf_kann: std::collections::HashSet::new(),
             letzter_wunsch: None,
@@ -345,8 +345,8 @@ impl NativMeet {
         })
     }
 
-    pub fn zustand(&self) -> meetsig::Zustand {
-        self.sig.zustand()
+    pub fn state(&self) -> meetsig::State {
+        self.sig.state()
     }
 
     pub fn zahlen(&self) -> meetrtc::Zahlen {
@@ -385,7 +385,7 @@ impl NativMeet {
                             serde_json::json!({"t":"publish","mid":self.ton.vid2,"screen":true}),
                         );
                         self.video_gemeldet = true;
-                        self.sig.stumm("video", !self.kamera_an);
+                        self.sig.is_muted("video", !self.kamera_an);
                     } else {
                         self.ton.server_angebot(&sdp);
                     }
@@ -411,7 +411,7 @@ impl NativMeet {
                     }
                     let name = self
                         .sig
-                        .zustand()
+                        .state()
                         .leute
                         .iter()
                         .find(|x| x.id == id)
@@ -419,13 +419,13 @@ impl NativMeet {
                         .unwrap_or_else(|| format!("#{}", id));
                     self.chat.push((0, format!("{} ist gegangen", name)));
                 }
-                meetsig::Ereignis::ZwangStumm { art } => {
+                meetsig::Ereignis::ForceMuted { art } => {
                     if art == "audio" {
-                        self.stumm = true;
+                        self.is_muted = true;
                         if let Some(g) = &self.geraete {
-                            g.stumm.store(true, std::sync::atomic::Ordering::Relaxed);
+                            g.is_muted.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
-                        self.ton.stumm(true);
+                        self.ton.is_muted(true);
                         self.chat
                             .push((0, "Der Gastgeber hat dich stummgeschaltet".into()));
                     }
@@ -436,12 +436,12 @@ impl NativMeet {
                     // The REASON is the valuable part ("Meeting is end-to-end
                     // encrypted - please update"). It must stay
                     // put; the line is cut right after.
-                    self.meldung = m;
+                    self.notice = m;
                     self.grund_steht = true;
                 }
                 meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
                     // Do not report about the own share itself.
-                    let ich = self.sig.zustand().ich;
+                    let ich = self.sig.state().ich;
                     // Only STARTING the share is worth a message. Stopping it
                     // used to show up in the chat as well - that is
                     // noise, the button visibly disappears anyway.
@@ -451,7 +451,7 @@ impl NativMeet {
                             .push((0, format!("{} erlaubt Fernsteuerung ({})", wer, fvid)));
                     }
                 }
-                meetsig::Ereignis::SteuerungAngefragt { peer, name } => {
+                meetsig::Ereignis::ControlRequested { peer, name } => {
                     // Asked twice is not asked twice.
                     if !self.steuer_anfragen.iter().any(|(id, _)| *id == peer) {
                         self.steuer_anfragen.push((peer, name.clone()));
@@ -459,7 +459,7 @@ impl NativMeet {
                     self.chat
                         .push((0, format!("{} bittet um die Steuerung", name)));
                 }
-                meetsig::Ereignis::SteuerungBeantwortet {
+                meetsig::Ereignis::ControlAnswered {
                     von,
                     gewaehrt,
                     fvid,
@@ -475,7 +475,7 @@ impl NativMeet {
                             self.chat
                                 .push((0, format!("{} erlaubt dir die Steuerung", wer)));
                         } else {
-                            self.meldung =
+                            self.notice =
                                 format!("{} hat zugesagt, hat aber keine FreeViewer-Nummer", wer);
                         }
                     } else {
@@ -484,7 +484,7 @@ impl NativMeet {
                             .push((0, format!("{} hat die Steuerung abgelehnt", wer)));
                     }
                 }
-                meetsig::Ereignis::SteuerungZurueck { .. } => {
+                meetsig::Ereignis::ControlGiveBack { .. } => {
                     // The server sends this only to the person affected - so it is
                     // always about MY share.
                     if self.steuer_zusage.take().is_some() {
@@ -506,8 +506,8 @@ impl NativMeet {
                     self.scharf_kann.insert(peer);
                     self.bereich_von.insert(peer, (x, y, w, h));
                 }
-                meetsig::Ereignis::Fehler { code, text } => {
-                    self.meldung = format!("{}: {}", code, text);
+                meetsig::Ereignis::FriendError { code, text } => {
+                    self.notice = format!("{}: {}", code, text);
                 }
                 meetsig::Ereignis::Sprecher(p) => self.sprecher = p,
                 meetsig::Ereignis::Tippt { peer, an } => {
@@ -525,7 +525,7 @@ impl NativMeet {
                     // If a real reason is already there, it stays -
                     // "Connection ended" would be the worse answer.
                     if !self.grund_steht {
-                        self.meldung = if m.is_empty() {
+                        self.notice = if m.is_empty() {
                             "Verbindung beendet".into()
                         } else {
                             format!("Verbindung weg: {}", m)
@@ -547,7 +547,7 @@ impl NativMeet {
                     .map(|v| (*v as f32 / 32768.0).abs())
                     .fold(0.0f32, f32::max);
                 self.pegel = self.pegel * 0.7 + spitze * 0.3;
-                self.ton.senden(rahmen);
+                self.ton.send_out(rahmen);
             }
         }
         // Netz -> Lautsprecher
@@ -580,7 +580,7 @@ impl NativMeet {
                     // Stage 2: decoding is done by the platform later.
                     // For now we only count, so you can see that
                     // video really arrives.
-                    self.bild_zaehler += 1;
+                    self.image_counter += 1;
                     let _ = schluesselbild;
                     if bildschirm {
                         self.schirme.rahmen(quelle, &daten);
@@ -588,20 +588,20 @@ impl NativMeet {
                         self.bilder.rahmen(quelle, &daten);
                     }
                 }
-                meetrtc::TonEreignis::Fehler(f) => self.meldung = f,
+                meetrtc::TonEreignis::FriendError(f) => self.notice = f,
                 meetrtc::TonEreignis::Ende(f) => {
                     if !f.is_empty() {
-                        self.meldung = f;
+                        self.notice = f;
                     }
                 }
                 meetrtc::TonEreignis::Verbunden => {
-                    self.meldung = "Ton verbunden".into();
+                    self.notice = "Ton verbunden".into();
                 }
             }
         }
         self.bitrate_pumpe();
         self.kamera_pumpe();
-        self.schirm_pumpe();
+        self.screen_pump();
         self.zeiger_pumpe();
         self.bereich_pumpe();
         self.messen();
@@ -627,7 +627,7 @@ impl NativMeet {
         self.letzte_messung = jetzt;
     }
 
-    /// Spricht dieser Teilnehmer gerade?
+    /// Spricht dieser Participant gerade?
     pub fn spricht(&self, id: u64) -> bool {
         self.sprecher == Some(id) || self.pegel_von.get(&id).copied().unwrap_or(0.0) > 0.06
     }
@@ -651,7 +651,7 @@ impl NativMeet {
     /// dozen bytes, but they let the viewer zoom exactly to
     /// where it is pointed.
     fn zeiger_pumpe(&mut self) {
-        if !self.schirm_an {
+        if !self.screen_on {
             return;
         }
         let jetzt = std::time::Instant::now();
@@ -659,7 +659,7 @@ impl NativMeet {
             return;
         }
         self.naechster_zeiger = jetzt + std::time::Duration::from_millis(100);
-        let quelle = match self.schirm.as_ref() {
+        let quelle = match self.screen.as_ref() {
             Some(a) => a.quelle,
             None => return,
         };
@@ -676,7 +676,7 @@ impl NativMeet {
         }
     }
 
-    fn schirm_pumpe(&mut self) {
+    fn screen_pump(&mut self) {
         let jetzt = std::time::Instant::now();
         // Move the frame along BEFORE we abort due to the frame rate -
         // a window can be moved faster than a frame goes out
@@ -686,7 +686,7 @@ impl NativMeet {
         if jetzt < self.naechstes_schirmbild {
             return;
         }
-        let (auf, kod) = match (self.schirm.as_ref(), self.schirm_koder.as_mut()) {
+        let (auf, kod) = match (self.screen.as_ref(), self.screen_encoder.as_mut()) {
             (Some(a), Some(k)) => (a, k),
             _ => return,
         };
@@ -705,16 +705,16 @@ impl NativMeet {
         match kod.nv12_rahmen(&bild.nv12) {
             Ok(teile) => {
                 for t in teile {
-                    self.ton.schirm_senden(t.data);
+                    self.ton.screen_send(t.data);
                 }
-                self.schirm_gesendet += 1;
+                self.screen_sent += 1;
             }
-            Err(e) => self.schirm_meldung = format!("Kodierer: {}", e),
+            Err(e) => self.screen_notice = format!("Kodierer: {}", e),
         }
         // Own preview: only every SECOND frame (10 times per second). A
         // screen is large, converting to RGBA costs more than for
         // the camera - and for checking the coarse version is enough.
-        if self.schirm_gesendet % 2 == 0 {
+        if self.screen_sent % 2 == 0 {
             let mut rgba = Vec::new();
             if crate::h264::nv12_to_rgba(
                 &bild.nv12,
@@ -724,13 +724,13 @@ impl NativMeet {
                 bild.hoehe,
                 &mut rgba,
             ) {
-                self.eigen_schirm = Some((bild.breite, bild.hoehe, rgba));
-                self.eigen_schirm_stand += 1;
+                self.own_screen = Some((bild.breite, bild.hoehe, rgba));
+                self.own_screen_state += 1;
             }
         }
         let f = auf.fehler();
         if !f.is_empty() {
-            self.schirm_meldung = f;
+            self.screen_notice = f;
         }
     }
 
@@ -740,10 +740,10 @@ impl NativMeet {
     /// moves, grows, gets minimised. If it disappears, the
     /// frame is removed instead of staying in a wrong place.
     fn rahmen_pumpe(&mut self) {
-        if !self.schirm_an {
+        if !self.screen_on {
             return;
         }
-        let Some(a) = self.schirm.as_ref() else { return };
+        let Some(a) = self.screen.as_ref() else { return };
         let quelle = a.quelle;
         match (self.rahmen_an, quelle.lage()) {
             (true, Some(lage)) => {
@@ -781,7 +781,7 @@ impl NativMeet {
     }
 
     /// How many screens are there here?
-    pub fn monitore() -> Vec<crate::meetschirm::Schirm> {
+    pub fn monitore() -> Vec<crate::meetschirm::Screen> {
         crate::meetschirm::liste()
     }
 
@@ -790,11 +790,11 @@ impl NativMeet {
     /// did not work - it belongs in front of the user, not just
     /// in the log. This is exactly why a failure looked like
     /// "nothing happens".
-    pub fn schirm_schalten_melden(&mut self, an: bool, index: usize) -> Option<String> {
-        self.quelle_schalten_melden(an, crate::meetschirm::Quelle::Bildschirm(index))
+    pub fn report_toggle_screen(&mut self, an: bool, index: usize) -> Option<String> {
+        self.quelle_schalten_melden(an, crate::meetschirm::Quelle::Display(index))
     }
 
-    /// Like `schirm_schalten_melden`, but the source may also be a single
+    /// Like `report_toggle_screen`, but the source may also be a single
     /// program window.
     pub fn quelle_schalten_melden(
         &mut self,
@@ -802,8 +802,8 @@ impl NativMeet {
         quelle: crate::meetschirm::Quelle,
     ) -> Option<String> {
         self.quelle_schalten(an, quelle);
-        if an && !self.schirm_an {
-            let m = self.schirm_meldung.clone();
+        if an && !self.screen_on {
+            let m = self.screen_notice.clone();
             return Some(if m.is_empty() {
                 "Bildschirm laesst sich nicht teilen".to_string()
             } else {
@@ -813,25 +813,25 @@ impl NativMeet {
         None
     }
 
-    pub fn schirm_schalten(&mut self, an: bool, index: usize) {
-        self.quelle_schalten(an, crate::meetschirm::Quelle::Bildschirm(index))
+    pub fn toggle_screen(&mut self, an: bool, index: usize) {
+        self.quelle_schalten(an, crate::meetschirm::Quelle::Display(index))
     }
 
     /// Freigabe einer beliebigen Quelle schalten.
     pub fn quelle_schalten(&mut self, an: bool, quelle: crate::meetschirm::Quelle) {
         if an {
-            if self.schirm.is_some() {
+            if self.screen.is_some() {
                 return;
             }
-            match crate::meetschirm::oeffnen_quelle(quelle, 1920, 1080, 15) {
-                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, SCHIRM_BITRATE) {
+            match crate::meetschirm::open_source(quelle, 1920, 1080, 15) {
+                Ok(a) => match crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, SCREEN_BITRATE) {
                     Ok(k) => {
-                        self.schirm_meldung = format!("Teile {}", a.name);
-                        self.schirm = Some(a);
-                        self.schirm_koder = Some(k);
-                        self.schirm_bitrate = SCHIRM_BITRATE;
-                        self.schirm_an = true;
-                        self.schirm_gesendet = 0;
+                        self.screen_notice = format!("Teile {}", a.name);
+                        self.screen = Some(a);
+                        self.screen_encoder = Some(k);
+                        self.screen_bitrate = SCREEN_BITRATE;
+                        self.screen_on = true;
+                        self.screen_sent = 0;
                         self.letztes_schluesselbild =
                             std::time::Instant::now() - std::time::Duration::from_secs(9);
                         // First register the track as screen, then announce
@@ -856,32 +856,32 @@ impl NativMeet {
                     }
                     Err(e) => {
                         a.stoppen();
-                        self.schirm_meldung = format!("Kein Kodierer: {}", e);
-                        self.schirm_an = false;
+                        self.screen_notice = format!("Kein Kodierer: {}", e);
+                        self.screen_on = false;
                     }
                 },
                 Err(e) => {
-                    self.schirm_meldung = format!("Kein Bildschirm: {}", e);
-                    self.schirm_an = false;
+                    self.screen_notice = format!("Kein Bildschirm: {}", e);
+                    self.screen_on = false;
                 }
             }
         } else {
-            if let Some(a) = self.schirm.take() {
+            if let Some(a) = self.screen.take() {
                 a.stoppen();
             }
-            self.schirm_koder = None;
-            self.schirm_an = false;
+            self.screen_encoder = None;
+            self.screen_on = false;
             self.rahmen = None;
             self.rahmen_lage = None;
-            self.eigen_schirm = None;
-            self.eigen_schirm_stand += 1;
-            self.schirm_meldung = String::new();
+            self.own_screen = None;
+            self.own_screen_state += 1;
+            self.screen_notice = String::new();
             // Whoever no longer shares also releases nothing anymore. Open
             // requests are moot, granted releases must go -
             // otherwise a permission would remain that nobody sees anymore.
             if !self.steuer_erlaubt.is_empty() {
                 self.steuer_erlaubt.clear();
-                self.sig.steuerung_zuruecknehmen(None);
+                self.sig.revoke_control(None);
             }
             self.steuer_anfragen.clear();
             self.sig.roh(serde_json::json!({"t":"screen","on":false}));
@@ -889,8 +889,8 @@ impl NativMeet {
     }
 
     /// Name of the running screen share (empty = off).
-    pub fn schirm_name(&self) -> String {
-        self.schirm.as_ref().map(|a| a.name.clone()).unwrap_or_default()
+    pub fn screen_name(&self) -> String {
+        self.screen.as_ref().map(|a| a.name.clone()).unwrap_or_default()
     }
 
     /// Camera -> H.264 -> meeting. Runs at 15 frames per second; the
@@ -906,12 +906,12 @@ impl NativMeet {
         }
         self.bitrate_geprueft = std::time::Instant::now();
         let schaetzung = self.ton.zahlen().bandbreite;
-        let (k, s) = bitraten_verteilen(schaetzung, self.kamera_an, self.schirm_an);
+        let (k, s) = bitraten_verteilen(schaetzung, self.kamera_an, self.screen_on);
         if self.koder.is_some() && bitrate_lohnt_wechsel(self.koder_bitrate, k) {
             let (b, h, fps) = match (&self.kamera, self.avatar_an) {
                 (Some(kam), _) => (kam.breite, kam.hoehe, 30),
-                (None, true) => (crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 20),
-                _ => (crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 30),
+                (None, true) => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 20),
+                _ => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30),
             };
             if let Ok(c) = crate::meetvideo::Kodierer::neu(b, h, fps, k) {
                 self.koder = Some(c);
@@ -919,11 +919,11 @@ impl NativMeet {
                 self.bitrate_wechsel += 1;
             }
         }
-        if self.schirm_koder.is_some() && bitrate_lohnt_wechsel(self.schirm_bitrate, s) {
-            if let Some(a) = self.schirm.as_ref() {
+        if self.screen_encoder.is_some() && bitrate_lohnt_wechsel(self.screen_bitrate, s) {
+            if let Some(a) = self.screen.as_ref() {
                 if let Ok(c) = crate::meetvideo::Kodierer::neu(a.breite, a.hoehe, 20, s) {
-                    self.schirm_koder = Some(c);
-                    self.schirm_bitrate = s;
+                    self.screen_encoder = Some(c);
+                    self.screen_bitrate = s;
                     self.bitrate_wechsel += 1;
                 }
             }
@@ -954,11 +954,11 @@ impl NativMeet {
         match kod.nv12_rahmen(&bild.nv12) {
             Ok(teile) => {
                 for t in teile {
-                    self.ton.bild_senden(t.data);
+                    self.ton.send_frame(t.data);
                 }
                 self.bild_gesendet += 1;
             }
-            Err(e) => self.kamera_meldung = format!("Kodierer: {}", e),
+            Err(e) => self.camera_notice = format!("Kodierer: {}", e),
         }
         // Own preview. Used to be only every THIRD frame - at 15 frames
         // per second that is 5/s, and the own tile visibly stuttered
@@ -980,7 +980,7 @@ impl NativMeet {
         }
         let f = kam.fehler();
         if !f.is_empty() {
-            self.kamera_meldung = f;
+            self.camera_notice = f;
         }
     }
 
@@ -1013,7 +1013,7 @@ impl NativMeet {
             0.0
         };
         let atmen = (t as f32 * 0.06).sin();
-        let (b, h) = (crate::meetvideo::BREITE, crate::meetvideo::HOEHE);
+        let (b, h) = (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT);
         crate::avatar::zeichnen(
             &self.avatar,
             b,
@@ -1029,11 +1029,11 @@ impl NativMeet {
         match kod.nv12_rahmen(&self.avatar_nv12) {
             Ok(teile) => {
                 for teil in teile {
-                    self.ton.bild_senden(teil.data);
+                    self.ton.send_frame(teil.data);
                 }
                 self.bild_gesendet += 1;
             }
-            Err(e) => self.kamera_meldung = format!("Kodierer: {}", e),
+            Err(e) => self.camera_notice = format!("Kodierer: {}", e),
         }
         // Own preview: the avatar is exactly what the others see.
         let mut rgba = Vec::with_capacity((b * h * 4) as usize);
@@ -1058,8 +1058,8 @@ impl NativMeet {
             }
             if self.koder.is_none() {
                 match crate::meetvideo::Kodierer::neu(
-                    crate::meetvideo::BREITE,
-                    crate::meetvideo::HOEHE,
+                    crate::meetvideo::WIDTH,
+                    crate::meetvideo::HEIGHT,
                     20,
                     AVATAR_BITRATE,
                 ) {
@@ -1068,24 +1068,24 @@ impl NativMeet {
                         self.koder_bitrate = AVATAR_BITRATE;
                     }
                     Err(e) => {
-                        self.kamera_meldung = format!("Kein Kodierer: {}", e);
+                        self.camera_notice = format!("Kein Kodierer: {}", e);
                         return;
                     }
                 }
             }
             self.avatar_an = true;
             self.kamera_an = true;
-            self.kamera_meldung = "Avatar statt Kamera".into();
+            self.camera_notice = "Avatar statt Kamera".into();
         } else {
             self.avatar_an = false;
             self.koder = None;
             self.eigen = None;
             self.eigen_stand += 1;
             self.kamera_an = false;
-            self.kamera_meldung = String::new();
+            self.camera_notice = String::new();
         }
         if self.video_gemeldet {
-            self.sig.stumm("video", !self.kamera_an);
+            self.sig.is_muted("video", !self.kamera_an);
         }
     }
 
@@ -1106,27 +1106,27 @@ impl NativMeet {
             }
             match crate::meetcam::oeffnen(
                 self.kamera_geraet.clone(),
-                crate::meetvideo::BREITE,
-                crate::meetvideo::HOEHE,
+                crate::meetvideo::WIDTH,
+                crate::meetvideo::HEIGHT,
                 30,
             ) {
                 Ok(k) => {
                     match crate::meetvideo::Kodierer::neu(k.breite, k.hoehe, 30, KAMERA_BITRATE) {
                         Ok(c) => {
-                            self.kamera_meldung = format!("Kamera: {}", k.name);
+                            self.camera_notice = format!("Kamera: {}", k.name);
                             self.kamera = Some(k);
                             self.koder = Some(c);
                             self.koder_bitrate = KAMERA_BITRATE;
                             self.kamera_an = true;
                         }
                         Err(e) => {
-                            self.kamera_meldung = format!("Kein Kodierer: {}", e);
+                            self.camera_notice = format!("Kein Kodierer: {}", e);
                             self.kamera_an = false;
                         }
                     }
                 }
                 Err(e) => {
-                    self.kamera_meldung = format!("Keine Kamera: {}", e);
+                    self.camera_notice = format!("Keine Kamera: {}", e);
                     self.kamera_an = false;
                 }
             }
@@ -1140,7 +1140,7 @@ impl NativMeet {
             self.kamera_an = false;
         }
         if self.video_gemeldet {
-            self.sig.stumm("video", !self.kamera_an);
+            self.sig.is_muted("video", !self.kamera_an);
         }
     }
 
@@ -1149,13 +1149,13 @@ impl NativMeet {
         self.kamera.as_ref().map(|k| k.name.clone()).unwrap_or_default()
     }
 
-    pub fn stumm_schalten(&mut self, an: bool) {
-        self.stumm = an;
-        self.ton.stumm(an);
+    pub fn toggle_muted(&mut self, an: bool) {
+        self.is_muted = an;
+        self.ton.is_muted(an);
         if let Some(g) = &self.geraete {
-            g.stumm.store(an, std::sync::atomic::Ordering::Relaxed);
+            g.is_muted.store(an, std::sync::atomic::Ordering::Relaxed);
         }
-        self.sig.stumm("audio", an);
+        self.sig.is_muted("audio", an);
     }
 
     /// Change the camera in the RUNNING meeting. `geraet` = None is the
@@ -1187,23 +1187,23 @@ impl NativMeet {
         self.lautsprecher_geraet = lautsprecher.clone();
         // First release the old one (drop stops the threads), then the new one.
         self.geraete = None;
-        match meetaudio::geraete_starten(mikro, lautsprecher) {
+        match meetaudio::start_devices(mikro, lautsprecher) {
             Ok(g) => {
-                g.stumm
-                    .store(self.stumm, std::sync::atomic::Ordering::Relaxed);
+                g.is_muted
+                    .store(self.is_muted, std::sync::atomic::Ordering::Relaxed);
                 g.sperre_an
                     .store(self.sperre_an, std::sync::atomic::Ordering::Relaxed);
                 g.sperre_staerke.store(
                     self.sperre_staerke as u32,
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                self.meldung = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
-                self.protokoll.push(self.meldung.clone());
+                self.notice = format!("Mikrofon: {} / Lautsprecher: {}", g.eingang, g.ausgang);
+                self.protokoll.push(self.notice.clone());
                 self.geraete = Some(g);
             }
             Err(e) => {
-                self.meldung = format!("Kein Ton-Geraet: {}", e);
-                self.protokoll.push(self.meldung.clone());
+                self.notice = format!("Kein Ton-Geraet: {}", e);
+                self.protokoll.push(self.notice.clone());
             }
         }
     }
@@ -1284,9 +1284,9 @@ impl NativMeet {
     /// difference - every switch costs a keyframe and is
     /// visible as a small jump.
     fn bereich_pumpe(&mut self) {
-        if !self.schirm_an {
-            if self.schirm_bereich != crate::meetschirm::GANZ {
-                self.schirm_bereich = crate::meetschirm::GANZ;
+        if !self.screen_on {
+            if self.screen_region != crate::meetschirm::GANZ {
+                self.screen_region = crate::meetschirm::GANZ;
             }
             return;
         }
@@ -1298,22 +1298,22 @@ impl NativMeet {
         let wuensche: Vec<crate::meetschirm::Bereich> =
             self.wunsch_von.values().map(|(b, _)| *b).collect();
         let neu = crate::meetschirm::bereich_vereinen(&wuensche);
-        if neu == self.schirm_bereich {
+        if neu == self.screen_region {
             return;
         }
-        if self.schirm_bereich != crate::meetschirm::GANZ
+        if self.screen_region != crate::meetschirm::GANZ
             && neu != crate::meetschirm::GANZ
-            && !crate::meetschirm::bereich_lohnt_wechsel(self.schirm_bereich, neu)
+            && !crate::meetschirm::bereich_lohnt_wechsel(self.screen_region, neu)
         {
             return;
         }
-        self.schirm_bereich = neu;
-        if let Some(a) = self.schirm.as_ref() {
+        self.screen_region = neu;
+        if let Some(a) = self.screen.as_ref() {
             a.bereich_setzen(neu);
         }
         // The image content jumps - without a fresh keyframe the
         // others would see garbled video for a moment.
-        if let Some(k) = self.schirm_koder.as_mut() {
+        if let Some(k) = self.screen_encoder.as_mut() {
             k.schluesselbild();
         }
         self.letztes_schluesselbild = jetzt;
@@ -1334,11 +1334,11 @@ impl NativMeet {
     /// therefore kept reading "Sharer's mouse (does not arrive)", although the
     /// information was right in front of them.
     pub fn eigener_zeiger(&self) -> Option<(f32, f32)> {
-        let a = self.schirm.as_ref()?;
+        let a = self.screen.as_ref()?;
         crate::meetschirm::zeiger_anteil_quelle(a.quelle)
     }
 
-    /// Welchen Ausschnitt sendet dieser Teilnehmer gerade?
+    /// Welchen Ausschnitt sendet dieser Participant gerade?
     pub fn bereich_des_teilers(&self, peer: u64) -> Option<crate::meetschirm::Bereich> {
         self.bereich_von.get(&peer).copied()
     }
@@ -1353,15 +1353,15 @@ impl NativMeet {
         self.sig.hand(an);
     }
 
-    pub fn senden(&mut self) {
-        let t = self.eingabe.trim().to_string();
+    pub fn send_out(&mut self) {
+        let t = self.input_text.trim().to_string();
         if t.is_empty() {
             return;
         }
         self.sig.chat(&t);
-        let ich = self.sig.zustand().ich;
+        let ich = self.sig.state().ich;
         self.chat.push((ich, t));
-        self.eingabe.clear();
+        self.input_text.clear();
     }
 
     pub fn einlassen(&self, peer: u64) {
@@ -1381,17 +1381,17 @@ impl NativMeet {
         if let Some(k) = self.kamera.as_ref() {
             k.stoppen();
         }
-        if let Some(a) = self.schirm.as_ref() {
+        if let Some(a) = self.screen.as_ref() {
             a.stoppen();
             self.sig.roh(serde_json::json!({"t":"screen","on":false}));
         }
         self.sig.verlassen();
-        self.ton.beenden();
+        self.ton.finish();
     }
 
     /// Name of a participant (for the chat).
     pub fn name_von(&self, id: u64) -> String {
-        let z = self.sig.zustand();
+        let z = self.sig.state();
         if id == z.ich {
             return "Du".into();
         }
@@ -1406,10 +1406,10 @@ impl NativMeet {
     /// others thereby get a button that sets up a real FreeViewer
     /// session to us - it is still only admitted here in the
     /// program, so never behind the owner's back.
-    pub fn steuerung_freigeben(&mut self, an: bool) {
+    pub fn release_control(&mut self, an: bool) {
         // Without own number the release would be worthless - better to report it.
         if an && self.ich_fvid.chars().filter(|c| c.is_ascii_digit()).count() == 0 {
-            self.meldung = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
+            self.notice = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
             return;
         }
         self.steuer_frei = an;
@@ -1424,25 +1424,25 @@ impl NativMeet {
     ///
     /// We do NOT claim who is sharing - the server decides that from
     /// the tracks. If nobody is sharing, an error comes back
-    /// ("kein-teilender"), and it lands in `meldung`.
-    pub fn steuerung_anfragen(&mut self) {
+    /// ("kein-teilender"), and it lands in `notice`.
+    pub fn request_control(&mut self) {
         self.steuer_gefragt = true;
-        self.sig.steuerung_anfragen();
+        self.sig.request_control();
         self.chat.push((0, "Du hast um die Steuerung gebeten".into()));
     }
 
     /// As sharer: accept or reject a request.
-    pub fn steuerung_antworten(&mut self, peer: u64, ja: bool) {
+    pub fn reply_control(&mut self, peer: u64, ja: bool) {
         self.steuer_anfragen.retain(|(p, _)| *p != peer);
         // Without own number the other side cannot do anything with the
         // approval - better to say right away what is wrong than to feign
         // a release.
         if ja && self.ich_fvid.chars().filter(|c| c.is_ascii_digit()).count() == 0 {
-            self.meldung = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
-            self.sig.steuerung_beantworten(peer, false, "");
+            self.notice = "Keine FreeViewer-Nummer - Steuerung nicht freigebbar".into();
+            self.sig.answer_control(peer, false, "");
             return;
         }
-        self.sig.steuerung_beantworten(peer, ja, &self.ich_fvid);
+        self.sig.answer_control(peer, ja, &self.ich_fvid);
         if ja {
             if !self.steuer_erlaubt.contains(&peer) {
                 self.steuer_erlaubt.push(peer);
@@ -1459,22 +1459,22 @@ impl NativMeet {
     }
 
     /// As sharer: withdraw a granted release (None = all).
-    pub fn steuerung_zuruecknehmen(&mut self, peer: Option<u64>) {
+    pub fn revoke_control(&mut self, peer: Option<u64>) {
         match peer {
             Some(p) => self.steuer_erlaubt.retain(|x| *x != p),
             None => self.steuer_erlaubt.clear(),
         }
-        self.sig.steuerung_zuruecknehmen(peer);
+        self.sig.revoke_control(peer);
         self.chat
             .push((0, "Steuerungsfreigabe zurueckgenommen".into()));
     }
 
-    /// Offene Anfragen an mich (Teilnehmer, Name).
+    /// Offene Anfragen an mich (Participant, Name).
     pub fn steuer_anfragen(&self) -> Vec<(u64, String)> {
         self.steuer_anfragen.clone()
     }
 
-    /// Wem ich es erlaubt habe (Teilnehmer, Name).
+    /// Wem ich es erlaubt habe (Participant, Name).
     pub fn steuer_erlaubt(&self) -> Vec<(u64, String)> {
         self.steuer_erlaubt
             .iter()
@@ -1493,13 +1493,13 @@ impl NativMeet {
     /// it would be a promise the server immediately rejects with
     /// "kein-teilender".
     pub fn fremder_teilt(&self) -> bool {
-        let ich = self.sig.zustand().ich;
+        let ich = self.sig.state().ich;
         self.schirme.bilder.keys().any(|id| *id != ich)
     }
 
     /// Who in the room can be remote controlled? (participant, name, FreeViewer no.)
     pub fn steuerbare(&self) -> Vec<(u64, String, String)> {
-        let z = self.sig.zustand();
+        let z = self.sig.state();
         z.leute
             .iter()
             .filter(|t| t.id != z.ich && !t.fvid.is_empty())
@@ -1513,7 +1513,7 @@ impl NativMeet {
     }
 
     pub fn bin_gastgeber(&self) -> bool {
-        let z = self.sig.zustand();
+        let z = self.sig.state();
         z.gastgeber != 0 && z.gastgeber == z.ich
     }
 }
@@ -1535,7 +1535,7 @@ pub struct Vorprobe {
     /// Counts up as soon as a new image is there (reload texture).
     pub stand: u64,
     pub pegel: f32,
-    pub meldung: String,
+    pub notice: String,
     naechstes: std::time::Instant,
     /// What the user WANTS - separate from the actual state. Without this separation
     /// a device error would trigger a new attempt every frame.
@@ -1552,7 +1552,7 @@ impl Default for Vorprobe {
             eigen: None,
             stand: 0,
             pegel: 0.0,
-            meldung: String::new(),
+            notice: String::new(),
             naechstes: std::time::Instant::now(),
             wunsch_kamera: false,
             wunsch_mikro: false,
@@ -1580,13 +1580,13 @@ impl Vorprobe {
             self.stand += 1;
             return;
         }
-        match crate::meetcam::oeffnen(None, crate::meetvideo::BREITE, crate::meetvideo::HOEHE, 30) {
+        match crate::meetcam::oeffnen(None, crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30) {
             Ok(k) => {
-                self.meldung = format!("Kamera: {}", k.name);
+                self.notice = format!("Kamera: {}", k.name);
                 self.kamera = Some(k);
             }
             Err(e) => {
-                self.meldung = format!("Keine Kamera: {}", e);
+                self.notice = format!("Keine Kamera: {}", e);
             }
         }
     }
@@ -1605,9 +1605,9 @@ impl Vorprobe {
             return;
         }
         self.ton = None;
-        match meetaudio::geraete_starten(geraet, None) {
+        match meetaudio::start_devices(geraet, None) {
             Ok(g) => self.ton = Some(g),
-            Err(e) => self.meldung = format!("Kein Mikrofon: {}", e),
+            Err(e) => self.notice = format!("Kein Mikrofon: {}", e),
         }
     }
 
@@ -1653,7 +1653,7 @@ impl Vorprobe {
         }
         let f = kam.fehler();
         if !f.is_empty() {
-            self.meldung = f;
+            self.notice = f;
         }
     }
 
@@ -1710,7 +1710,7 @@ mod tests {
             #[cfg(not(windows))]
             {
                 assert!(!m.kamera_an, "ohne Kamera darf sie nicht an sein");
-                assert!(!m.kamera_meldung.is_empty(), "keine Meldung");
+                assert!(!m.camera_notice.is_empty(), "keine Meldung");
             }
             m.kamera_schalten(false);
             assert!(!m.kamera_an);
@@ -1719,22 +1719,22 @@ mod tests {
     }
 
     #[test]
-    fn schirm_schalten_ohne_bildschirm_meldet_sauber() {
+    fn toggle_screen_without_display_reports_cleanly() {
         // Server without screen: report cleanly, do not crash.
         let r = NativMeet::beitreten("http://127.0.0.1:1", "000-000-000", "x", "T", "", false, None, None, None,);
         if let Ok(mut m) = r {
-            m.schirm_schalten(true, 0);
-            if !m.schirm_an {
-                assert!(!m.schirm_meldung.is_empty(), "keine Meldung");
+            m.toggle_screen(true, 0);
+            if !m.screen_on {
+                assert!(!m.screen_notice.is_empty(), "keine Meldung");
             }
-            m.schirm_schalten(false, 0);
-            assert!(!m.schirm_an);
+            m.toggle_screen(false, 0);
+            assert!(!m.screen_on);
             m.verlassen();
         }
     }
 
     #[test]
-    fn steuerung_ohne_nummer_wird_nicht_freigegeben() {
+    fn control_without_number_is_not_released() {
         // Without own FreeViewer number the release would be a lie:
         // the others would get a button that leads nowhere.
         let r = NativMeet::beitreten(
@@ -1748,15 +1748,15 @@ mod tests {
             None, None,);
         if let Ok(mut m) = r {
             assert!(!m.steuer_frei, "ohne Nummer darf nichts freigegeben sein");
-            m.steuerung_freigeben(true);
+            m.release_control(true);
             assert!(!m.steuer_frei, "ohne Nummer darf die Freigabe nicht greifen");
-            assert!(!m.meldung.is_empty(), "keine Meldung");
+            assert!(!m.notice.is_empty(), "keine Meldung");
             m.verlassen();
         }
     }
 
     #[test]
-    fn steuerung_mit_nummer_schaltet_um() {
+    fn control_with_number_switches() {
         let r = NativMeet::beitreten(
             "http://127.0.0.1:1",
             "000-000-000",
@@ -1768,9 +1768,9 @@ mod tests {
             None, None,);
         if let Ok(mut m) = r {
             assert!(!m.steuer_frei, "beim Beitreten war die Freigabe aus");
-            m.steuerung_freigeben(true);
+            m.release_control(true);
             assert!(m.steuer_frei, "Freigabe hat nicht gegriffen");
-            m.steuerung_freigeben(false);
+            m.release_control(false);
             assert!(!m.steuer_frei, "Zuruecknehmen hat nicht gegriffen");
             assert_eq!(m.meine_fvid(), "497628420");
             // Without a connection the room knows nobody - the list
@@ -1800,7 +1800,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let mut m = m;
                 m.pumpe();
-                assert!(!m.zustand().verbunden || m.zustand().letzter_fehler.is_empty());
+                assert!(!m.state().verbunden || m.state().last_error.is_empty());
                 m.verlassen();
             }
             Err(e) => {
@@ -1819,7 +1819,7 @@ mod bitrate_tests {
     fn ohne_messung_bleiben_die_voreinstellungen() {
         assert_eq!(
             bitraten_verteilen(0, true, true),
-            (KAMERA_BITRATE, SCHIRM_BITRATE)
+            (KAMERA_BITRATE, SCREEN_BITRATE)
         );
     }
 
@@ -1843,14 +1843,14 @@ mod bitrate_tests {
     fn bitrate_bleibt_in_den_schranken() {
         let (k, s) = bitraten_verteilen(50_000, true, true);
         assert_eq!(k, KAMERA_MIN);
-        assert_eq!(s, SCHIRM_MIN);
+        assert_eq!(s, SCREEN_MIN);
         let (k, s) = bitraten_verteilen(500_000_000, true, true);
         assert_eq!(k, KAMERA_MAX);
-        assert_eq!(s, SCHIRM_MAX);
+        assert_eq!(s, SCREEN_MAX);
     }
 
     #[test]
-    fn der_bildschirm_bekommt_mehr_als_die_kamera() {
+    fn display_gets_more_than_camera() {
         let (k, s) = bitraten_verteilen(4_000_000, true, true);
         assert!(s > k, "Bildschirm {} <= Kamera {}", s, k);
     }

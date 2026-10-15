@@ -121,7 +121,7 @@ impl App {
             });
 
 
-            // ------------------------------------------------ verbinden
+            // ------------------------------------------------ connect_now
             let ui = &mut cols[1];
             section(ui, i18n::t("start.control"));
             card(ui, |ui| {
@@ -262,7 +262,7 @@ impl App {
             // click away. The whole page is in the bar on the left -
             // here is only what you really need on the start page.
             {
-                let dienst = self.freunde.clone();
+                let dienst = self.friends.clone();
                 let liste = dienst.as_ref().map(|d| d.liste()).unwrap_or_default();
                 let offen = dienst.as_ref().map(|d| d.eingehende().len()).unwrap_or(0);
                 ui.add_space(8.0);
@@ -305,7 +305,7 @@ impl App {
                         ui.horizontal(|ui| {
                             icons::show(ui, "friends", 15.0, row_color(on, false));
                             ui.label(
-                                egui::RichText::new(f.anzeige())
+                                egui::RichText::new(f.display_name())
                                     .size(12.5)
                                     .color(row_color(on, true)),
                             );
@@ -340,7 +340,7 @@ impl App {
                 if let Some(id) = go_f {
                     self.connect_to(&id);
                 } else if oeffnen {
-                    self.view = View::Freunde;
+                    self.view = View::Friends;
                 }
             }
         });
@@ -455,13 +455,13 @@ impl App {
                     // Previously it only started when the page was opened - a
                     // friend request nobody sees because the
                     // program never asks for it is not a request.
-                    let fd = self.freunde_dienst();
+                    let fd = self.friends_service();
                     let offen = fd.eingehende().len() + fd.einladungen().len();
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
                         (View::Meet, "meet", i18n::t("nav.meet")),
-                        (View::Freunde, "friends", i18n::t("nav.friends")),
+                        (View::Friends, "friends", i18n::t("nav.friends")),
                         (View::Settings, "settings", i18n::t("nav.settings")),
                     ] {
                         let sel = self.view == v;
@@ -503,7 +503,7 @@ impl App {
                         // Open requests as a dot on the icon - visible
                         // without having to open the page.
                         let mut tip = tip.to_string();
-                        if v == View::Freunde && offen > 0 {
+                        if v == View::Friends && offen > 0 {
                             ui.painter().circle_filled(
                                 egui::pos2(rect.right() - 7.0, rect.top() + 7.0),
                                 4.0,

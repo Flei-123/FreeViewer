@@ -19,7 +19,7 @@ mod clip;
 mod crypto;
 mod encoder;
 mod feedback;
-mod freunde;
+mod friends;
 mod h264;
 mod hostside;
 mod i18n;
@@ -452,7 +452,7 @@ fn main() -> eframe::Result<()> {
         // After an update: if a window was open before, it is reopened
         // here. The service cannot do that itself - it sits in
         // session 0 and would end up on an invisible desktop.
-        update::gui_wieder_oeffnen();
+        update::reopen_gui();
     }
     if is_agent {
         // Two identical tray icons (agent + UI) are useless:
@@ -532,14 +532,14 @@ fn main() -> eframe::Result<()> {
             // report themselves when they are all through - then the main path
             // takes care of the message. The watchdog is ONLY there for
             // the case that `run_native` hangs and never returns.
-            if ANLAEUFE_FERTIG.load(Ordering::Relaxed) {
+            if ATTEMPTS_DONE.load(Ordering::Relaxed) {
                 return;
             }
-            start_fehler_melden(&format!(
+            report_start_error(&format!(
                 "Das Fenster kam auch nach {} Sekunden nicht hoch (kein Bild gezeichnet)",
                 frist.as_secs()
             ));
-            ohne_fenster_weiterlaufen(&wach);
+            continue_without_window(&wach);
         });
     }
     let gl_kaputt_simulieren = std::env::var("FV_TEST_GL_KAPUTT").as_deref() == Ok("1");
@@ -625,12 +625,12 @@ fn main() -> eframe::Result<()> {
         Err(e3) => {
             // No window - but the machine should still be reachable.
             // On a server that is exactly the actual purpose.
-            ANLAEUFE_FERTIG.store(true, Ordering::Relaxed);
-            start_fehler_melden(&format!(
+            ATTEMPTS_DONE.store(true, Ordering::Relaxed);
+            report_start_error(&format!(
                 "{} | ohne Hardwarebeschleunigung: {} | DirectX: {}",
                 e1, e2, e3
             ));
-            ohne_fenster_weiterlaufen(&shared3);
+            continue_without_window(&shared3);
         }
     }
 }
@@ -651,11 +651,11 @@ struct App {
     /// Friends list including sync with the relay. Only started on the first
     /// look at the page - whoever never opens it should not
     /// cause background traffic either.
-    freunde: Option<std::sync::Arc<freunde::Dienst>>,
+    friends: Option<std::sync::Arc<friends::Dienst>>,
     /// Eingabefeld "FreeViewer-Nummer des Freundes".
-    freunde_id: String,
+    friends_id: String,
     /// Last feedback on the friends system (error or success).
-    freunde_meldung: String,
+    friends_notice: String,
     /// Store the password of the next connection?
     remember_pw: bool,
     /// Entry currently being renamed: (id, buffer).
@@ -758,7 +758,7 @@ struct App {
     meet_win: MeetWin,
     /// Natives Meeting (Stufe 1: Ton, Chat, Warteraum) - laeuft ohne Browser.
     nativ_meet: Option<meetui::NativMeet>,
-    /// Bildkacheln des nativen Meetings: Teilnehmer -> (Stand, Textur).
+    /// Bildkacheln des nativen Meetings: Participant -> (Stand, Textur).
     nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Shared screens: participant -> (state, texture). Own storage,
     /// because a participant sends camera AND screen at the same time.
@@ -769,7 +769,7 @@ struct App {
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
     nativ_eigen: Option<(u64, egui::TextureHandle)>,
     /// The own SHARED image - so that you see yourself what you share.
-    nativ_eigen_schirm: Option<(u64, egui::TextureHandle)>,
+    native_own_screen: Option<(u64, egui::TextureHandle)>,
     /// Camera and microphone BEFORE joining (self preview, level).
     vorprobe: meetui::Vorprobe,
     /// What only concerns the UI: sidebar, tabs, camera slot.
@@ -799,7 +799,7 @@ struct App {
     bar_seen: std::time::Instant,
     /// When the last image arrived - for the "no image" hint.
     frame_at: std::time::Instant,
-    /// Konto: angemeldete Sitzung, Eingabefelder, Zustand des Abgleichs.
+    /// Konto: angemeldete Session, Eingabefelder, State des Abgleichs.
     acc: Option<account::Session>,
     acc_user: String,
     acc_pass: String,
@@ -859,11 +859,11 @@ enum View {
     Devices,
     /// Friends: confirmed by both sides, then one click to meeting or
     /// remote maintenance.
-    Freunde,
+    Friends,
     Settings,
 }
 
-/// Zustand des eigenen Meet-Fensters (separater Viewport, Zoom-Ablauf).
+/// State des eigenen Meet-Fensters (separater Viewport, Zoom-Ablauf).
 struct MeetWin {
     offen: bool,
     meeting: Option<meet::Meeting>,
@@ -878,7 +878,7 @@ struct MeetWin {
     /// 0 = Browser-Standard, sonst Index+1 in mics/cams.
     mic_sel: usize,
     cam_sel: usize,
-    stumm: bool,
+    is_muted: bool,
     ohne_video: bool,
     /// Read once in the background (the query takes a moment).
     #[allow(clippy::type_complexity)]
@@ -896,9 +896,9 @@ struct MeetWin {
     /// for EVERY window - doing that at every frame rate
     /// would be a waste.
     fenster: Vec<(isize, String, String)>,
-    fenster_naechste: std::time::Instant,
+    next_window: std::time::Instant,
     /// Teilnehmerliste vom Meet-Server (alle 5 s nachgeladen).
-    tn: Arc<std::sync::Mutex<Vec<meet::Teilnehmer>>>,
+    tn: Arc<std::sync::Mutex<Vec<meet::Participant>>>,
     tn_busy: Arc<std::sync::atomic::AtomicBool>,
     tn_next: std::time::Instant,
     /// Short hint in the window ("Link copied") and when it came.
@@ -922,8 +922,8 @@ impl Default for MeetWin {
             spk_sel: 0,
             monitore: Vec::new(),
             fenster: Vec::new(),
-            fenster_naechste: std::time::Instant::now(),
-            stumm: false,
+            next_window: std::time::Instant::now(),
+            is_muted: false,
             ohne_video: false,
             geraete: Arc::new(std::sync::Mutex::new(None)),
             geraete_geladen: false,
@@ -989,7 +989,7 @@ enum PwOverwrite {
     Setup(String),
 }
 
-/// Zustand des Einrichtungs-Dialogs (freeviewer://setup/<code>).
+/// State des Einrichtungs-Dialogs (freeviewer://setup/<code>).
 #[derive(Default)]
 struct SetupDlg {
     code: String,

@@ -244,7 +244,7 @@ pub(crate) fn cli_shot(i: usize, shared: Arc<Shared>) -> eframe::Result<()> {
             app.view = match want.as_deref() {
                 Some("devices") => View::Devices,
                 Some("meet") => View::Meet,
-                Some("freunde") | Some("friends") => View::Freunde,
+                Some("freunde") | Some("friends") => View::Friends,
                 Some("settings") => View::Settings,
                 Some("settings2") => View::Settings,
                 _ => View::Start,
@@ -273,7 +273,7 @@ pub(crate) fn cli_shot(i: usize, shared: Arc<Shared>) -> eframe::Result<()> {
                 app.meet_win_open(meet::Meeting {
                     id: if echt { a2.clone() } else { "482-913-770".to_string() },
                     titel: "Fenster-Test".to_string(),
-                    passwort: if echt { a3.clone() } else { "test1234".to_string() },
+                    passphrase: if echt { a3.clone() } else { "test1234".to_string() },
                     termin_text: String::new(),
                     e2e: String::new(),
                 });

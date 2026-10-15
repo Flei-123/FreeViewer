@@ -112,7 +112,7 @@ impl Echo {
         // only the second half is valid (overlap-save)
         let echo: Vec<f32> = (BLOCK..FFT_N).map(|i| y[i].re * skal).collect();
 
-        // --- Fehler = Mikrofon minus geschaetztes Echo ---------------------
+        // --- FriendError = Mikrofon minus geschaetztes Echo ---------------------
         let fehler: Vec<f32> = (0..BLOCK).map(|i| mikro[i] - echo[i]).collect();
 
         // --- double-talk detection (Geigel) --------------------------------
@@ -497,7 +497,7 @@ pub struct Geraete {
     pub mikro: std::sync::mpsc::Receiver<Vec<i16>>,
     /// What the speaker should play (gets mixed).
     pub lautsprecher: Arc<Mutex<Mischer>>,
-    pub stumm: Arc<AtomicBool>,
+    pub is_muted: Arc<AtomicBool>,
     /// Noise gate on? Switched at runtime.
     pub sperre_an: Arc<AtomicBool>,
     /// Strictness of the noise gate, 0..100.
@@ -518,12 +518,12 @@ impl Drop for Geraete {
 }
 
 /// Starts capture and playback. Empty names = default device.
-pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> anyhow::Result<Geraete> {
+pub fn start_devices(ein_name: Option<String>, aus_name: Option<String>) -> anyhow::Result<Geraete> {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let (mik_tx, mik_rx) = std::sync::mpsc::channel::<Vec<i16>>();
     let mischer = Arc::new(Mutex::new(Mischer::neu()));
-    let stumm = Arc::new(AtomicBool::new(false));
+    let is_muted = Arc::new(AtomicBool::new(false));
     let ende = Arc::new(AtomicBool::new(false));
     // ON by default: a noise carpet is noticed by everyone, a slightly
     // too strict gate only by the speaker themselves - and they can
@@ -555,7 +555,7 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     let aus_name_echt = aus_dev.name().unwrap_or_default();
 
     let m2 = mischer.clone();
-    let s2 = stumm.clone();
+    let s2 = is_muted.clone();
     let e2 = ende.clone();
     let sp = Sperrgriffe {
         an: sperre_an.clone(),
@@ -574,7 +574,7 @@ pub fn geraete_starten(ein_name: Option<String>, aus_name: Option<String>) -> an
     Ok(Geraete {
         mikro: mik_rx,
         lautsprecher: mischer,
-        stumm,
+        is_muted,
         sperre_an,
         sperre_staerke,
         sperre_offen,
@@ -598,7 +598,7 @@ fn geraete_faden(
     aus_dev: cpal::Device,
     mik_tx: std::sync::mpsc::Sender<Vec<i16>>,
     mischer: Arc<Mutex<Mischer>>,
-    stumm: Arc<AtomicBool>,
+    is_muted: Arc<AtomicBool>,
     ende: Arc<AtomicBool>,
     sperre: Sperrgriffe,
 ) -> anyhow::Result<()> {
@@ -719,7 +719,7 @@ fn geraete_faden(
         } else {
             sperre.offen.store(true, Ordering::Relaxed);
         }
-        let pcm = if stumm.load(Ordering::Relaxed) {
+        let pcm = if is_muted.load(Ordering::Relaxed) {
             vec![0i16; RAHMEN]
         } else {
             zu_i16(&sauber)
@@ -980,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn mischer_addiert_und_haelt_die_laenge() {
+    fn mixer_adds_and_keeps_the_length() {
         let mut m = Mischer::neu();
         m.vorlauf = 1;
         m.dazu(1, &vec![1000i16; RAHMEN]);

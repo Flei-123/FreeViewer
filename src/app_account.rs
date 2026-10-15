@@ -31,7 +31,7 @@ impl App {
         });
     }
 
-    /// Adressbuch hoch, zusammengefuehrte Liste zurueck.
+    /// Adressbuch hoch, zusammengefuehrte Liste go_back.
     pub(crate) fn start_sync(&mut self, sichtbar: bool) {
         let Some(sess) = self.acc.clone() else { return };
         if sichtbar {

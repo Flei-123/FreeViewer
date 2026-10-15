@@ -262,7 +262,7 @@ impl eframe::App for App {
                 },
             );
             if closed {
-                self.meet_win_schliessen();
+                self.close_meet_win();
             }
         }
 

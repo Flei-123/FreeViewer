@@ -324,10 +324,10 @@ pub fn cleanup() {
         return;
     };
     let stem = stem.to_string_lossy().to_lowercase();
-    let Ok(eintraege) = std::fs::read_dir(dir) else {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for e in eintraege.flatten() {
+    for e in entries.flatten() {
         let p = e.path();
         if p == cur {
             continue;
@@ -620,7 +620,7 @@ pub fn gui_war_offen() -> bool {
 /// A process started from there ends up on a desktop nobody
 /// sees. The agent already sits on the user desktop - it only needs
 /// a normal `spawn` for this.
-pub fn gui_wieder_oeffnen() {
+pub fn reopen_gui() {
     #[cfg(windows)]
     {
         let Some(p) = gui_neustart_marke() else { return };
