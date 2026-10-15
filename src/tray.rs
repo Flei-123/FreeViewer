@@ -125,7 +125,7 @@ mod imp {
     /// Are we the first instance of this user? A second one asks the running
     /// one to come to the front and then leaves - two hosts with the same
     /// identity would kick each other off the relay.
-    /// Laeuft die Oberflaeche dieses Nutzers schon? (Marke der GUI)
+    /// Is the GUI of this user already running? (GUI marker)
     pub fn gui_running() -> bool {
         // OpenMutexW sitzt in Synchronization, nicht in Security
         unsafe {
@@ -143,7 +143,7 @@ mod imp {
         }
     }
 
-    /// Ist das Tablett-Symbol dieses Prozesses gerade zu sehen?
+    /// Is the tray icon of this process visible right now?
     pub fn showing() -> bool {
         RUNNING.load(Ordering::Relaxed)
     }
@@ -151,11 +151,11 @@ mod imp {
     pub fn claim_single_instance(agent: bool) -> bool {
         unsafe {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
-            // GUI und Dienst-Agent duerfen nebeneinander laufen - der Agent ist
-            // kein "zweites Fenster". Frueher teilten sie sich eine Marke: der
-            // Dienst startete den Agenten, der hielt die GUI fuer ein Duplikat,
-            // riss ihr Fenster nach vorn und beendete sich - alle 4 Sekunden
-            // von neuem. Genau das Dauer-Blinken in der Taskleiste.
+            // GUI and service agent may run side by side - the agent is
+            // not a "second window". Earlier they shared one marker: the
+            // service started the agent, which took the GUI for a duplicate,
+            // pulled its window to the front and exited - every 4 seconds
+            // anew. Exactly that permanent flashing in the taskbar.
             let rolle = if agent { "agent" } else { "gui" };
             let name = wide(&format!("Local\\FreeViewer-{}-{}", rolle, user));
             match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
@@ -574,7 +574,7 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{claim_single_instance, gui_running, remove, showing, start};
 
-/// Fenstergriff des Hauptfensters - fuer die Titelleistenfarbe.
+/// Window handle of the main window - for the title bar colour.
 #[cfg(windows)]
 pub fn main_window() -> Option<windows::Win32::Foundation::HWND> {
     unsafe { imp::main_hwnd() }

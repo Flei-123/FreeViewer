@@ -1,21 +1,21 @@
-//! Richtige Installation - so, wie Windows ein Programm erwartet.
+//! Proper installation - the way Windows expects a program.
 //!
-//! FreeViewer ist eine einzige Datei und laeuft ueberall, auch vom USB-Stick.
-//! Wer ihn dauerhaft auf seinem Rechner haben will, klickt in den
-//! Einstellungen auf "Installieren" (AnyDesk macht es genauso). Dann passiert
-//! das, was ein Setup normalerweise tut:
+//! FreeViewer is a single file and runs everywhere, even from a USB stick.
+//! Whoever wants it permanently on their machine clicks "Install" in the
+//! settings (AnyDesk does it the same way). Then what happens is
+//! what a setup normally does:
 //!
-//! * Datei nach `C:\Program Files\FreeViewer\freeviewer.exe`
-//! * Eintrag im Startmenue - dadurch findet die Windows-Suche "FreeViewer"
-//!   als Programm und nicht mehr als herumliegende .exe
-//! * Verknuepfung auf dem oeffentlichen Desktop
-//! * Eintrag in "Apps & Features" mit Deinstallieren-Knopf
-//! * auf Wunsch der Dienst, damit der Rechner auch vor der Anmeldung
-//!   erreichbar ist
+//! * File to `C:\Program Files\FreeViewer\freeviewer.exe`
+//! * Start menu entry - so Windows search finds "FreeViewer"
+//!   as a program and no longer as a stray .exe
+//! * Shortcut on the public desktop
+//! * Entry in "Apps & Features" with an uninstall button
+//! * on request the service, so that the machine is also reachable
+//!   before login
 //!
-//! Deinstallieren raeumt alles davon wieder weg. Die Konfiguration
-//! (ID, Adressbuch, Passwoerter) bleibt absichtlich liegen - wer neu
-//! installiert, will dieselbe ID behalten.
+//! Uninstalling cleans up all of it. The configuration
+//! (ID, address book, passwords) is deliberately left in place - whoever reinstalls
+//! wants to keep the same ID.
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub fn installed_exe() -> PathBuf {
     install_dir().join(crate::brand::EXE)
 }
 
-/// Liegt dort schon eine Installation?
+/// Is there already an installation there?
 pub fn is_installed() -> bool {
     installed_exe().exists()
 }
@@ -53,7 +53,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
         == b.to_string_lossy().to_lowercase().replace('/', "\\")
 }
 
-/// Laeuft genau diese Exe aus dem Installationsordner?
+/// Is exactly this exe running from the install folder?
 pub fn running_installed() -> bool {
     match std::env::current_exe() {
         Ok(cur) => same_path(&cur, &installed_exe()),
@@ -87,7 +87,7 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Legt eine .lnk an (das, was ein Setup normalerweise macht).
+    /// Creates a .lnk (what a setup normally does).
     pub fn shortcut(link: &Path, target: &Path, desc: &str) -> Result<()> {
         use windows::core::{Interface, PCWSTR};
         use windows::Win32::System::Com::{
@@ -156,14 +156,14 @@ mod imp {
         }
     }
 
-    /// Kopiert die laufende Datei an ihren Platz und traegt alles ein.
-    /// Braucht Administrator-Rechte (der Aufrufer holt sie per UAC).
+    /// Copies the running file to its place and registers everything.
+    /// Needs administrator rights (the caller gets them via UAC).
     pub fn install(with_service: bool) -> Result<()> {
         let src = std::env::current_exe()?;
         let dst = installed_exe();
         std::fs::create_dir_all(install_dir())?;
         if !same_path(&src, &dst) {
-            // Der Dienst haelt die alte Datei fest - erst anhalten, dann tauschen.
+            // The service holds the old file - stop it first, then swap.
             let dienst_lief = std::process::Command::new("sc")
                 .args(["query", crate::service::SERVICE_NAME])
                 .output()
@@ -175,9 +175,9 @@ mod imp {
                     .output();
                 std::thread::sleep(std::time::Duration::from_millis(1200));
             }
-            // Eine laufende Exe kann man nicht ueberschreiben, aber umbenennen.
-            // Klemmt auch das (weil noch ein alter Stand aus der .old-Datei
-            // laeuft), nehmen wir den naechsten freien Namen.
+            // A running exe cannot be overwritten, but it can be renamed.
+            // If that jams too (because an old version from the .old file
+            // is still running), we take the next free name.
             if dst.exists() {
                 let mut weg = false;
                 for i in 0..12 {
@@ -224,10 +224,10 @@ mod imp {
             &dst,
             &format!("{} - Fernwartung ohne Konto", crate::brand::NAME),
         )?;
-        // Der Desktop-Eintrag ist Kuer, kein Grund zum Abbrechen.
+        // The desktop entry is optional, no reason to abort.
         let _ = shortcut(&desktop_link(), &dst, crate::brand::NAME);
         write_uninstall_entry(&dst, size_kb)?;
-        // freeviewer://-Adressen sollen fuer alle Nutzer dieses Rechners gehen
+        // freeviewer:// addresses should work for all users of this machine
         let _ = crate::link::register_for(&dst, true);
 
         if with_service {
@@ -238,10 +238,10 @@ mod imp {
         Ok(())
     }
 
-    /// Raeumt alles wieder weg. Die Konfiguration bleibt liegen.
+    /// Cleans everything up again. The configuration stays.
     pub fn uninstall(alles: bool) -> Result<()> {
         let exe = installed_exe();
-        // Dienst zuerst - sonst haelt er die Datei fest.
+        // Service first - otherwise it holds the file.
         let _ = std::process::Command::new("sc")
             .args(["stop", crate::service::SERVICE_NAME])
             .output();
@@ -252,15 +252,15 @@ mod imp {
         let _ = std::fs::remove_file(start_menu_link());
         let _ = std::fs::remove_file(desktop_link());
         remove_uninstall_entry();
-        // freeviewer://-Registrierung wegraeumen (HKLM von der Installation,
-        // HKCU vom portablen Lauf) - sonst starten Links ins Leere.
+        // Remove the freeviewer:// registration (HKLM from the installation,
+        // HKCU from the portable run) - otherwise links start into the void.
         for root in [
             RegKey::predef(HKEY_LOCAL_MACHINE),
             RegKey::predef(HKEY_CURRENT_USER),
         ] {
             if let Ok(k) = root.open_subkey_with_flags(r"Software\Classes", KEY_ALL_ACCESS) {
-                // Beide Schemata: das eigene der Marke und - falls dieser
-                // Build es uebernommen hatte - das alte gemeinsame.
+                // Both schemes: the brand's own and - if this
+                // build had taken it over - the old shared one.
                 for schema in crate::link::schemes() {
                     let _ = k.delete_subkey_all(schema);
                 }
@@ -268,10 +268,10 @@ mod imp {
         }
 
         if alles {
-            // wirklich alles: Konfiguration (beide Orte) und die
-            // Identitaets-Sicherung in der Registry. Geraete mit abgeleiteter
-            // Identitaet bekommen ihre ID bei der Neuinstallation trotzdem
-            // wieder - sie kommt aus der Maschinen-Kennung.
+            // really everything: configuration (both places) and the
+            // identity backup in the registry. Devices with a derived
+            // identity get their ID back on reinstall anyway -
+            // it comes from the machine id.
             let _ = std::fs::remove_dir_all(crate::ident::real_config_dir());
             if let Some(m) = crate::ident::machine_config_dir() {
                 let _ = std::fs::remove_dir_all(m);
@@ -279,9 +279,9 @@ mod imp {
             crate::ident::winid::drop_backup();
         }
 
-        // Laufende Prozesse beenden, dann Ordner loeschen. Eine Exe kann sich
-        // nicht selbst loeschen, darum macht das ein kurzer cmd-Aufruf,
-        // nachdem wir weg sind.
+        // End running processes, then delete the folder. An exe cannot
+        // delete itself, so a short cmd call does that
+        // after we are gone.
         let dir = install_dir();
         let script = format!(
             "ping -n 3 127.0.0.1 >nul & del /f /q \"{}\" >nul 2>&1 & del /f /q \"{}\" >nul 2>&1 & rmdir \"{}\" >nul 2>&1",
@@ -299,14 +299,14 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{install, shortcut};
 
-/// Deinstallieren: Programm, Verknuepfungen, Dienst und Protokoll weg -
-/// die Konfiguration bleibt (die ID soll eine Neuinstallation ueberleben).
+/// Uninstall: program, shortcuts, service and log gone -
+/// the configuration stays (the ID is meant to survive a reinstall).
 #[cfg(windows)]
 pub fn uninstall() -> Result<()> {
     imp::uninstall(false)
 }
 
-/// Vollstaendig entfernen - inklusive Konfiguration und Identitaets-Sicherung.
+/// Remove completely - including configuration and identity backup.
 #[cfg(windows)]
 pub fn uninstall_all() -> Result<()> {
     imp::uninstall(true)
@@ -321,7 +321,7 @@ pub fn uninstall() -> Result<()> {
     Err(anyhow!("nur unter Windows"))
 }
 
-/// Vollstaendig entfernen - inklusive Konfiguration und Identitaets-Sicherung.
+/// Remove completely - including configuration and identity backup.
 #[cfg(not(windows))]
 pub fn uninstall_all() -> Result<()> {
     uninstall()
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn shortcut_targets_live_next_to_the_program() {
-        // Startmenue-Eintrag ist maschinenweit, nicht im Profil eines Nutzers
+        // Start menu entry is machine-wide, not in a user's profile
         let l = start_menu_link().to_string_lossy().to_lowercase();
         assert!(l.contains("start menu"), "{}", l);
         let lnk = crate::brand::EXE.replace(".exe", ".lnk").to_lowercase();

@@ -1,14 +1,14 @@
-//! Marke an EINEM Ort. Wer ein zweites Produkt will (z. B. "X-Remote"
-//! fuer eine andere Firma), baut mit gesetzten Umgebungsvariablen:
+//! Brand in ONE place. Whoever wants a second product (e.g. "X-Remote"
+//! for another company) builds with environment variables set:
 //!
 //! ```sh
 //! FV_BRAND_NAME="X-Remote" FV_BRAND_EXE=x-remote.exe \
 //! FV_BRAND_DIR="X-Remote" cargo build --release
 //! ```
 //!
-//! Ohne diese Variablen bleibt alles FreeViewer. Protokoll, Relay und IDs
-//! sind bei allen Marken gleich - jeder Build kann mit jedem reden.
-//! (Spaeter baut das die GitHub-Action als Matrix mit zwei Exe-Dateien.)
+//! Without these variables everything stays FreeViewer. Protocol, relay and IDs
+//! are the same for all brands - every build can talk to every other.
+//! (Later the GitHub action builds this as a matrix with two exe files.)
 
 /// Anzeigename ueberall: Fenster, Tray, Startmenue, Dienst.
 pub const NAME: &str = match option_env!("FV_BRAND_NAME") {
@@ -22,7 +22,7 @@ pub const EXE: &str = match option_env!("FV_BRAND_EXE") {
     None => "freeviewer.exe",
 };
 
-/// Ordnername in "Programme", ProgramData und AppData.
+/// Folder name in "Program Files", ProgramData and AppData.
 pub const DIR: &str = match option_env!("FV_BRAND_DIR") {
     Some(s) => s,
     None => "FreeViewer",
@@ -34,28 +34,28 @@ pub const PUBLISHER: &str = match option_env!("FV_BRAND_PUBLISHER") {
     None => "FleiTec",
 };
 
-/// Kurzname der Marke - das Relay weiss so, welche Datei ein
-/// Einrichtungs-Link laden soll ("freeviewer" oder "xoffi").
+/// Short name of the brand - this way the relay knows which file a
+/// setup link should load ("freeviewer" or "xoffi").
 pub const SLUG: &str = match option_env!("FV_BRAND_SLUG") {
     Some(s) => s,
     None => "freeviewer",
 };
 
-/// Oeffentliche Adresse der Marke - darauf zeigen die Einrichtungs-Links.
+/// Public address of the brand - the setup links point to it.
 pub const WEB: &str = match option_env!("FV_BRAND_WEB") {
     Some(s) => s,
     None => "https://freeviewer.fleitec.com",
 };
 
-/// Eigener Update-Feed pro Marke - ein Xoffi-Build darf sich nie zum
-/// FreeViewer "aktualisieren".
+/// Own update feed per brand - a Xoffi build must never "update"
+/// to FreeViewer.
 pub const FEED: &str = match option_env!("FV_BRAND_FEED") {
     Some(s) => s,
     None => "https://freeviewer.fleitec.com/fv/version",
 };
 
-/// Registry-Zweig der Marke (Identitaets-Sicherung, Deinstallations-Eintrag
-/// wird darunter abgelegt).
+/// Registry branch of the brand (identity backup, uninstall entry
+/// is stored below it).
 pub fn reg_key() -> String {
     format!(r"SOFTWARE\{}", DIR)
 }

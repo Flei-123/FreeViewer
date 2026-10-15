@@ -1,32 +1,32 @@
-//! Kameras ueber DirectShow - damit die OBS-Virtualkamera endlich auftaucht.
+//! Cameras via DirectShow - so the OBS virtual camera finally shows up.
 //!
-//! WARUM ueberhaupt ein zweiter Weg? `meetcam` zaehlt Kameras ueber Media
-//! Foundation auf. Das ist der moderne, richtige Weg - aber die OBS
-//! Virtual Camera meldet sich unter Windows AUSSCHLIESSLICH als
-//! DirectShow-Filter an. Sie taucht deshalb in der Media-Foundation-Liste
-//! gar nicht auf, egal wie oft man neu einliest. Genau das war Justins
-//! Beobachtung ("warum sehe ich meine OBS-Kamera nicht?").
+//! WHY a second path at all? `meetcam` enumerates cameras via Media
+//! Foundation. That is the modern, correct path - but the OBS
+//! Virtual Camera registers on Windows EXCLUSIVELY as a
+//! DirectShow filter. It therefore does not show up in the Media Foundation list
+//! at all, no matter how often you re-read. That was exactly Justin's
+//! observation ("why can't I see my OBS camera?").
 //!
-//! Dieses Modul zaehlt die DirectShow-Geraete auf UND kann sie oeffnen.
-//! Nur aufzaehlen waere eine Luege: ein Eintrag, der beim Anklicken nichts
-//! liefert, ist schlimmer als kein Eintrag.
+//! This module enumerates the DirectShow devices AND can open them.
+//! Only enumerating would be a lie: an entry that delivers nothing
+//! when clicked is worse than no entry.
 //!
-//! Aufbau des Graphen (ohne eigenen COM-Rueckruf, bewusst):
+//! Structure of the graph (deliberately without an own COM callback):
 //!
 //!   Quelle (Kamera)  ->  SampleGrabber  ->  NullRenderer
 //!
-//! Der SampleGrabber laeuft im Puffer-Betrieb (`SetBufferSamples(TRUE)`).
-//! Wir HOLEN das jeweils letzte Bild mit `GetCurrentBuffer` ab, statt einen
-//! `ISampleGrabberCB`-Rueckruf zu bauen. Das spart eine selbstgebaute
-//! COM-Klasse samt Lebensdauer-Fallen und passt genau zu der Art, wie der
-//! Rest des Programms arbeitet: immer nur das NEUESTE Bild zaehlt, wer
-//! langsamer abholt, ueberspringt Bilder statt einen Rueckstau zu bauen.
+//! The SampleGrabber runs in buffer mode (`SetBufferSamples(TRUE)`).
+//! We FETCH the latest image with `GetCurrentBuffer` instead of building an
+//! `ISampleGrabberCB` callback. That saves a self-built
+//! COM class including lifetime traps and fits exactly the way the
+//! rest of the program works: only the NEWEST image counts, whoever picks up
+//! more slowly skips images instead of building up a backlog.
 //!
-//! DirectShow liefert RGB24 von UNTEN nach OBEN und in der Reihenfolge
-//! B,G,R. Beides wird hier geradegezogen, bevor daraus NV12 wird.
+//! DirectShow delivers RGB24 from BOTTOM to TOP and in the order
+//! B,G,R. Both are straightened out here before it becomes NV12.
 
 #![cfg(windows)]
-// Die COM-Namen kommen aus qedit.dll und muessen genau so heissen.
+// The COM names come from qedit.dll and must be named exactly like this.
 #![allow(non_snake_case)]
 
 use crate::meetcam::{Bild, Geraet};
@@ -48,15 +48,15 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
-/// Erkennungszeichen im `Geraet::id`: alles danach ist ein DirectShow-Pfad.
-/// So weiss `meetcam::oeffnen`, welcher Weg gemeint ist, ohne raten zu
-/// muessen - und ohne dass sich die beiden Namensraeume vermischen.
+/// Marker in `Geraet::id`: everything after it is a DirectShow path.
+/// This way `meetcam::oeffnen` knows which path is meant without having to
+/// guess - and without the two namespaces getting mixed up.
 pub const PRAEFIX: &str = "ds:";
 
-// Die beiden Filter aus qedit.dll. Sie stehen nicht in der windows-Kiste,
-// weil Microsoft sie fuer "veraltet" erklaert hat - ausgeliefert werden sie
-// mit Windows 10 und 11 aber weiterhin, und es gibt keinen Ersatz, der
-// DirectShow-Quellen lesen koennte.
+// The two filters from qedit.dll. They are not in the windows crate,
+// because Microsoft declared them "deprecated" - they are still shipped
+// with Windows 10 and 11, though, and there is no replacement that
+// could read DirectShow sources.
 const CLSID_SAMPLE_GRABBER: GUID = GUID::from_u128(0xc1f400a0_3f08_11d3_9f0b_006008039e37);
 const CLSID_NULL_RENDERER: GUID = GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
 
@@ -81,15 +81,15 @@ unsafe fn eigenschaft(bag: &IPropertyBag, name: &str) -> String {
     BSTR::try_from(&v).map(|b| b.to_string()).unwrap_or_default()
 }
 
-/// Ueber alle DirectShow-Videoquellen laufen. `f` bekommt (Steckbrief,
-/// Name, Pfad) und darf mit `Some(..)` abbrechen - so laesst sich mit
-/// derselben Schleife auflisten UND gezielt suchen.
+/// Iterate over all DirectShow video sources. `f` gets (moniker,
+/// name, path) and may abort with `Some(..)` - so the same loop can
+/// list AND search specifically.
 unsafe fn mit_geraeten<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>) -> Option<T> {
     let aufzaehler: ICreateDevEnum =
         CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER).ok()?;
     let mut monis: Option<IEnumMoniker> = None;
-    // Liefert S_FALSE, wenn es die Kategorie gar nicht gibt - dann ist
-    // `monis` leer, und genau das faengt das `?` hier ab.
+    // Returns S_FALSE if the category does not exist at all - then
+    // `monis` is empty, and exactly that is caught by the `?` here.
     aufzaehler
         .CreateClassEnumerator(&CLSID_VideoInputDeviceCategory, &mut monis, 0)
         .ok()?;
@@ -106,8 +106,8 @@ unsafe fn mit_geraeten<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>)
             Err(_) => continue,
         };
         let name = eigenschaft(&bag, "FriendlyName");
-        // Der Geraetepfad ist eindeutig; die Virtualkameras mancher
-        // Programme haben keinen - dann muss der Name herhalten.
+        // The device path is unique; the virtual cameras of some
+        // programs have none - then the name has to do.
         let mut pfad = eigenschaft(&bag, "DevicePath");
         if pfad.is_empty() {
             pfad = name.clone();
@@ -121,7 +121,7 @@ unsafe fn mit_geraeten<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>)
     }
 }
 
-/// Alle DirectShow-Kameras. Die Kennung traegt `PRAEFIX`.
+/// All DirectShow cameras. The id carries `PRAEFIX`.
 pub fn liste() -> Vec<Geraet> {
     let mut aus: Vec<Geraet> = Vec::new();
     unsafe {
@@ -137,8 +137,8 @@ pub fn liste() -> Vec<Geraet> {
     aus
 }
 
-/// Der Aufnahmefaden. Aufbau und Signatur wie `meetcam::win::schleife`,
-/// damit `meetcam::oeffnen` die beiden Wege austauschen kann.
+/// The capture thread. Structure and signature like `meetcam::win::schleife`,
+/// so that `meetcam::oeffnen` can swap the two paths.
 #[allow(clippy::too_many_arguments)]
 pub fn schleife(
     id: Option<String>,
@@ -154,9 +154,9 @@ pub fn schleife(
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Err(e) = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop) {
-            // Scheiterte schon der Start, hat der Aufrufer noch nichts
-            // bekommen - die Meldung muss zu ihm, sonst sieht es aus, als
-            // passiere einfach nichts.
+            // If the start already failed, the caller has not received anything
+            // yet - the message has to go to them, otherwise it looks as if
+            // simply nothing happens.
             let _ = tx.send(Err(e.clone()));
             if let Ok(mut f) = fehler.lock() {
                 *f = e;
@@ -182,7 +182,7 @@ unsafe fn schleife_inner(
         .trim_start_matches(PRAEFIX)
         .to_string();
 
-    // 1) Quelle suchen und binden.
+    // 1) Find and bind the source.
     let treffer = mit_geraeten(|m, name, pfad| {
         let passt = gesucht.is_empty()
             || pfad.eq_ignore_ascii_case(&gesucht)
@@ -214,9 +214,9 @@ unsafe fn schleife_inner(
         .AddFilter(&quelle, PCWSTR(w("Quelle").as_ptr()))
         .map_err(|e| format!("Quelle einhaengen: {}", e))?;
 
-    // 3) SampleGrabber auf RGB24 festlegen. OHNE feste Vorgabe verhandelt
-    //    DirectShow irgendein Format (haeufig MJPG oder YUY2), und der
-    //    Puffer waere nicht zu gebrauchen.
+    // 3) Fix the SampleGrabber to RGB24. WITHOUT a fixed setting
+    //    DirectShow negotiates some format (often MJPG or YUY2), and the
+    //    buffer would be unusable.
     let greifer: IBaseFilter = CoCreateInstance(&CLSID_SAMPLE_GRABBER, None, CLSCTX_INPROC_SERVER)
         .map_err(|e| format!("SampleGrabber fehlt (qedit.dll): {}", e))?;
     let sg: ISampleGrabber = greifer
@@ -230,7 +230,7 @@ unsafe fn schleife_inner(
     sg.SetMediaType(&wunsch as *const _)
         .ok()
         .map_err(|e| format!("Format nicht setzbar: {}", e))?;
-    // Puffern statt Rueckruf - siehe Kopf der Datei.
+    // Buffering instead of callback - see the top of the file.
     sg.SetBufferSamples(BOOL(1))
         .ok()
         .map_err(|e| format!("Puffer nicht schaltbar: {}", e))?;
@@ -257,9 +257,9 @@ unsafe fn schleife_inner(
         )
         .map_err(|e| format!("Graph nicht verbindbar: {}", e))?;
 
-    // 4) Welche Groesse ist dabei herausgekommen? Erst danach steht fest,
-    //    wie der Puffer zu lesen ist - raten waere hier fatal, ein falscher
-    //    Zeilenabstand ergibt Schraegstreifen statt Bild.
+    // 4) What size came out of it? Only then is it clear
+    //    how to read the buffer - guessing would be fatal here, a wrong
+    //    row stride gives diagonal stripes instead of an image.
     let mut mt = AM_MEDIA_TYPE::default();
     sg.GetConnectedMediaType(&mut mt)
         .ok()
@@ -270,8 +270,8 @@ unsafe fn schleife_inner(
     }
     let vih = &*(mt.pbFormat as *const VIDEOINFOHEADER);
     let qb = vih.bmiHeader.biWidth.unsigned_abs();
-    // Negative Hoehe = das Bild liegt schon richtig herum. Positiv (der
-    // Normalfall bei DirectShow) heisst: von unten nach oben.
+    // Negative height = the image is already the right way up. Positive (the
+    // normal case with DirectShow) means: bottom to top.
     let kopfueber = vih.bmiHeader.biHeight > 0;
     let qh = vih.bmiHeader.biHeight.unsigned_abs();
     aufraeumen(&mut mt);
@@ -299,8 +299,8 @@ unsafe fn schleife_inner(
         std::thread::sleep(takt);
         let mut groesse = 0i32;
         if sg.GetCurrentBuffer(&mut groesse, std::ptr::null_mut()).is_err() || groesse <= 0 {
-            // Am Anfang ist noch nichts da - das ist normal. Bleibt es
-            // dabei, liefert die Quelle nichts, und das muss auffallen.
+            // At the start nothing is there yet - that is normal. If it stays
+            // that way, the source delivers nothing, and that has to be noticed.
             leerlauf += 1;
             if leerlauf > fps.max(1) * 5 {
                 return Err("Kamera liefert keine Bilder".into());
@@ -321,7 +321,7 @@ unsafe fn schleife_inner(
         if noetig < zeile * qh as usize {
             continue;
         }
-        // BGR von unten nach oben -> RGB von oben nach unten.
+        // BGR bottom to top -> RGB top to bottom.
         for y in 0..qh as usize {
             let quelle_y = if kopfueber { qh as usize - 1 - y } else { y };
             let src = quelle_y * zeile;
@@ -347,8 +347,8 @@ unsafe fn schleife_inner(
     Ok(())
 }
 
-/// Das Formatstueck eines AM_MEDIA_TYPE gehoert uns - sonst leckt bei
-/// jedem Oeffnen Speicher.
+/// The format part of an AM_MEDIA_TYPE belongs to us - otherwise memory leaks on
+/// every open.
 unsafe fn aufraeumen(mt: &mut AM_MEDIA_TYPE) {
     if !mt.pbFormat.is_null() {
         CoTaskMemFree(Some(mt.pbFormat as *const _));
@@ -369,8 +369,8 @@ mod tests {
 
     #[test]
     fn kennung_traegt_das_praefix() {
-        // Ohne eindeutiges Praefix koennte `oeffnen` nicht entscheiden,
-        // ueber welchen Weg das Geraet aufzumachen ist.
+        // Without a unique prefix `oeffnen` could not decide
+        // through which path the device is to be opened.
         assert!(format!("{}\\\\?\\usb#vid_046d", PRAEFIX).starts_with(PRAEFIX));
     }
 }

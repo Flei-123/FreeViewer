@@ -1,10 +1,10 @@
-//! Feste Passwoerter dieses Rechners.
+//! Fixed passwords of this machine.
 //!
-//! Das Sitzungspasswort auf der Startseite wird bei jedem Start neu
-//! gewuerfelt - gut fuer "ruf mich an und sag mir die Zahlen", schlecht fuer
-//! unbeaufsichtigten Zugriff. Darum kann man hier beliebig viele feste
-//! Passwoerter hinterlegen (mit einer Bezeichnung, damit man weiss, wem man
-//! welches gegeben hat). Jedes davon oeffnet diesen PC.
+//! The session password on the start page is re-rolled on every start
+//! - good for "call me and tell me the numbers", bad for
+//! unattended access. That is why any number of fixed
+//! passwords can be stored here (with a label, so you know who you gave
+//! which one to). Each of them opens this PC.
 //!
 //! Storage (r10/r64): the host has to recompute Argon2id(password, session
 //! salt) for every session, so a one-way hash is impossible without a
@@ -17,9 +17,9 @@
 
 use std::path::PathBuf;
 
-/// Mehr als das ist keine Verwaltung mehr, sondern ein Datenleck.
+/// More than that is no longer management, but a data leak.
 pub const MAX: usize = 10;
-/// Kuerzer nimmt ein Angreifer im Vorbeigehen mit.
+/// A shorter one is picked up by an attacker in passing.
 pub const MIN_LEN: usize = 8;
 // Existing shorter passwords keep working; the limit only applies to new ones.
 
@@ -34,7 +34,7 @@ fn path() -> PathBuf {
     crate::ident::config_dir().join("passwords.json")
 }
 
-/// Liest die Liste. Kaputte Datei = leere Liste, nie ein Absturz.
+/// Reads the list. Broken file = empty list, never a crash.
 pub fn load() -> Vec<Entry> {
     let raw = match std::fs::read_to_string(path()) {
         Ok(r) => r,
@@ -104,13 +104,13 @@ pub fn save(list: &[Entry]) -> std::io::Result<()> {
     crate::secstore::write_private(&path(), &text)
 }
 
-/// Nur die Passwoerter - das braucht die Anmeldung.
+/// Only the passwords - the login needs that.
 pub fn candidates() -> Vec<String> {
     load().into_iter().map(|e| e.pw).collect()
 }
 
-/// Passt das Passwort in die Liste? Gibt den Grund zurueck, wenn nicht.
-/// `None` heisst: alles in Ordnung.
+/// Does the password fit into the list? Returns the reason if not.
+/// `None` means: all fine.
 pub fn why_not(list: &[Entry], pw: &str) -> Option<&'static str> {
     if pw.trim().chars().count() < MIN_LEN {
         return Some("set.pw_min");
@@ -124,7 +124,7 @@ pub fn why_not(list: &[Entry], pw: &str) -> Option<&'static str> {
     None
 }
 
-/// Punkte statt Zeichen, gleiche Laenge wie das Original (max 16 Punkte).
+/// Dots instead of characters, same length as the original (max 16 dots).
 pub fn masked(pw: &str) -> String {
     let n = pw.chars().count().clamp(1, 16);
     "\u{2022}".repeat(n)
@@ -167,7 +167,7 @@ mod tests {
     fn mask_hides_everything_but_the_length() {
         assert_eq!(masked("abc").chars().count(), 3);
         assert!(!masked("geheim").contains('g'));
-        // sehr lange Passwoerter verraten ihre Laenge nicht
+        // very long passwords do not reveal their length
         assert_eq!(masked(&"x".repeat(40)).chars().count(), 16);
     }
 

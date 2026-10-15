@@ -61,12 +61,12 @@ pub fn device_name() -> String {
     machine_name()
 }
 
-/// Wie der Rechner selbst heisst - ohne die eigene Umbenennung.
+/// What the machine itself is called - without the own renaming.
 ///
-/// Windows wird direkt gefragt (GetComputerNameExW), denn Umgebungsvariablen
-/// erbt ein Dienst nicht immer, und in manchen Umgebungen steht in HOSTNAME
-/// eine IP-Adresse. Eine IP ist als Geraetename nutzlos - "192.168.1.24"
-/// sagt niemandem, welcher PC das ist -, deshalb wird sie verworfen.
+/// Windows is asked directly (GetComputerNameExW), because a service does not
+/// always inherit environment variables, and in some environments HOSTNAME
+/// contains an IP address. An IP is useless as a device name - "192.168.1.24"
+/// tells nobody which PC it is -, so it is discarded.
 pub fn machine_name() -> String {
     #[cfg(windows)]
     {
@@ -92,8 +92,8 @@ pub fn machine_name() -> String {
     String::new()
 }
 
-/// "192.168.1.24" oder "fe80::1" - alles, was nach Adresse statt nach Name
-/// aussieht.
+/// "192.168.1.24" or "fe80::1" - anything that looks
+/// like an address rather than a name.
 pub fn looks_like_ip(s: &str) -> bool {
     let t = s.trim();
     if t.is_empty() {
@@ -102,12 +102,12 @@ pub fn looks_like_ip(s: &str) -> bool {
     if t.parse::<std::net::IpAddr>().is_ok() {
         return true;
     }
-    // 192.168.1.24:7180 oder mit Rest dahinter
+    // 192.168.1.24:7180 or with a remainder behind it
     let head = t.split([':', '/', ' ']).next().unwrap_or("");
     head.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
-/// Der Name, den Windows selbst fuehrt (DNS-Kurzname des Rechners).
+/// The name Windows itself uses (DNS short name of the machine).
 #[cfg(windows)]
 fn win_computer_name() -> String {
     use windows::Win32::System::SystemInformation::{
@@ -115,7 +115,7 @@ fn win_computer_name() -> String {
     };
     use windows::core::PWSTR;
     unsafe {
-        // erster Aufruf holt nur die Laenge (er schlaegt absichtlich fehl)
+        // the first call only fetches the length (it fails on purpose)
         let mut len: u32 = 0;
         let _ = GetComputerNameExW(ComputerNamePhysicalDnsHostname, PWSTR::null(), &mut len);
         if len == 0 || len > 512 {

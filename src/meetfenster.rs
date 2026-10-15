@@ -1,18 +1,18 @@
-//! Das Meetingfenster - so wie der FreeMeet-Browser-Client, nur nativ.
+//! The meeting window - just like the FreeMeet browser client, only native.
 //!
-//! Vorbild ist meet.fleitec.com (web/index.html + web/style.css): oben eine
-//! Reihe Marken ("Tags"), in der Mitte die Buehne mit 16:9-Kacheln, rechts
-//! eine ausklappbare Seitenleiste mit Chat/Leute/Info, unten die Steuerleiste
-//! mit runden Symbolknoepfen. Vor dem Beitritt steht dieselbe mittige Karte
-//! wie im Browser: Selbstvorschau, Pegel, zwei runde Knoepfe, Geraetewahl.
+//! The model is meet.fleitec.com (web/index.html + web/style.css): at the top a
+//! row of badges ("tags"), in the middle the stage with 16:9 tiles, on the right
+//! a collapsible sidebar with chat/people/info, at the bottom the control bar
+//! with round icon buttons. Before joining, the same centred card as in the
+//! browser is shown: self-preview, level, two round buttons, device choice.
 //!
-//! WARUM ein eigenes Modul mit eigenem Datensatz (`Sicht`) statt direkt auf
-//! NativMeet zu zeichnen: so laesst sich JEDE Ansicht ohne Server, Kamera und
-//! Soundkarte zeichnen. `--uitest` baut sich eine Sicht aus der Luft und
-//! rendert Beitritt, leeren Raum, volle Buehne und Bildschirmfreigabe durch -
-//! genau die Faelle, die man sonst nie zu Gesicht bekommt, bevor der Kunde
-//! sie meldet. Nebenbei loest es das Borrow-Problem: gezeichnet wird aus
-//! einer Kopie, geklickte Wuensche kommen als `Aktion` zurueck.
+//! WHY a separate module with its own data record (`Sicht`) instead of drawing
+//! straight from NativMeet: this way EVERY view can be drawn without server,
+//! camera or sound card. `--uitest` builds a view out of thin air and
+//! renders join, empty room, full stage and screen share -
+//! exactly the cases you otherwise never get to see before the customer
+//! reports them. Incidentally it solves the borrow problem: drawing is done from
+//! a copy, clicked wishes come back as `Aktion`.
 
 use crate::icons;
 use crate::theme::Palette;
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 // ----------------------------------------------------------------- Daten
 
-/// Ein Teilnehmer, so wie ihn die Oberflaeche braucht.
+/// A participant, as the UI needs it.
 #[derive(Clone, Default)]
 pub struct Person {
     pub id: u64,
@@ -30,14 +30,14 @@ pub struct Person {
     pub kamera_aus: bool,
     pub hand: bool,
     pub gastgeber: bool,
-    /// Nicht leer = dieser Teilnehmer laesst sich mit FreeViewer fernsteuern.
+    /// Not empty = this participant can be remote controlled with FreeViewer.
     pub fvid: String,
     pub ich: bool,
     /// Spricht gerade (Server-Hinweis oder eigener Pegel).
     pub spricht: bool,
 }
 
-/// Farbe einer Marke in der Kopfzeile.
+/// Colour of a badge in the header.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Ton {
     #[default]
@@ -54,18 +54,18 @@ pub enum Reiter {
     Info,
 }
 
-/// Woran haengt der Ausschnitt, wenn in einen geteilten Bildschirm
-/// hineingezoomt wird?
+/// What is the section attached to when zooming
+/// into a shared screen?
 ///
-/// WARUM drei Arten: beim Zuschauen will man mal selbst herumfahren
-/// ("Eigene": das Fenster ist eine Lupe, die dem eigenen Zeiger folgt) und
-/// mal genau das sehen, worauf der andere gerade zeigt ("Teiler"). Wer sich
-/// eine Stelle festhalten will, zieht das Bild - dann steht es fest.
+/// WHY three kinds: when watching you sometimes want to move around yourself
+/// ("Own": the window is a magnifier that follows your own pointer) and
+/// sometimes see exactly what the other is pointing at ("Sharer"). Whoever wants
+/// to pin a spot drags the image - then it stays fixed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Zoomanker {
-    /// Lupe: die Stelle unter dem eigenen Mauszeiger.
+    /// Magnifier: the spot under the own mouse pointer.
     Eigene,
-    /// Dem Mauszeiger dessen folgen, der den Bildschirm teilt.
+    /// Follow the mouse pointer of whoever shares the screen.
     Teiler,
     /// Fester Ausschnitt (selbst hingezogen).
     Fest,
@@ -88,7 +88,7 @@ impl Zoomanker {
     }
 }
 
-/// Wohin mit den Kameras, waehrend ein Bildschirm geteilt wird?
+/// Where to put the cameras while a screen is shared?
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kameraplatz {
     Seite,
@@ -113,7 +113,7 @@ impl Kameraplatz {
     }
 }
 
-/// Eine Zeile im Chat. `von` = 0 bedeutet Systemmeldung.
+/// A line in the chat. `von` = 0 means system message.
 #[derive(Clone, Default)]
 pub struct Chatzeile {
     pub von: u64,
@@ -122,20 +122,20 @@ pub struct Chatzeile {
     pub eigen: bool,
 }
 
-/// Alles, was das Meetingfenster zum Zeichnen braucht - einmal je Bild aus
-/// dem laufenden Meeting abgeschrieben.
+/// Everything the meeting window needs for drawing - copied once per frame from
+/// the running meeting.
 #[derive(Clone, Default)]
 pub struct Sicht {
     pub raum: String,
     pub titel: String,
     pub gastgeber: bool,
-    /// Text der Verbindungsmarke ("direkt verbunden", "verbinde ...").
+    /// Text of the connection badge ("directly connected", "connecting ...").
     pub verbindung: String,
     pub verbindung_ton: Ton,
     pub e2e: bool,
-    /// Bandbreite als fertiger Text ("340 kbit/s"); leer = nicht anzeigen.
+    /// Bandwidth as finished text ("340 kbit/s"); empty = do not show.
     pub bandbreite: String,
-    /// Alle im Raum, ich zuerst.
+    /// Everyone in the room, me first.
     pub leute: Vec<Person>,
     pub wartende: Vec<(u64, String)>,
     pub warteraum_an: bool,
@@ -149,13 +149,13 @@ pub struct Sicht {
     pub steuer_frei: bool,
     /// Offene Steuerungsanfragen AN MICH: (Teilnehmer, Name).
     pub steuer_anfragen: Vec<(u64, String)>,
-    /// Wem ich die Steuerung erlaubt habe: (Teilnehmer, Name).
+    /// Whom I have allowed to control: (participant, name).
     pub steuer_erlaubt: Vec<(u64, String)>,
-    /// Meine eigene Anfrage laeuft noch.
+    /// My own request is still pending.
     pub steuer_gefragt: bool,
     /// Zusage bekommen: (Name des Teilenden, seine FreeViewer-Nummer).
     pub steuer_zusage: Option<(String, String)>,
-    /// Teilt gerade jemand ANDERES? Nur dann lohnt der Anfrage-Knopf.
+    /// Is someone ELSE sharing? Only then is the request button worth it.
     pub fremd_schirm: bool,
     /// Wer teilt gerade einen Bildschirm: (Teilnehmer, Name).
     pub schirme: Vec<(u64, String)>,
@@ -163,56 +163,56 @@ pub struct Sicht {
     pub ungelesen: u32,
     /// Wer tippt gerade (Namen).
     pub tippen: Vec<String>,
-    /// Wir stehen noch vor der Tuer - der Gastgeber muss uns hereinlassen.
+    /// We are still standing at the door - the host has to let us in.
     pub im_warteraum: bool,
-    /// Text des Servers dazu ("Der Gastgeber wurde benachrichtigt.").
+    /// Text from the server for it ("The host has been notified.").
     pub warte_text: String,
-    /// Geraete, die sich im LAUFENDEN Meeting umstellen lassen. Der Browser
-    /// kann das auch - ohne den Raum zu verlassen.
+    /// Devices that can be switched in the RUNNING meeting. The browser
+    /// can do that too - without leaving the room.
     pub cams: Vec<String>,
     pub mics: Vec<String>,
     pub spks: Vec<String>,
-    /// 0 = Standardgeraet, sonst Index+1 in der jeweiligen Liste.
+    /// 0 = default device, otherwise index+1 in the respective list.
     pub cam_sel: usize,
     pub mic_sel: usize,
     pub spk_sel: usize,
-    /// Was gerade WIRKLICH laeuft (Name aus dem Treiber) - zur Kontrolle.
+    /// What is REALLY running right now (name from the driver) - for checking.
     pub kamera_name: String,
     pub ton_ein: String,
     pub ton_aus: String,
-    /// Wo steht der Mauszeiger dessen, der gerade den Bildschirm teilt?
-    /// (0..1 auf SEINEM Bildschirm). None = der Sender meldet ihn nicht.
+    /// Where is the mouse pointer of whoever is currently sharing the screen?
+    /// (0..1 on THEIR screen). None = the sender does not report it.
     pub teiler_zeiger: Option<(f32, f32)>,
-    /// Welchen Teil seines Bildschirms sendet er gerade? (Anteile 0..1)
-    /// None oder (0,0,1,1) = den ganzen. Ist er kleiner, ist das Bild
-    /// SCHARF - dann darf die Lupe nicht noch einmal hineinzoomen.
+    /// Which part of their screen are they currently sending? (fractions 0..1)
+    /// None or (0,0,1,1) = the whole thing. If it is smaller, the image is
+    /// SHARP - then the magnifier must not zoom in once more.
     pub schirm_bereich: Option<(f32, f32, f32, f32)>,
-    /// Der Sender kann Ausschnitte liefern (neuer Client). Nur dann lohnt
-    /// es, "scharf" anzubieten - sonst waere der Knopf eine Luege.
+    /// The sender can deliver sections (new client). Only then is it worth
+    /// offering "sharp" - otherwise the button would be a lie.
     pub scharf_moeglich: bool,
-    /// Die Bildschirme dieses Rechners (Name, Breite, Hoehe). Bei mehr als
-    /// einem wird gefragt, welcher geteilt werden soll - der Browser bekommt
-    /// dafuer die Auswahl von Windows, nativ muessen wir selbst fragen.
+    /// The screens of this machine (name, width, height). With more than
+    /// one the user is asked which one to share - the browser gets
+    /// the choice from Windows for that, natively we have to ask ourselves.
     pub monitore: Vec<(String, u32, u32)>,
-    /// Offene Programmfenster, die sich einzeln teilen lassen:
-    /// (Kennung, Titel, Programm).
+    /// Open program windows that can be shared individually:
+    /// (id, title, program).
     pub fenster: Vec<(isize, String, String)>,
-    /// Roter Rahmen um das Geteilte an?
+    /// Red frame around what is shared: on?
     pub rahmen_an: bool,
-    /// Rauschsperre: an, Strenge 0..100, laesst gerade durch,
-    /// geschaetztes Grundrauschen (0..1).
+    /// Noise gate: on, strictness 0..100, currently letting sound through,
+    /// estimated noise floor (0..1).
     pub sperre_an: bool,
     pub sperre_staerke: u8,
     pub sperre_offen: bool,
     pub sperre_grund: f32,
-    /// Ausschlag des eigenen Mikrofons (0..1) - fuer den Pegelbalken.
+    /// Level of the own microphone (0..1) - for the level bar.
     pub eigener_pegel: f32,
-    /// Avatar statt Kamerabild - an und wie er aussieht.
+    /// Avatar instead of camera image - on and what it looks like.
     pub avatar_an: bool,
     pub avatar: crate::avatar::Aussehen,
 }
 
-/// Zustand, der nur die Oberflaeche etwas angeht (nicht das Meeting).
+/// State that only concerns the UI (not the meeting).
 #[derive(Clone)]
 pub struct Fensterzustand {
     pub seite_offen: bool,
@@ -221,34 +221,34 @@ pub struct Fensterzustand {
     pub kameraplatz: Kameraplatz,
     pub vollbild: bool,
     pub pip: bool,
-    /// Was zuletzt als "schreibt gerade" gemeldet wurde. Ohne das ginge bei
-    /// JEDEM Tastendruck eine Nachricht raus - der Server bekaeme Dutzende
-    /// Meldungen je Wort.
+    /// What was last reported as "is typing". Without it a message would go out on
+    /// EVERY keystroke - the server would get dozens of
+    /// messages per word.
     pub tippt_gemeldet: bool,
     /// Einstellungen (Geraetewahl) sind aufgeklappt.
     pub einstellungen_offen: bool,
-    /// Die Frage "welchen Bildschirm?" steht offen.
+    /// The question "which screen?" is open.
     pub schirmwahl_offen: bool,
-    /// Im Bild-im-Bild auch die EIGENE Kamera zeigen.
+    /// Also show the OWN camera in picture-in-picture.
     pub pip_selbst: bool,
-    /// Das kleine Fenster wurde beim Teilen AUTOMATISCH geoeffnet - dann
-    /// darf es beim Beenden auch von selbst wieder zugehen. Ein von Hand
-    /// geoeffnetes Fenster bleibt dagegen stehen.
+    /// The small window was opened AUTOMATICALLY when sharing - then
+    /// it may also close by itself when finishing. A manually
+    /// opened window stays instead.
     pub pip_auto: bool,
-    /// Beim Teilen wurde das grosse Fenster automatisch minimiert.
+    /// The big window was minimised automatically when sharing.
     pub minimiert_auto: bool,
     /// Vergroesserung im geteilten Bildschirm (1.0 = alles).
     pub zoom: f32,
     pub zoomanker: Zoomanker,
-    /// Mitte des Ausschnitts (0..1) - nur bei Zoomanker::Fest von Hand.
+    /// Centre of the section (0..1) - only by hand with Zoomanker::Fest.
     pub zoommitte: Vec2,
-    /// Der zuletzt gezeichnete Ausschnitt (x, y, b, h) in Bildschirm-
-    /// koordinaten des Senders. Wird nach oben gemeldet, damit er genau
-    /// diesen Teil in voller Schaerfe schicken kann.
+    /// The section drawn last (x, y, w, h) in screen
+    /// coordinates of the sender. Reported upwards so that it can send
+    /// exactly this part in full sharpness.
     pub zoomfenster: (f32, f32, f32, f32),
-    /// Soll der Sender wirklich nur diesen Teil schicken (echte Bildpunkte
-    /// statt hochgerechneter)? Kostet ihn etwas Rechenzeit, deshalb ein
-    /// Schalter - aber standardmaessig an, denn scharf ist der Sinn der Sache.
+    /// Should the sender really send only this part (real pixels
+    /// instead of extrapolated ones)? Costs it some CPU time, hence a
+    /// switch - but on by default, because sharp is the point of it.
     pub scharf: bool,
 }
 
@@ -264,8 +264,8 @@ impl Default for Fensterzustand {
             tippt_gemeldet: false,
             einstellungen_offen: false,
             schirmwahl_offen: false,
-            // Sich selbst im kleinen Fenster sehen ist der Normalfall - beim
-            // Bildschirmteilen will man ja pruefen, ob die Kamera laeuft.
+            // Seeing yourself in the small window is the normal case - when
+            // sharing the screen you want to check whether the camera is running.
             pip_selbst: true,
             pip_auto: false,
             minimiert_auto: false,
@@ -278,8 +278,8 @@ impl Default for Fensterzustand {
     }
 }
 
-/// Die fertigen Texturen. Getrennt von `Sicht`, weil sie nicht kopierbar
-/// sind und pro Bild ohnehin aus dem Dekodierer kommen.
+/// The finished textures. Separate from `Sicht` because they cannot be copied
+/// and come from the decoder for every frame anyway.
 #[derive(Default)]
 pub struct Bilder {
     pub eigen: Option<egui::TextureHandle>,
@@ -287,8 +287,8 @@ pub struct Bilder {
     pub schirme: HashMap<u64, egui::TextureHandle>,
 }
 
-/// Was der Nutzer angeklickt hat. Ausgefuehrt wird es vom Aufrufer - hier
-/// wird nur gezeichnet.
+/// What the user clicked. It is executed by the caller - here
+/// we only draw.
 #[derive(Clone, PartialEq)]
 pub enum Aktion {
     Stumm(bool),
@@ -307,36 +307,36 @@ pub enum Aktion {
     Warteraum(bool),
     Stummschalten(u64),
     Rauswerfen(u64),
-    /// Eine echte FreeViewer-Sitzung zu diesem Teilnehmer aufbauen.
+    /// Set up a real FreeViewer session to this participant.
     Steuern(String, String),
     EinladungKopieren,
     /// Geraet im laufenden Meeting wechseln (0 = Standardgeraet).
     KameraGeraet(usize),
     MikroGeraet(usize),
     LautsprecherGeraet(usize),
-    /// Geraeteliste neu einlesen (nach Ein-/Ausstecken).
+    /// Re-read the device list (after plugging/unplugging).
     GeraeteNeuLesen,
     /// Diesen Bildschirm teilen (Index aus `Sicht::monitore`).
     SchirmWaehlen(usize),
     /// Genau dieses Programmfenster teilen (Kennung aus `Sicht::fenster`).
     FensterWaehlen(isize),
-    /// Roten Rahmen um das Geteilte an-/abschalten.
+    /// Switch the red frame around what is shared on/off.
     Rahmen(bool),
-    /// Rauschsperre: an/aus und Strenge (0..100).
+    /// Noise gate: on/off and strictness (0..100).
     Rauschsperre(bool, u8),
     /// Avatar statt Kamera an/aus.
     Avatar(bool),
     /// Aussehen des Avatars aendern.
     AvatarAussehen(crate::avatar::Aussehen),
-    /// Als Zuschauer den Teilenden um die Steuerung bitten.
+    /// As viewer, ask the sharer for control.
     SteuerungAnfragen,
-    /// Als Teilender ueber eine Anfrage entscheiden.
+    /// As sharer, decide on a request.
     SteuerungAntwort(u64, bool),
     /// Erteilte Freigabe zuruecknehmen (None = alle).
     SteuerungZurueck(Option<u64>),
 }
 
-/// Der Beitritts-Schirm braucht Schreibzugriff (Name, Geraetewahl).
+/// The join screen needs write access (name, device choice).
 #[derive(Clone, Default)]
 pub struct Beitritt {
     pub raum: String,
@@ -351,7 +351,7 @@ pub struct Beitritt {
     pub geraete_da: bool,
     pub pegel: f32,
     pub hinweis: String,
-    /// Beitritt laeuft schon - dann Knopf sperren.
+    /// Join is already running - then lock the button.
     pub laeuft: bool,
 }
 
@@ -365,14 +365,14 @@ pub enum Beitrittsaktion {
 
 // ----------------------------------------------------------------- Farben
 
-/// Die Palette plus die drei Signalfarben, die FreeMeet benutzt. In hellen
-/// Themen werden sie dunkler genommen, sonst waeren sie auf Weiss nicht
-/// lesbar - Farbe ist hier eine Aussage, keine Dekoration.
+/// The palette plus the three signal colours FreeMeet uses. In light
+/// themes they are taken darker, otherwise they would not be
+/// readable on white - colour is a statement here, not decoration.
 pub struct Farben {
     pub p: Palette,
     pub warn: Color32,
     pub bad: Color32,
-    /// Der sehr dunkle Grund der Kacheln (#05070c im Browser).
+    /// The very dark background of the tiles (#05070c in the browser).
     pub tief: Color32,
 }
 
@@ -417,7 +417,7 @@ impl Farben {
     }
 }
 
-/// Anfangsbuchstaben fuer den Kreis, wenn keine Kamera laeuft.
+/// Initials for the circle when no camera is running.
 pub fn kuerzel(name: &str) -> String {
     let k: String = name
         .split_whitespace()
@@ -433,7 +433,7 @@ pub fn kuerzel(name: &str) -> String {
 
 // ------------------------------------------------------- kleine Bausteine
 
-/// Eine Marke ("Tag") in der Kopfzeile: rundes Pillenfeld, Symbol + Wort.
+/// A badge ("tag") in the header: round pill field, icon + word.
 fn tag(
     ui: &mut egui::Ui,
     f: &Farben,
@@ -500,22 +500,22 @@ fn tag(
     }
 }
 
-/// Zustand eines Knopfs in der Steuerleiste.
+/// State of a button in the control bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Ctl {
     /// unauffaellig an (Standard)
     Normal,
     /// bewusst eingeschaltet (Hand, Teilen, Chat) - Akzentfarbe
     An,
-    /// Mikro/Kamera abgeschaltet - das muss rot sein, nicht bunt
+    /// Mic/camera switched off - that has to be red, not colourful
     Aus,
     /// Verlassen/Beenden
     Gefahr,
 }
 
-/// Ein KLEINER Knopf: nur das Zeichen, Beschriftung als Hinweis beim
-/// Darauffahren. Fuer die Leiste oben rechts - dort zaehlt jeder Pixel,
-/// und die Woerter darunter haben die halbe Fensterhoehe gekostet.
+/// A SMALL button: only the glyph, label as a hint on
+/// hover. For the bar at the top right - every pixel counts there,
+/// and the words underneath cost half the window height.
 fn ctl_klein(
     ui: &mut egui::Ui,
     f: &Farben,
@@ -567,8 +567,8 @@ fn ctl_klein(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Ein Knopf der Fussleiste: Zeichen oben, Wort darunter - wie bei Meet
-/// und Teams. Genau die Form, die der Browser-Client zeigt.
+/// A footer-bar button: glyph on top, word below - like Meet
+/// and Teams. Exactly the shape the browser client shows.
 fn ctl(
     ui: &mut egui::Ui,
     f: &Farben,
@@ -674,9 +674,9 @@ fn rund(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Kleiner Knopf in Listen ("Einlassen", "Steuern").
-/// Ein kleiner Farbfleck zum Anklicken. Der Gewaehlte bekommt einen Ring -
-/// ohne den weiss niemand, welcher gerade gilt.
+/// Small button in lists ("Let in", "Control").
+/// A small colour dot to click. The chosen one gets a ring -
+/// without it nobody knows which one is currently active.
 fn farbtupfer(ui: &mut egui::Ui, farbe: [u8; 3], gewaehlt: bool, f: &Farben) -> bool {
     let (r, antwort) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::click());
     let c = Color32::from_rgb(farbe[0], farbe[1], farbe[2]);
@@ -713,9 +713,9 @@ fn mini(ui: &mut egui::Ui, f: &Farben, text: &str, betont: bool) -> egui::Respon
     ui.add(knopf).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Ein Bild in ein Rechteck malen. `ganz` = vollstaendig zeigen (nichts
-/// abschneiden), sonst fuellend zuschneiden. `spiegeln` nur beim eigenen
-/// Kamerabild - so kennt man sich aus dem Spiegel.
+/// Paint an image into a rectangle. `ganz` = show completely (cut off
+/// nothing), otherwise crop to fill. `spiegeln` only for the own
+/// camera image - that is how you know yourself from the mirror.
 fn bild_malen(
     mal: &egui::Painter,
     rect: Rect,
@@ -726,8 +726,8 @@ fn bild_malen(
     bild_malen_zoom(mal, rect, tex, spiegeln, ganz, None)
 }
 
-/// Wie `bild_malen`, aber mit einem Ausschnitt (0..1) - dafuer da, in einen
-/// geteilten Bildschirm hineinzuzoomen, ohne das Bild neu zu berechnen.
+/// Like `bild_malen`, but with a section (0..1) - there to zoom into a
+/// shared screen without recomputing the image.
 fn bild_malen_zoom(
     mal: &egui::Painter,
     rect: Rect,
@@ -751,8 +751,8 @@ fn bild_malen_zoom(
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
         )
     } else {
-        // Fuellen: das Ueberstehende wird ueber die Bildkoordinaten
-        // weggeschnitten, damit keine schwarzen Balken entstehen.
+        // Fill: the overhang is cut away via the image
+        // coordinates so that no black bars appear.
         let uv = if ar_bild > ar_rect {
             let u = (ar_rect / ar_bild).clamp(0.0, 1.0);
             Rect::from_min_max(pos2((1.0 - u) / 2.0, 0.0), pos2((1.0 + u) / 2.0, 1.0))
@@ -762,8 +762,8 @@ fn bild_malen_zoom(
         };
         (rect, uv)
     };
-    // Der Zoom-Ausschnitt wird IN den schon berechneten Bereich gelegt -
-    // so bleibt das Zuschneiden fuer krumme Seitenverhaeltnisse erhalten.
+    // The zoom section is placed INTO the already computed area -
+    // so the cropping for odd aspect ratios is preserved.
     if let Some(a) = ausschnitt {
         let (b, h) = (uv.width(), uv.height());
         uv = Rect::from_min_max(
@@ -780,12 +780,12 @@ fn bild_malen_zoom(
     mal.image(tex.id(), ziel, uv, Color32::WHITE);
 }
 
-/// Welcher Ausschnitt des Bildes ist bei dieser Vergroesserung zu sehen?
+/// Which section of the image is visible at this magnification?
 ///
-/// `mitte` ist der Punkt (0..1), auf den gezoomt wird. Das Ergebnis liegt
-/// IMMER vollstaendig im Bild - sonst saehe man am Rand schwarze Streifen
-/// oder gestreckte Bildpunkte. Genau deshalb wandert die Mitte am Rand
-/// automatisch nach innen, statt den Ausschnitt hinausragen zu lassen.
+/// `mitte` is the point (0..1) being zoomed to. The result ALWAYS lies
+/// completely within the image - otherwise you would see black stripes at the edge
+/// or stretched pixels. That is exactly why the centre moves
+/// inwards at the edge instead of letting the section stick out.
 pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
     let z = zoom.clamp(1.0, 8.0);
     let halb = 0.5 / z;
@@ -794,16 +794,16 @@ pub fn zoom_ausschnitt(zoom: f32, mitte: Vec2) -> Rect {
     Rect::from_min_max(pos2(x - halb, y - halb), pos2(x + halb, y + halb))
 }
 
-/// Welcher Teil des EMPFANGENEN Bildes zeigt das gewuenschte Fenster?
+/// Which part of the RECEIVED image shows the wanted window?
 ///
-/// `fenster` und `bereich` sind beide Anteile des GANZEN Bildschirms des
-/// Senders. Sendet er nur einen Ausschnitt (`bereich` kleiner als alles),
-/// enthaelt das ankommende Bild genau diesen Ausschnitt - die Lupe darf dann
-/// nicht noch einmal so weit hineinzoomen, sonst waere es doppelt.
+/// `fenster` and `bereich` are both fractions of the sender's WHOLE screen.
+/// If it sends only a section (`bereich` smaller than everything),
+/// the incoming image contains exactly this section - the magnifier must then
+/// not zoom in as far again, otherwise it would be doubled.
 ///
-/// Genau diese Rechnung macht den scharfen Zoom moeglich UND richtig: sobald
-/// der Sender den gewuenschten Bereich liefert, ist das Ergebnis das ganze
-/// Bild (0..1) - also echte Bildpunkte statt hochgerechneter.
+/// This very calculation makes the sharp zoom possible AND correct: as soon as
+/// the sender delivers the wanted area, the result is the whole
+/// image (0..1) - so real pixels instead of extrapolated ones.
 pub fn zoom_uv(fenster: Rect, bereich: Rect) -> Rect {
     let bw = bereich.width().max(0.0001);
     let bh = bereich.height().max(0.0001);
@@ -811,25 +811,25 @@ pub fn zoom_uv(fenster: Rect, bereich: Rect) -> Rect {
     let y0 = ((fenster.min.y - bereich.min.y) / bh).clamp(0.0, 1.0);
     let x1 = ((fenster.max.x - bereich.min.x) / bw).clamp(0.0, 1.0);
     let y1 = ((fenster.max.y - bereich.min.y) / bh).clamp(0.0, 1.0);
-    // Nie auf null zusammenfallen - eine leere Flaeche waere ein schwarzes
-    // Bild statt eines Ausschnitts.
+    // Never collapse to zero - an empty area would be a black
+    // image instead of a section.
     let x1 = x1.max(x0 + 0.001).min(1.0);
     let y1 = y1.max(y0 + 0.001).min(1.0);
     Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
 }
 
-/// Wird das Bild abgeschnitten, wenn wir es fuellend zeichnen? Weicht das
-/// Seitenverhaeltnis um mehr als ein Fuenftel ab (Hochformat vom Handy,
-/// 4:3-Webcam, ultrabreiter Monitor), zeigen wir lieber alles.
+/// Is the image cropped when we draw it to fill? If the
+/// aspect ratio deviates by more than a fifth (portrait from a phone,
+/// 4:3 webcam, ultrawide monitor), we prefer to show everything.
 fn passt_nicht(tex: &egui::TextureHandle, rect: Rect) -> bool {
     let b = tex.aspect_ratio().max(0.05);
     let k = (rect.width() / rect.height().max(1.0)).max(0.05);
     (b - k).abs() / b.max(k) > 0.20
 }
 
-/// Eine Bildschirmkachel bekommt genau die Form ihres Bildes. Sonst stuende
-/// das Namensschild unter breiten schwarzen Balken statt am Bild - und die
-/// Flaeche waere verschenkt.
+/// A screen tile gets exactly the shape of its image. Otherwise the
+/// name tag would sit below wide black bars instead of at the image - and the
+/// area would be wasted.
 fn schirm_rect(rect: Rect, tex: Option<&egui::TextureHandle>) -> Rect {
     let t = match tex {
         Some(t) => t,
@@ -845,7 +845,7 @@ fn schirm_rect(rect: Rect, tex: Option<&egui::TextureHandle>) -> Rect {
     Rect::from_center_size(rect.center(), vec2(b, h))
 }
 
-/// Eine Kachel wie im Browser.
+/// A tile like in the browser.
 pub struct Kachel {
     pub id: u64,
     pub name: String,
@@ -854,9 +854,9 @@ pub struct Kachel {
     pub spricht: bool,
     pub ich: bool,
     pub schirm: bool,
-    /// Kamera ausgeschaltet - dann NIE ein altes Standbild zeigen, sondern
-    /// den Kreis mit den Anfangsbuchstaben. Ein eingefrorenes Gesicht waere
-    /// eine Luege ueber den Zustand des anderen.
+    /// Camera switched off - then NEVER show an old still image, but
+    /// the circle with the initials. A frozen face would be
+    /// a lie about the state of the other person.
     pub kamera_aus: bool,
 }
 
@@ -887,14 +887,14 @@ fn kachel_malen_zoom(
     mal.rect_filled(rect, 14.0, f.tief);
     match tex {
         Some(t) => {
-            // Ein geteilter Bildschirm wird NIE zugeschnitten - abgeschnittener
-            // Text ist wertlos.
+            // A shared screen is NEVER cropped - cropped
+            // text is worthless.
             let ganz = k.schirm || passt_nicht(t, rect);
             bild_malen_zoom(&mal, rect, t, k.ich && !k.schirm, ganz, ausschnitt);
         }
         None => {
-            // Kein Bild: weicher Kreis mit den Anfangsbuchstaben, wie im
-            // Browser. Der Verlauf entsteht aus wenigen Kreisen.
+            // No image: soft circle with the initials, as in the
+            // browser. The gradient is built from a few circles.
             let r = rect.height().min(rect.width()) * 0.5;
             for i in 0..6 {
                 let t = i as f32 / 6.0;
@@ -925,7 +925,7 @@ fn kachel_malen_zoom(
             }
         }
     }
-    // Namensschild unten links: Name, dazu Stumm- und Handzeichen.
+    // Name tag at the bottom left: name, plus mute and raised-hand icons.
     let font = egui::FontId::proportional(12.0);
     let schild_text = if k.schirm {
         format!("{} · Bildschirm", k.name)
@@ -939,8 +939,8 @@ fn kachel_malen_zoom(
         pos2(rect.left() + 8.0, rect.bottom() - 8.0 - 24.0),
         vec2(breite, 24.0),
     );
-    // Halbdurchsichtig wie im Browser (rgba(5,7,12,.68)) - das Bild bleibt
-    // darunter zu ahnen, der Text ist trotzdem lesbar.
+    // Semi-transparent like in the browser (rgba(5,7,12,.68)) - the image can still
+    // be guessed underneath, the text is readable anyway.
     mal.rect_filled(
         schild,
         9.0,
@@ -976,7 +976,7 @@ fn kachel_malen_zoom(
             Rect::from_min_size(pos2(x, schild.center().y - 6.5), Vec2::splat(13.0)),
         );
     }
-    // Rahmen zuletzt, damit er ueber dem Bild liegt.
+    // Border last, so that it lies above the image.
     let (randfarbe, dicke) = if k.spricht {
         (f.p.green, 2.0)
     } else if k.hand {
@@ -995,7 +995,7 @@ fn kachel_malen_zoom(
 
 // ------------------------------------------------------------- Beitritt
 
-/// Der Schirm vor dem Beitritt - mittige Karte wie `#vorbereiten`.
+/// The screen before joining - centred card like `#vorbereiten`.
 pub fn beitritt_ui(
     ctx: &egui::Context,
     b: &mut Beitritt,
@@ -1020,9 +1020,9 @@ pub fn beitritt_ui(
                             .inner_margin(egui::Margin::symmetric(20, 18))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                // Die KARTE steht mittig, ihr INHALT nicht -
-                                // sonst schwebten Beschriftungen zentriert im
-                                // Nichts statt ueber ihrem Feld zu stehen.
+                                // The CARD is centred, its CONTENT is not -
+                                // otherwise labels would float centred in
+                                // nothing instead of sitting above their field.
                                 ui.with_layout(
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
@@ -1044,7 +1044,7 @@ fn beitritt_karte(
     vorschau: Option<&egui::TextureHandle>,
 ) -> Option<Beitrittsaktion> {
     let mut aktion = None;
-    // Marke: Zeichen im Quadrat + Titel, wie ".marke klein" im Browser.
+    // Brand: glyph in a square + title, like ".marke klein" in the browser.
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(30.0), egui::Sense::hover());
         ui.painter().rect_filled(r, 9.0, f.p.accent.gamma_multiply(0.16));
@@ -1066,7 +1066,7 @@ fn beitritt_karte(
     ui.label(egui::RichText::new(unter).size(13.0).color(f.p.muted));
     ui.add_space(10.0);
 
-    // ---- Selbstvorschau 16:9 mit Pegelbalken und zwei runden Knoepfen
+    // ---- Self-preview 16:9 with level bar and two round buttons
     let breite = ui.available_width();
     let hoehe = (breite * 9.0 / 16.0).clamp(120.0, 320.0);
     let (rect, _) = ui.allocate_exact_size(vec2(breite, hoehe), egui::Sense::hover());
@@ -1102,7 +1102,7 @@ fn beitritt_karte(
             Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(34.0)),
         );
     }
-    // Pegelbalken oben - man sieht sofort, ob das Mikrofon etwas hoert.
+    // Level bar at the top - you see at once whether the microphone hears anything.
     let balken = Rect::from_min_size(
         pos2(rect.left() + 12.0, rect.top() + 12.0),
         vec2(rect.width() - 24.0, 5.0),
@@ -1117,7 +1117,7 @@ fn beitritt_karte(
             if b.mikro_an { f.p.green } else { f.p.muted },
         );
     }
-    // Die zwei runden Knoepfe sitzen IM Bild, unten mittig.
+    // The two round buttons sit IN the image, bottom centre.
     let knopf_y = rect.bottom() - 32.0;
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -1284,17 +1284,17 @@ fn kurz(s: &str, max: usize) -> String {
 
 // -------------------------------------------------------------- Meeting
 
-/// Wir stehen im Warteraum. Der Browser zeigt hier dieselbe mittige Karte
-/// mit drei atmenden Punkten - ohne sie saesse man vor einem leeren Raum und
-/// wuesste nicht, ob etwas kaputt ist oder ob man einfach warten muss.
+/// We are in the waiting room. The browser shows the same centred card here
+/// with three breathing dots - without them you would sit in front of an empty room and
+/// not know whether something is broken or you simply have to wait.
 pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
     let f = farben();
     let mut abbrechen = false;
-    // Die Punkte atmen - dafuer muss neu gezeichnet werden.
-    // 20 ms statt 60. In diesem Takt haengt ALLES am Meeting: Mikrofon
-    // abholen, Kamerabild kodieren, Ton an den Lautsprecher. Mit 60 ms
-    // waren hoechstens 16 Bilder/s moeglich, und das Mikrofon lieferte
-    // seine 20-ms-Rahmen im Dreierpack statt einzeln.
+    // The dots breathe - that needs a repaint.
+    // 20 ms instead of 60. In this tick EVERYTHING in the meeting hangs: picking up the
+    // microphone, encoding the camera image, audio to the speaker. With 60 ms
+    // at most 16 frames/s were possible, and the microphone delivered
+    // its 20 ms frames in bundles of three instead of singly.
     ctx.request_repaint_after(std::time::Duration::from_millis(20));
     let t = ctx.input(|i| i.time) as f32;
     egui::CentralPanel::default()
@@ -1379,7 +1379,7 @@ pub fn warteschirm_ui(ctx: &egui::Context, titel: &str, text: &str) -> bool {
     abbrechen
 }
 
-/// Das laufende Meeting: Kopfzeile, Buehne, Seitenleiste, Steuerleiste.
+/// The running meeting: header, stage, sidebar, control bar.
 pub fn meeting_ui(
     ctx: &egui::Context,
     s: &Sicht,
@@ -1389,9 +1389,9 @@ pub fn meeting_ui(
     let f = farben();
     let mut aktionen: Vec<Aktion> = Vec::new();
 
-    // Die Bedienknoepfe sitzen jetzt klein oben rechts statt als breite
-    // Leiste unten - die kostete fast ein Zehntel der Fensterhoehe, und im
-    // Meeting zaehlt jeder Pixel fuer das Bild.
+    // The control buttons now sit small at the top right instead of as a wide
+    // bar at the bottom - that cost almost a tenth of the window height, and in the
+    // meeting every pixel counts for the image.
     kopf(ctx, s, z, &f, &mut aktionen);
     if z.seite_offen {
         seite(ctx, s, z, &f, &mut aktionen);
@@ -1488,8 +1488,8 @@ fn kopf(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
-                    // Von RECHTS nach links aufgebaut: das Auflegen ganz
-                    // aussen, wo man es sucht.
+                    // Built from RIGHT to left: hang-up at the very
+                    // outside, where you look for it.
                     if ctl_klein(ui, f, "leave", "Meeting verlassen", Ctl::Gefahr, None).clicked() {
                         aktionen.push(Aktion::Verlassen);
                     }
@@ -1580,11 +1580,11 @@ fn kopf(
                     {
                         z.pip = !z.pip;
                     }
-                    // Steuerung gibt es NUR auf Anfrage. Der alte Knopf
-                    // "fuer alle freigeben" ist weg: er hat den ganzen Raum
-                    // freigeschaltet, obwohl fast immer genau eine Person
-                    // gemeint war. Jetzt fragt, wer zusieht - und wer teilt,
-                    // entscheidet fuer genau diese eine Person.
+                    // Control exists ONLY on request. The old button
+                    // "release for everyone" is gone: it unlocked the whole room,
+                    // although almost always exactly one person was
+                    // meant. Now whoever watches asks - and whoever shares
+                    // decides for exactly this one person.
                     if let Some((wer, fvid)) = s.steuer_zusage.clone() {
                         if ctl_klein(
                             ui,
@@ -1645,10 +1645,10 @@ fn kopf(
                         if s.schirm_an {
                             aktionen.push(Aktion::Schirm(false));
                         } else if s.monitore.len() > 1 || !s.fenster.is_empty() {
-                            // Sobald es etwas zu waehlen gibt, wird gefragt.
-                            // Frueher ging bei einem einzigen Bildschirm
-                            // ungefragt ALLES raus - genau das wollte Justin
-                            // nicht mehr.
+                            // As soon as there is something to choose, we ask.
+                            // Earlier, with a single screen, EVERYTHING went out
+                            // unasked - exactly what Justin did not want
+                            // anymore.
                             z.schirmwahl_offen = true;
                         } else {
                             aktionen.push(Aktion::SchirmWaehlen(0));
@@ -1679,8 +1679,8 @@ fn kopf(
                         aktionen.push(Aktion::Stumm(!s.stumm));
                     }
                     ui.add_space(6.0);
-                    // Nur Symbol und Zahl - das Wort "Teilnehmer" sagt
-                    // niemandem etwas Neues und frisst Platz in der Leiste.
+                    // Only icon and number - the word "participants" tells
+                    // nobody anything new and eats space in the bar.
                     tag(ui, f, Some("people"), &s.leute.len().to_string(), Ton::Neutral, false)
                         .on_hover_text("Wer gerade im Raum ist");
                 });
@@ -1688,7 +1688,7 @@ fn kopf(
         });
 }
 
-/// Welchen Bildschirm teilen? Nur noetig, wenn es mehrere gibt.
+/// Which screen to share? Only needed when there are several.
 fn schirmwahl(
     ctx: &egui::Context,
     s: &Sicht,
@@ -1738,8 +1738,8 @@ fn schirmwahl(
                     .size(10.5)
                     .color(f.p.muted),
                 );
-                // Lange Listen sonst sprengen den Schirm: bei vielen
-                // offenen Fenstern wird gerollt statt abgeschnitten.
+                // Long lists would otherwise burst the screen: with many
+                // open windows we scroll instead of cutting off.
                 egui::ScrollArea::vertical()
                     .max_height(220.0)
                     .show(ui, |ui| {
@@ -1774,11 +1774,11 @@ fn schirmwahl(
     }
 }
 
-/// Einstellungen MITTEN im Meeting: Kamera, Mikrofon, Lautsprecher.
+/// Settings IN THE MIDDLE of the meeting: camera, microphone, speaker.
 ///
-/// WARUM als eigenes Fenster und nicht in der Seitenleiste: die Wahl ist
-/// eine kurze Unterbrechung, danach will man sie wieder weghaben. Der
-/// Browser-Client macht es genauso (Overlay ueber der Buehne).
+/// WHY as a separate window and not in the sidebar: the choice is
+/// a short interruption, afterwards you want it gone again. The
+/// browser client does it the same way (overlay above the stage).
 fn einstellungen(
     ctx: &egui::Context,
     s: &Sicht,
@@ -1947,9 +1947,9 @@ fn einstellungen(
                 if regler.changed() {
                     aktionen.push(Aktion::Rauschsperre(true, st.round() as u8));
                 }
-                // Ohne Rueckmeldung waere der Regler ein Blindflug: hier
-                // sieht man, ob gerade durchgelassen oder gesperrt wird
-                // und worauf sich die Sperre eingemessen hat.
+                // Without feedback the slider would be flying blind: here
+                // you see whether sound is currently let through or blocked
+                // and what the gate has calibrated to.
                 let (r, _) = ui.allocate_exact_size(vec2(breite, 10.0), egui::Sense::hover());
                 let mal = ui.painter();
                 mal.rect_filled(r, 5.0, f.p.card_hi);
@@ -1960,8 +1960,8 @@ fn einstellungen(
                     5.0,
                     if s.sperre_offen { f.p.accent } else { f.p.muted },
                 );
-                // Wo die Schwelle ungefaehr liegt (Grundrauschen mal
-                // Faktor), als duenner Strich.
+                // Where the threshold roughly lies (noise floor times
+                // factor), as a thin line.
                 let s_anteil = (s.sperre_grund
                     * (2.0 + s.sperre_staerke as f32 / 100.0 * 6.0))
                     .clamp(0.0, 1.0)
@@ -1991,8 +1991,8 @@ fn einstellungen(
                     z.einstellungen_offen = false;
                 }
             });
-            // Ehrlich bleiben: ein Wechsel der Tongeraete setzt die
-            // Echoausloeschung zurueck, das hoert man kurz.
+            // Stay honest: switching the audio devices resets the
+            // echo cancellation, you hear that briefly.
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(
@@ -2217,8 +2217,8 @@ fn chatzeile(ui: &mut egui::Ui, zeile: &Chatzeile, f: &Farben) {
             f.p.on_accent,
         );
         ui.add_space(6.0);
-        // Bei eigenen Nachrichten alles nach rechts ziehen - sonst klebte
-        // der Name am linken Rand und rutschte aus der Leiste heraus.
+        // For own messages pull everything to the right - otherwise the
+        // name would stick to the left edge and slide out of the bar.
         let innen = if zeile.eigen {
             egui::Layout::top_down(egui::Align::Max)
         } else {
@@ -2329,9 +2329,9 @@ fn reiter_leute(ui: &mut egui::Ui, s: &Sicht, f: &Farben, aktionen: &mut Vec<Akt
                     p.name.clone()
                 };
                 person_zeile(ui, f, &name, p.gastgeber, |ui| {
-                    // Rechts-nach-links: was zuerst kommt, steht ganz rechts.
-                    // Erst die Knoepfe, dann die Zeichen - so kleben Stumm-
-                    // und Handzeichen am Namen und nicht am Fensterrand.
+                    // Right-to-left: whatever comes first sits at the far right.
+                    // Buttons first, then the icons - so the mute
+                    // and raised-hand icons stick to the name and not to the window edge.
                     if !p.ich && !p.fvid.is_empty() {
                         if mini(ui, f, "Steuern", false)
                             .on_hover_text(format!("{} mit FreeViewer fernsteuern", p.name))
@@ -2395,9 +2395,9 @@ fn person_zeile(
                         f.p.on_accent,
                     );
                     ui.add_space(3.0);
-                    // ERST die Knoepfe rechts belegen, DANN den Namen in den
-                    // Rest setzen und dort abschneiden. Andersherum schoebe
-                    // ein langer Name die Knoepfe aus der Leiste.
+                    // FIRST place the buttons on the right, THEN put the name in the
+                    // remainder and cut it off there. The other way round
+                    // a long name would push the buttons out of the bar.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         rechts(ui);
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -2441,20 +2441,20 @@ fn reiter_info(ui: &mut egui::Ui, s: &Sicht, f: &Farben) {
         });
 }
 
-/// Der Balken, der meldet, dass jemand vor der Tuer wartet.
-/// Die Frage beim TEILENDEN: "X moechte deinen Bildschirm steuern".
+/// The bar that reports that someone is waiting at the door.
+/// The question to the SHARER: "X wants to control your screen".
 ///
-/// Warum eine eigene Leiste und kein Fenster: sie darf das Bild nicht
-/// verdecken, muss aber sofort ins Auge fallen - genau wie #ctrlLeiste im
-/// Browser. Sie bleibt stehen, bis entschieden ist; eine Anfrage, die von
-/// selbst verschwindet, waere schlimmer als keine.
+/// Why a separate bar and not a window: it must not cover the image,
+/// but must catch the eye at once - just like #ctrlLeiste in the
+/// browser. It stays until a decision is made; a request that
+/// disappears by itself would be worse than none.
 fn steuer_leiste(
     ctx: &egui::Context,
     s: &Sicht,
     f: &Farben,
     aktionen: &mut Vec<Aktion>,
 ) {
-    // Unter die Warteraum-Leiste, sonst liegen beide uebereinander.
+    // Below the waiting-room bar, otherwise the two overlap.
     let oben = if s.wartende.is_empty() { 56.0 } else { 100.0 };
     egui::Area::new(egui::Id::new("meet_steuerfrage"))
         .anchor(egui::Align2::CENTER_TOP, vec2(0.0, oben))
@@ -2549,8 +2549,8 @@ fn kacheln_bauen(s: &Sicht) -> (Vec<Kachel>, Vec<Kachel>) {
         .iter()
         .map(|p| Kachel {
             id: p.id,
-            // Die eigene Kachel heisst "Du" - genau wie im Browser. In der
-            // Teilnehmerliste steht der echte Name, dort ist er nuetzlich.
+            // The own tile is called "Du" - just like in the browser. In the
+            // participant list the real name is shown, where it is useful.
             name: if p.ich { "Du".to_string() } else { p.name.clone() },
             stumm: p.stumm,
             hand: p.hand,
@@ -2576,11 +2576,11 @@ fn tex_fuer<'a>(k: &Kachel, b: &'a Bilder) -> Option<&'a egui::TextureHandle> {
     }
 }
 
-/// Den geteilten Bildschirm zeichnen - mit Lupe.
+/// Draw the shared screen - with magnifier.
 ///
-/// Rad = groesser/kleiner, Ziehen = Ausschnitt verschieben (und damit auf
-/// "fest" stellen), Doppelklick = zurueck auf ganz. Oben rechts sitzt eine
-/// kleine Leiste mit demselben in Knopfform, damit man es auch findet.
+/// Wheel = larger/smaller, dragging = move the section (and thereby set it to
+/// "fixed"), double click = back to whole. At the top right sits a
+/// small bar with the same in button form so that you also find it.
 fn schirm_kachel(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -2590,14 +2590,14 @@ fn schirm_kachel(
     z: &mut Fensterzustand,
     f: &Farben,
 ) {
-    // --- Rad: hinein- und herauszoomen ---
+    // --- Wheel: zoom in and out ---
     let zeiger = ui.ctx().pointer_latest_pos();
     let ueber = zeiger.map(|p| rect.contains(p)).unwrap_or(false);
     if ueber {
         let rad = ui.ctx().input(|i| i.smooth_scroll_delta.y);
         if rad.abs() > 0.5 {
-            // Vor dem ersten Radklick steht der Anker auf "eigene Maus" -
-            // dann wirkt das Rad wie eine Lupe unter dem Zeiger.
+            // Before the first wheel click the anchor is on "own mouse" -
+            // then the wheel acts like a magnifier under the pointer.
             z.zoom = (z.zoom * (1.0 + rad * 0.0025)).clamp(1.0, 8.0);
             if z.zoom <= 1.001 {
                 z.zoom = 1.0;
@@ -2605,22 +2605,22 @@ fn schirm_kachel(
         }
     }
 
-    // Welchen Teil seines Bildschirms sendet der andere gerade? Alle
-    // folgenden Rechnungen laufen in SEINEN Bildschirmkoordinaten - nur so
-    // stimmt die Lupe auch dann, wenn er schon einen Ausschnitt liefert.
+    // Which part of their screen is the other currently sending? All
+    // following calculations run in THEIR screen coordinates - only this
+    // way the magnifier is right even when they already deliver a section.
     let ber = s
         .schirm_bereich
         .map(|(x, y, w, h)| Rect::from_min_size(pos2(x, y), vec2(w, h)))
         .unwrap_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
 
-    // --- Wohin schaut die Lupe? ---
+    // --- Where does the magnifier look? ---
     let mut mitte = z.zoommitte;
     if z.zoom > 1.0 {
         match z.zoomanker {
             Zoomanker::Eigene => {
-                // Der Zeiger IM Kachelbereich wird auf den Bildschirm des
-                // anderen abgebildet: links oben zeigen heisst links oben
-                // sehen. Kein Nachlaufen, kein Driften - eine echte Lupe.
+                // The pointer IN the tile area is mapped onto the screen of the
+                // other: pointing at top left means seeing top left.
+                // No trailing, no drifting - a real magnifier.
                 if let Some(p) = zeiger {
                     if rect.contains(p) {
                         let fx = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
@@ -2642,9 +2642,9 @@ fn schirm_kachel(
             Zoomanker::Fest => {}
         }
     }
-    // Das gewuenschte Fenster - IMMER in Bildschirmkoordinaten des Senders.
-    // Es wird auch nach oben gemeldet, damit der Sender genau diesen Teil
-    // scharf schicken kann.
+    // The wanted window - ALWAYS in screen coordinates of the sender.
+    // It is also reported upwards so that the sender can send exactly this part
+    // sharp.
     let fenster = zoom_ausschnitt(z.zoom, mitte);
     z.zoomfenster = (fenster.min.x, fenster.min.y, fenster.width(), fenster.height());
     let ausschnitt = if z.zoom > 1.0 || s.schirm_bereich.is_some() {
@@ -2655,7 +2655,7 @@ fn schirm_kachel(
 
     let antwort = kachel_malen_zoom(ui, rect, k, tex, f, ausschnitt);
 
-    // --- Ziehen verschiebt den Ausschnitt (und haelt ihn fest) ---
+    // --- Dragging moves the section (and holds it) ---
     if z.zoom > 1.0 && antwort.dragged() {
         let d = antwort.drag_delta();
         if d.length_sq() > 0.0 {
@@ -2694,7 +2694,7 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
     let stufe = format!("{:.0} %", z.zoom * 100.0);
     let h = 28.0;
     let mal = ui.painter_at(rect);
-    // Breite grob aus den Texten schaetzen - genau genug fuer eine Leiste.
+    // Roughly estimate the width from the texts - accurate enough for a bar.
     let breite = 30.0 + 54.0 + 30.0 + 14.0 + anker_text.chars().count() as f32 * 6.4 + 16.0
         + if z.zoom > 1.0 { 62.0 + 110.0 } else { 0.0 };
     let leiste = Rect::from_min_size(
@@ -2753,8 +2753,8 @@ fn zoomleiste(ui: &mut egui::Ui, rect: Rect, s: &Sicht, z: &mut Fensterzustand, 
         z.zoomanker = z.zoomanker.weiter();
     }
     if z.zoom > 1.0 {
-        // Ehrlich anzeigen, WAS gerade ankommt: echte Bildpunkte oder
-        // hochgerechnete. Das ist der ganze Unterschied.
+        // Show honestly WHAT is arriving: real pixels or
+        // extrapolated ones. That is the whole difference.
         let (text, tip) = if !s.scharf_moeglich {
             (
                 "unscharf",
@@ -2793,7 +2793,7 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
         raster(ui, flaeche, &kameras, b, f);
         return;
     }
-    // Ein geteilter Bildschirm ist DER Inhalt: gross und vollstaendig.
+    // A shared screen is THE content: large and complete.
     let haupt = schirme
         .iter()
         .position(|k| !k.ich)
@@ -2848,9 +2848,9 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
         );
         if r.height() > 20.0 {
             let t = tex_fuer(k, b);
-            // Nur die HAUPT-Freigabe bekommt die Lupe. Bei mehreren
-            // Freigaben gleichzeitig waere ein gemeinsamer Zoomzustand
-            // verwirrend - man wuesste nicht, welches Bild er meint.
+            // Only the MAIN share gets the magnifier. With several
+            // shares at once a common zoom state would be
+            // confusing - you would not know which image it means.
             if i == haupt {
                 schirm_kachel(ui, schirm_rect(r, t), k, t, s, z, f);
             } else {
@@ -2858,8 +2858,8 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
             }
         }
     }
-    // Kamerastreifen. Die Hoehe wird so gewaehlt, dass alle hineinpassen -
-    // sonst haengt die letzte Kamera unter der Fussleiste.
+    // Camera strip. The height is chosen so that all fit in -
+    // otherwise the last camera hangs below the footer bar.
     if let Some(st) = streifen {
         match z.kameraplatz {
             Kameraplatz::Seite => {
@@ -2901,9 +2901,9 @@ fn buehne(ui: &mut egui::Ui, s: &Sicht, z: &mut Fensterzustand, b: &Bilder, f: &
     }
 }
 
-/// Wie viele Spalten? Zoom und Meet probieren jede Spaltenzahl durch und
-/// nehmen die, bei der die einzelne Kachel am GROESSTEN wird - bei festem
-/// 16:9, damit keine Gesichter abgeschnitten werden. Genau das hier.
+/// How many columns? Zoom and Meet try every column count and
+/// take the one where the single tile becomes LARGEST - with a fixed
+/// 16:9, so that no faces are cropped. Exactly that here.
 pub fn beste_aufteilung(flaeche: Vec2, anzahl: usize) -> (usize, f32) {
     if anzahl == 0 {
         return (1, 0.0);
@@ -2912,7 +2912,7 @@ pub fn beste_aufteilung(flaeche: Vec2, anzahl: usize) -> (usize, f32) {
     let rand = 20.0;
     let platz_b = flaeche.x - rand;
     let platz_h = flaeche.y - rand;
-    // Allein im Meeting soll die eigene Kachel nicht die ganze Flaeche fuellen.
+    // Alone in the meeting the own tile should not fill the whole area.
     let grenze = if anzahl == 1 {
         (flaeche.x * 0.7).min(880.0)
     } else {
@@ -2964,21 +2964,21 @@ fn raster(ui: &mut egui::Ui, flaeche: Rect, kacheln: &[Kachel], b: &Bilder, f: &
     }
 }
 
-/// Das kleine Bild-im-Bild-Fenster: die Kameras der anderen, waehrend man
-/// selbst den Bildschirm teilt und das grosse Fenster verdeckt ist.
-/// Das kleine Fenster, das oben bleibt. Es zeigt die anderen UND - wenn
-/// gewuenscht - die eigene Kamera, dazu eine schmale Leiste mit reinen
-/// Symbolknoepfen.
+/// The small picture-in-picture window: the cameras of the others while you
+/// are sharing the screen yourself and the big window is covered.
+/// The small window that stays on top. It shows the others AND - if
+/// wanted - the own camera, plus a narrow bar with pure
+/// icon buttons.
 ///
-/// WARUM Knoepfe hier: waehrend man den eigenen Bildschirm teilt, liegt das
-/// grosse Meetingfenster hinter der geteilten Anwendung. Ohne Knoepfe im
-/// kleinen Fenster kaeme man an Stummschaltung und Kamera nicht mehr heran,
-/// ohne das Teilen zu unterbrechen.
+/// WHY buttons here: while you share your own screen, the big
+/// meeting window lies behind the shared application. Without buttons in the
+/// small window you could no longer reach mute and camera
+/// without interrupting the share.
 pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -> Vec<Aktion> {
     let f = farben();
     let mut aktionen: Vec<Aktion> = Vec::new();
     let (_, kameras) = kacheln_bauen(s);
-    // Erst die anderen, die eigene Kachel zuletzt (wie im Browser).
+    // First the others, the own tile last (like in the browser).
     let mut zeigen: Vec<&Kachel> = kameras.iter().filter(|k| !k.ich).collect();
     if *selbst {
         if let Some(ich) = kameras.iter().find(|k| k.ich) {
@@ -2989,7 +2989,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
     ui.allocate_rect(flaeche, egui::Sense::hover());
     ui.painter().rect_filled(flaeche, 0.0, f.p.bg);
 
-    // --- Leiste unten: nur Symbole, damit sie in 260 px Breite passt ---
+    // --- Bar at the bottom: icons only, so that it fits in 260 px width ---
     let leiste_h = 34.0;
     let leiste = Rect::from_min_size(
         pos2(flaeche.left(), flaeche.bottom() - leiste_h),
@@ -3023,7 +3023,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
         let antwort = ui
             .interact(r, ui.id().with(("pipknopf", i)), egui::Sense::click())
             .on_hover_text(*tip);
-        // Der letzte Knopf ist das Auflegen - immer rot, sonst greift man daneben.
+        // The last button is hang-up - always red, otherwise you hit the wrong one.
         let grund = if i == 3 {
             f.bad
         } else if *aus {
@@ -3056,15 +3056,15 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
         x += gr + luecke;
     }
 
-    // --- Hinweise rechts unten, ueber der Leiste ---
+    // --- Notices at the bottom right, above the bar ---
     //
-    // WARUM hier und nicht im grossen Fenster: wer teilt, hat das grosse
-    // Fenster minimiert (sonst teilt er sich selbst). Ohne diese Hinweise
-    // bekaeme er weder Chatnachrichten noch Steuerungs- oder
-    // Beitrittsanfragen mit - die Anfrage liefe ins Leere.
+    // WHY here and not in the big window: whoever shares has minimised the big
+    // window (otherwise they would share themselves). Without these notices they
+    // would receive neither chat messages nor control or
+    // join requests - the request would go nowhere.
     //
-    // WICHTIG: sie stehen im MINI-Fenster, nicht ueber dem geteilten Bild.
-    // Sonst laese der halbe Raum die private Chatnachricht mit.
+    // IMPORTANT: they sit in the MINI window, not above the shared image.
+    // Otherwise half the room would read the private chat message.
     let mut hinweise: Vec<(String, Option<(Aktion, Aktion)>)> = Vec::new();
     for (id, name) in s.steuer_anfragen.iter() {
         hinweise.push((
@@ -3089,7 +3089,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
             ));
         }
     }
-    // Hoechstens drei - mehr wuerde das kleine Fenster zumauern.
+    // At most three - more would wall in the small window.
     hinweise.truncate(3);
     let mut hin_hoehe = 0.0;
     if !hinweise.is_empty() {
@@ -3166,7 +3166,7 @@ pub fn pip_inhalt(ui: &mut egui::Ui, s: &Sicht, b: &Bilder, selbst: &mut bool) -
 
 // --------------------------------------------------- Beispiele zum Pruefen
 
-/// Wie viele Beispielzustaende es gibt.
+/// How many example states there are.
 pub const BEISPIELE: usize = 12;
 
 /// Beispielzustand des Beitritts-Schirms (fuer --meetdemo).
@@ -3188,12 +3188,12 @@ pub fn beispiel_beitritt() -> Beitritt {
     }
 }
 
-/// Ein Beispielzustand: (Name, Sicht, Fensterzustand).
+/// An example state: (name, view, window state).
 ///
-/// WARUM das hier steht und nicht im Test: `--uitest` rendert damit alle
-/// Ansichten headless durch UND `--meetdemo` macht davon echte Bilder. Beide
-/// sehen dadurch garantiert dasselbe - sonst prueft man am Ende ein anderes
-/// Fenster, als der Kunde bekommt.
+/// WHY this lives here and not in the test: `--uitest` renders all
+/// views headless with it AND `--meetdemo` makes real images from it. Both
+/// thereby see guaranteed the same thing - otherwise you end up checking a different
+/// window than the one the customer gets.
 pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     let namen = ["Justin", "Anna Berger", "Cem", "Dora", "Emil", "Frida"];
     let mach = |anzahl: usize, mit_schirm: bool, warteraum: bool| {
@@ -3296,7 +3296,7 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 ("Surface Panel".to_string(), 2496, 1664),
                 ("Generic PnP Monitor".to_string(), 2160, 1440),
             ],
-            // (Beispiel 10 setzt den Bereich weiter unten von Hand.)
+            // (Example 10 sets the area further below by hand.)
         }
     };
     let zu = |seite: bool, reiter: Reiter, platz: Kameraplatz, voll: bool| Fensterzustand {
@@ -3306,9 +3306,9 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
         vollbild: voll,
         ..Default::default()
     };
-    // Der Einstellungs-Schirm braucht einen eigenen Beispielzustand, sonst
-    // wuerde er in --uitest nie gezeichnet und ein Fehler darin faellt erst
-    // beim Nutzer auf.
+    // The settings screen needs its own example state, otherwise it
+    // would never be drawn in --uitest and an error in it would only be
+    // noticed by the user.
     let mit_einstellungen = || Fensterzustand {
         einstellungen_offen: true,
         ..Default::default()
@@ -3354,9 +3354,9 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
             mach(3, false, false),
             mit_einstellungen(),
         ),
-        // Der Zoom im geteilten Bildschirm - sonst wuerde die Lupe samt
-        // Leiste nie gezeichnet und ein Fehler darin faellt erst dem
-        // Zuschauer auf.
+        // The zoom in the shared screen - otherwise the magnifier together with
+        // its bar would never be drawn and an error in it would only be
+        // noticed by the viewer.
         9 => (
             "Bildschirm hineingezoomt",
             mach(3, true, false),
@@ -3375,9 +3375,9 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
                 ..Default::default()
             },
         ),
-        // Der SCHARFE Zoom: der Sender schickt schon genau diesen Ausschnitt.
-        // Dann muss das ankommende Bild GANZ gezeigt werden - wuerde hier
-        // noch einmal gezoomt, waere es doppelt.
+        // The SHARP zoom: the sender already sends exactly this section.
+        // Then the incoming image must be shown COMPLETELY - if zoomed
+        // once more here, it would be doubled.
         10 => (
             "Bildschirm scharf gezoomt",
             {
@@ -3400,8 +3400,8 @@ pub fn beispiel(nr: usize) -> (&'static str, Sicht, Fensterzustand) {
     }
 }
 
-/// Prueffbilder als Kamera- und Bildschirminhalt. Ein Schachbrett zeigt
-/// sofort, ob zugeschnitten, gestreckt oder gespiegelt wird.
+/// Test images as camera and screen content. A chessboard shows
+/// at once whether it is cropped, stretched or mirrored.
 pub fn pruefbilder(ctx: &egui::Context) -> Bilder {
     let muster = |b: usize, h: usize, ton: u8| {
         let mut px = vec![0u8; b * h * 4];
@@ -3443,12 +3443,12 @@ mod tests {
 
     #[test]
     fn aufteilung_macht_kacheln_so_gross_wie_moeglich() {
-        // 4 Leute auf einer breiten Flaeche: 2x2 ist besser als 4x1.
+        // 4 people on a wide area: 2x2 is better than 4x1.
         let (spalten, breite) = beste_aufteilung(vec2(1200.0, 700.0), 4);
         assert_eq!(spalten, 2, "2x2 haette die groesseren Kacheln");
         assert!(breite > 300.0, "Kachel zu klein: {}", breite);
-        // Einer allein bekommt hoechstens 70 % der Breite - sonst wirkt es
-        // wie ein Fehler, nicht wie ein Meeting.
+        // One alone gets at most 70 % of the width - otherwise it looks
+        // like an error, not like a meeting.
         let (_, allein) = beste_aufteilung(vec2(1200.0, 700.0), 1);
         assert!(allein <= 1200.0 * 0.7 + 0.5, "allein zu breit: {}", allein);
     }
@@ -3460,8 +3460,8 @@ mod tests {
         assert_eq!(b, 0.0);
     }
 
-    /// Der Ausschnitt muss IMMER ganz im Bild liegen - sonst sieht man am
-    /// Rand schwarze Streifen oder gestreckte Bildpunkte.
+    /// The section must ALWAYS lie completely within the image - otherwise you see
+    /// black stripes at the edge or stretched pixels.
     #[test]
     fn zoom_ausschnitt_bleibt_im_bild() {
         for zoom in [1.0f32, 1.5, 2.0, 3.7, 8.0] {
@@ -3480,8 +3480,8 @@ mod tests {
         }
     }
 
-    /// Sendet der andere schon genau das gewuenschte Fenster, ist das
-    /// ankommende Bild GANZ zu zeigen - dann sind es echte Bildpunkte.
+    /// If the other already sends exactly the wanted window, the
+    /// incoming image is to be shown COMPLETELY - then they are real pixels.
     #[test]
     fn scharfer_zoom_zeigt_das_ganze_bild() {
         let fenster = Rect::from_min_size(pos2(0.25, 0.25), vec2(0.5, 0.5));
@@ -3490,7 +3490,7 @@ mod tests {
         assert!((uv.max.x - 1.0).abs() < 1e-5 && (uv.max.y - 1.0).abs() < 1e-5);
     }
 
-    /// Sendet er alles, verhaelt sich die Lupe wie vorher.
+    /// If it sends everything, the magnifier behaves as before.
     #[test]
     fn ohne_ausschnitt_bleibt_die_lupe_wie_gehabt() {
         let ganz = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -3498,8 +3498,8 @@ mod tests {
         assert_eq!(zoom_uv(fenster, ganz), fenster);
     }
 
-    /// Halbwegs: er sendet mehr als gewuenscht - dann wird der Rest
-    /// weggeschnitten, aber KEIN Stueck doppelt gezoomt.
+    /// Halfway: it sends more than wanted - then the rest is
+    /// cut away, but NO piece is zoomed twice.
     #[test]
     fn groesserer_ausschnitt_wird_richtig_verrechnet() {
         let bereich = Rect::from_min_size(pos2(0.2, 0.2), vec2(0.6, 0.6));
@@ -3509,8 +3509,8 @@ mod tests {
         assert!((uv.width() - 0.5).abs() < 1e-5, "Breite falsch: {}", uv.width());
     }
 
-    /// Zieht der Zuschauer schneller, als der Sender umstellt, darf nichts
-    /// aus dem Bild laufen - lieber am Rand stehen bleiben.
+    /// If the viewer drags faster than the sender switches, nothing may
+    /// run out of the image - better to stay at the edge.
     #[test]
     fn fenster_ausserhalb_bleibt_im_bild() {
         let bereich = Rect::from_min_size(pos2(0.5, 0.5), vec2(0.2, 0.2));
@@ -3527,7 +3527,7 @@ mod tests {
         assert_eq!(a, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
     }
 
-    /// Doppelte Vergroesserung in der Mitte = genau das mittlere Viertel.
+    /// Double magnification in the middle = exactly the middle quarter.
     #[test]
     fn zoom_zwei_nimmt_die_mitte() {
         let a = zoom_ausschnitt(2.0, vec2(0.5, 0.5));

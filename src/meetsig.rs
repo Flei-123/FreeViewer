@@ -1,19 +1,19 @@
-//! Natives Meeting - Stufe 1: die Signalisierung ohne Browser.
+//! Native meeting - stage 1: signalling without a browser.
 //!
-//! Bisher lief das Meeting im Client in einem nackten Browserfenster. Der
-//! Browser hat dabei ALLES gemacht: Verhandlung mit dem Medienserver, Ton,
-//! Bild, Echo-Unterdrueckung, Kacheln. Fuer die native Fassung bauen wir das
-//! Stueck fuer Stueck selbst nach. Dieses Modul ist der erste Stein: die
-//! Steuerleitung zum Medienserver (WebSocket, JSON) - also alles, was KEIN
-//! Ton und kein Bild ist: beitreten, Teilnehmerliste, Chat, Handzeichen,
-//! Stummschalten, Warteraum, Gastgeber-Eingriffe.
+//! Until now the meeting in the client ran in a bare browser window. The
+//! browser did EVERYTHING there: negotiation with the media server, audio,
+//! video, echo suppression, tiles. For the native version we rebuild this
+//! piece by piece ourselves. This module is the first stone: the
+//! control line to the media server (WebSocket, JSON) - i.e. everything that is NOT
+//! audio and not video: join, participant list, chat, raised hand,
+//! mute, waiting room, host interventions.
 //!
-//! Bewusst nur mit dem, was FreeViewer sowieso schon dabei hat
-//! (tokio + tokio-tungstenite + serde_json) - kein neuer Fremdcode.
+//! Deliberately only with what FreeViewer already has on board
+//! (tokio + tokio-tungstenite + serde_json) - no new third-party code.
 //!
-//! Das Protokoll ist dasselbe, das die Browserseite spricht (Server:
-//! freemeet-sfu/src/proto.rs). Jede Nachricht traegt `v` (Protokollversion);
-//! unbekannte Nachrichten werden ruhig verworfen statt die Sitzung zu killen.
+//! The protocol is the same one the browser side speaks (server:
+//! freemeet-sfu/src/proto.rs). Every message carries `v` (protocol version);
+//! unknown messages are quietly discarded instead of killing the session.
 
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -23,10 +23,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Protokollversion, die dieser Client spricht.
+/// Protocol version this client speaks.
 pub const PROTO_VERSION: u16 = 1;
 
-/// Ein Teilnehmer, so wie ihn der Server beschreibt.
+/// A participant, as the server describes it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Teilnehmer {
     pub id: u64,
@@ -34,7 +34,7 @@ pub struct Teilnehmer {
     pub ton_aus: bool,
     pub bild_aus: bool,
     pub hand: bool,
-    /// Nicht leer = dieser Teilnehmer erlaubt Fernsteuerung ueber FreeViewer.
+    /// Not empty = this participant allows remote control via FreeViewer.
     pub fvid: String,
 }
 
@@ -65,10 +65,10 @@ impl Teilnehmer {
     }
 }
 
-/// Was der Oberflaeche gemeldet wird.
+/// What is reported to the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ereignis {
-    /// Der Server hat uns hereingelassen.
+    /// The server has let us in.
     Willkommen {
         ich: u64,
         raum: String,
@@ -97,7 +97,7 @@ pub enum Ereignis {
         art: String,
         an: bool,
     },
-    /// Der Gastgeber hat UNS stummgeschaltet - die Spur muss wirklich aus.
+    /// The host has muted US - the track must really be off.
     ZwangStumm {
         art: String,
     },
@@ -107,35 +107,35 @@ pub enum Ereignis {
         peer: u64,
         fvid: String,
     },
-    /// Jemand bittet MICH um die Steuerung meines geteilten Bildschirms.
-    /// Kommt nur beim Teilenden an; der Server prueft anhand der Spuren,
-    /// wer wirklich teilt.
+    /// Someone asks ME for control of my shared screen.
+    /// Arrives only at the sharer; the server checks from the tracks
+    /// who is really sharing.
     SteuerungAngefragt {
         peer: u64,
         name: String,
     },
-    /// Antwort auf MEINE Anfrage. `von` = wer entschieden hat.
-    /// `fvid` ist bei einer Zusage die FreeViewer-Nummer des Teilenden -
-    /// ohne sie waere die Zusage folgenlos, weil der Client nicht wuesste,
-    /// wohin er sich verbinden soll. Bei einer Absage leer.
+    /// Answer to MY request. `von` = who decided.
+    /// With an approval `fvid` is the FreeViewer number of the sharer -
+    /// without it the approval would be inconsequential, because the client would not know
+    /// where to connect. Empty for a refusal.
     SteuerungBeantwortet {
         von: u64,
         gewaehrt: bool,
         fvid: String,
     },
-    /// Eine Freigabe wurde zurueckgenommen - entweder vom Teilenden oder
-    /// weil er das Teilen beendet hat.
+    /// A release was withdrawn - either by the sharer or
+    /// because they stopped sharing.
     SteuerungZurueck {
         peer: u64,
     },
-    /// Wo steht der Mauszeiger dessen, der gerade teilt (0..1 in SEINEM
-    /// Bild)? Damit kann ein Zuschauer genau dorthin zoomen.
+    /// Where is the mouse pointer of whoever is currently sharing (0..1 in THEIR
+    /// image)? This lets a viewer zoom exactly there.
     Zeiger {
         peer: u64,
         x: f32,
         y: f32,
     },
-    /// Ein Zuschauer bittet um einen Ausschnitt MEINES Bildschirms.
+    /// A viewer asks for a section of MY screen.
     Bereichswunsch {
         peer: u64,
         x: f32,
@@ -143,7 +143,7 @@ pub enum Ereignis {
         w: f32,
         h: f32,
     },
-    /// Ein Sender teilt mit, welchen Ausschnitt er gerade schickt.
+    /// A sender reports which section it is currently sending.
     Bereich {
         peer: u64,
         x: f32,
@@ -151,12 +151,12 @@ pub enum Ereignis {
         w: f32,
         h: f32,
     },
-    /// Wir sitzen im Warteraum.
+    /// We are in the waiting room.
     Wartet {
         titel: String,
         text: String,
     },
-    /// Jemand wartet vor der Tuer (nur beim Gastgeber).
+    /// Someone is waiting at the door (host only).
     WarteDazu {
         peer: u64,
         name: String,
@@ -170,16 +170,16 @@ pub enum Ereignis {
     Abgewiesen(String),
     Rausgeworfen(String),
     Beendet(String),
-    /// Der Server sagt, welche m-line zu wem gehoert - ohne das weiss der
-    /// native Client nicht, wessen Stimme da gerade ankommt.
+    /// The server says which m-line belongs to whom - without it the
+    /// native client does not know whose voice is arriving.
     Spur {
         mid: String,
         peer: u64,
         art: String,
         bildschirm: bool,
     },
-    /// SDP-Angebot/-Antwort des Servers. Kommt erst in Stufe 2 zum Einsatz,
-    /// wird aber schon jetzt sauber durchgereicht statt verworfen.
+    /// SDP offer/answer from the server. Only used from stage 2,
+    /// but already passed on cleanly now instead of being discarded.
     Sdp {
         art: String,
         sdp: String,
@@ -191,7 +191,7 @@ pub enum Ereignis {
     Getrennt(String),
 }
 
-/// Was die Oberflaeche der Sitzung sagen kann.
+/// What the UI can tell the session.
 #[derive(Debug, Clone)]
 enum Befehl {
     Chat(String),
@@ -203,16 +203,16 @@ enum Befehl {
     Bildschirm(bool),
     /// Fernsteuerung anbieten/zurueckziehen. Leere fvid = zurueckgezogen.
     Fernsteuerung { an: bool, fvid: String },
-    /// Rohes JSON - dafuer da, dass Stufe 2 (Angebot/Antwort) nichts umbauen muss.
+    /// Raw JSON - there so that stage 2 (offer/answer) does not have to rebuild anything.
     Roh(serde_json::Value),
     Verlassen,
 }
 
-/// Eine laufende Meeting-Sitzung. Wird beim Fallenlassen sauber beendet.
+/// A running meeting session. Is ended cleanly when dropped.
 pub struct Sitzung {
     befehle: UnboundedSender<Befehl>,
     ereignisse: Receiver<Ereignis>,
-    /// Zuletzt gesehener Zustand - damit die Oberflaeche nicht selbst buchfuehren muss.
+    /// Last seen state - so the UI does not have to do its own bookkeeping.
     zustand: Arc<Mutex<Zustand>>,
 }
 
@@ -253,7 +253,7 @@ impl Sitzung {
     pub fn hand(&self, an: bool) {
         let _ = self.befehle.send(Befehl::Hand(an));
     }
-    /// art: "audio" oder "video"; an = ausgeschaltet (so wie im Protokoll).
+    /// kind: "audio" or "video"; an = switched off (as in the protocol).
     pub fn stumm(&self, art: &str, an: bool) {
         let _ = self.befehle.send(Befehl::Stumm {
             art: art.to_string(),
@@ -263,15 +263,15 @@ impl Sitzung {
     pub fn bildschirm(&self, an: bool) {
         let _ = self.befehle.send(Befehl::Bildschirm(an));
     }
-    /// Eigene Zeigerposition im geteilten Bild melden (0..1). Nur sinnvoll,
-    /// solange wirklich geteilt wird.
+    /// Report the own pointer position in the shared image (0..1). Only useful
+    /// while sharing is really going on.
     pub fn zeiger(&self, x: f32, y: f32) {
         let _ = self
             .befehle
             .send(Befehl::Roh(serde_json::json!({"t":"cursor","x":x,"y":y})));
     }
 
-    /// Als Zuschauer: um einen Ausschnitt des Bildschirms von `an_peer` bitten.
+    /// As viewer: ask `an_peer` for a section of the screen.
     pub fn bereichswunsch(&self, an_peer: u64, x: f32, y: f32, w: f32, h: f32) {
         let _ = self.befehle.send(Befehl::Roh(
             serde_json::json!({"t":"region-req","to":an_peer,"x":x,"y":y,"w":w,"h":h}),
@@ -285,18 +285,18 @@ impl Sitzung {
         ));
     }
 
-    /// Als Zuschauer: den Teilenden um die Steuerung bitten. Der Server
-    /// sucht sich selbst heraus, wer gerade teilt - wir muessen (und
-    /// koennen) das nicht behaupten.
+    /// As viewer: ask the sharer for control. The server
+    /// finds out for itself who is sharing - we do not have to (and
+    /// cannot) claim that.
     pub fn steuerung_anfragen(&self) {
         let _ = self
             .befehle
             .send(Befehl::Roh(serde_json::json!({"t":"control-request"})));
     }
 
-    /// Als Teilender: eine Anfrage beantworten. `gewaehrt=false` lehnt ab.
-    /// `fvid` ist die EIGENE FreeViewer-Nummer; der Server reicht sie nur
-    /// an den Genehmigten weiter, nicht in den Raum.
+    /// As sharer: answer a request. `gewaehrt=false` refuses.
+    /// `fvid` is the OWN FreeViewer number; the server passes it on only
+    /// to the approved person, not into the room.
     pub fn steuerung_beantworten(&self, peer: u64, gewaehrt: bool, fvid: &str) {
         let _ = self.befehle.send(Befehl::Roh(serde_json::json!({
             "t": "control-answer",
@@ -306,7 +306,7 @@ impl Sitzung {
         })));
     }
 
-    /// Als Teilender: eine erteilte Freigabe wieder einziehen. `None` = alle.
+    /// As sharer: withdraw a granted release. `None` = all.
     pub fn steuerung_zuruecknehmen(&self, peer: Option<u64>) {
         let mut v = serde_json::json!({"t":"control-revoke"});
         if let (Some(p), Some(o)) = (peer, v.as_object_mut()) {
@@ -315,8 +315,8 @@ impl Sitzung {
         let _ = self.befehle.send(Befehl::Roh(v));
     }
 
-    /// Fernsteuerung ueber FreeViewer anbieten (`an`) oder zuruecknehmen.
-    /// `fvid` ist die eigene FreeViewer-Nummer; beim Zuruecknehmen egal.
+    /// Offer remote control via FreeViewer (`an`) or withdraw it.
+    /// `fvid` is the own FreeViewer number; irrelevant when withdrawing.
     pub fn fernsteuerung(&self, an: bool, fvid: &str) {
         let _ = self.befehle.send(Befehl::Fernsteuerung {
             an,
@@ -351,7 +351,7 @@ impl Drop for Sitzung {
     }
 }
 
-/// Adresse der Signalisierung aus der Meet-Adresse ableiten:
+/// Derive the signalling address from the Meet address:
 /// https://meet.fleitec.com  ->  wss://meet.fleitec.com/ws
 pub fn ws_adresse(basis: &str) -> String {
     let b = basis.trim_end_matches('/');
@@ -371,11 +371,11 @@ fn umschlag(mut v: serde_json::Value) -> String {
     v.to_string()
 }
 
-/// Einem Meeting beitreten. Laeuft im Hintergrund weiter, bis `verlassen()`
-/// gerufen wird oder die Sitzung fallengelassen wird.
-/// `e2e` sagt dem Server, ob WIR Ende-zu-Ende koennen. Das muss schon in der
-/// Beitrittsnachricht stehen: der Server handelt daraus aus, ob der Raum
-/// verschluesselt ist, und weist ab, wer nicht mithalten kann.
+/// Join a meeting. Keeps running in the background until `verlassen()`
+/// is called or the session is dropped.
+/// `e2e` tells the server whether WE can do end-to-end. That has to be in the
+/// join message already: the server negotiates from it whether the room
+/// is encrypted, and rejects whoever cannot keep up.
 #[allow(clippy::too_many_arguments)]
 pub fn beitreten(
     basis: &str,
@@ -401,9 +401,9 @@ pub fn beitreten(
         fvid.to_string(),
     );
 
-    // Eigener Faden mit eigener kleiner Laufzeit: die Oberflaeche soll von
-    // der Netzarbeit nichts merken, und wir wollen nicht davon abhaengen,
-    // dass irgendwo sonst schon eine Laufzeit laeuft.
+    // Own thread with its own small runtime: the UI should not notice
+    // anything of the network work, and we do not want to depend on
+    // a runtime already running somewhere else.
     std::thread::Builder::new()
         .name("meetsig".into())
         .spawn(move || {
@@ -459,11 +459,11 @@ async fn lauf(
         z.verbunden = true;
     }
 
-    // Beitritt. Die Faehigkeiten sind ehrlich: Simulcast kann der native
-    // Client noch nicht. Ende-zu-Ende meldet er genau dann, wenn ein
-    // Schluessel aus dem Link vorliegt - der Server entscheidet daraus, ob
-    // der Raum verschluesselt laeuft. Stuende hier hart "false", waere der
-    // eigene Client aus seinem eigenen verschluesselten Meeting ausgesperrt.
+    // Join. The capabilities are honest: the native client cannot do
+    // simulcast yet. It reports end-to-end exactly when a key from
+    // the link is present - the server decides from that whether
+    // the room runs encrypted. If a hard "false" stood here, the
+    // own client would be locked out of its own encrypted meeting.
     let join = umschlag(json!({
         "t": "join",
         "room": raum,
@@ -489,7 +489,7 @@ async fn lauf(
                     Ok(Message::Text(t)) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
                             if verarbeiten(&v, ev, zustand) {
-                                // Sitzung ist zu Ende (Kick/Ende/Abweisung)
+                                // Session is over (kick/end/rejection)
                                 let _ = ws.close(None).await;
                                 return Ok(());
                             }
@@ -500,7 +500,7 @@ async fn lauf(
                     Err(e) => return Err(anyhow!("Verbindung: {}", e)),
                 }
             }
-            // ---- von der Oberflaeche --------------------------------------
+            // ---- from the UI --------------------------------------
             b = befehle.recv() => {
                 let Some(b) = b else { break };
                 let raus = match b {
@@ -510,8 +510,8 @@ async fn lauf(
                     Befehl::Stumm { art, an } => Some(json!({"t":"mute","kind":art,"on":an})),
                     Befehl::Bildschirm(an) => Some(json!({"t":"screen","on":an})),
                     Befehl::Fernsteuerung { an, fvid } => {
-                        // Nur Ziffern raus - die Nummer kommt aus der eigenen
-                        // Einstellung, aber der Server erwartet sie sauber.
+                        // Only digits out - the number comes from the own
+                        // setting, but the server expects it clean.
                         let nr: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
                         Some(json!({"t":"remote","on":an,"fvid": if an { nr } else { String::new() }}))
                     }
@@ -541,7 +541,7 @@ async fn lauf(
     Ok(())
 }
 
-/// Eine Servernachricht verarbeiten. Rueckgabe `true` = Sitzung ist vorbei.
+/// Process a server message. Return `true` = session is over.
 fn verarbeiten(
     v: &serde_json::Value,
     ev: &Sender<Ereignis>,
@@ -615,8 +615,8 @@ fn verarbeiten(
         "cursor" => {
             let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(-1.0) as f32;
             let (x, y) = (f("x"), f("y"));
-            // Werte ausserhalb des Bildes waeren eine Falschmeldung - lieber
-            // gar nichts sagen, als auf eine erfundene Stelle zu zoomen.
+            // Values outside the image would be a false report - better to say
+            // nothing at all than to zoom to an invented spot.
             if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
                 let _ = ev.send(Ereignis::Zeiger {
                     peer: u64f("peer"),
@@ -772,21 +772,21 @@ fn verarbeiten(
                 text: strf("msg"),
             });
         }
-        // pong, quality, transport, screen-off: fuer Stufe 1 ohne Belang.
+        // pong, quality, transport, screen-off: irrelevant for stage 1.
         _ => {}
     }
     false
 }
 
 
-/// Verbindung aufbauen - und zwar zu JEDER Adresse, die der Name liefert.
+/// Establish the connection - to EVERY address the name resolves to.
 ///
-/// Warum nicht einfach connect_async? Im Heimnetz zeigt meet.fleitec.com auf
-/// ZWEI Adressen: die oeffentliche und eine interne (Split-DNS). Die interne
-/// beantwortet aber keinen Port 443. Wer nur die erste Adresse probiert,
-/// haengt 20 Sekunden im Zeitueberschreitung-Fehler 10060 fest - genau das
-/// ist auf FLEI-ONE passiert. Also: alle Adressen durchprobieren, oeffentliche
-/// zuerst, je 4 Sekunden Geduld.
+/// Why not simply connect_async? On the home network meet.fleitec.com points to
+/// TWO addresses: the public one and an internal one (split DNS). The internal
+/// one does not answer port 443, though. Whoever tries only the first address
+/// hangs for 20 seconds in the timeout error 10060 - exactly that
+/// happened on FLEI-ONE. So: try all addresses, public ones
+/// first, 4 seconds of patience each.
 async fn verbinden(
     url: &str,
 ) -> Result<(
@@ -813,18 +813,18 @@ async fn verbinden(
     if adressen.is_empty() {
         return Err(anyhow!("Name {} liefert keine Adresse", host));
     }
-    // Oeffentliche Adressen zuerst - interne sind im Heimnetz oft Sackgassen.
+    // Public addresses first - internal ones are often dead ends on the home network.
     adressen.sort_by_key(|a| match a.ip() {
         std::net::IpAddr::V4(v) => u8::from(v.is_private() || v.is_loopback()),
         std::net::IpAddr::V6(_) => 1,
     });
 
     let mut letzter = String::new();
-    // Zwei Anlaeufe je Adresse mit grosszuegiger Frist: gemessen an Justins
-    // Rechner braucht der erste Verbindungsaufbau ueber die eigene
-    // oeffentliche Adresse (NAT-Rueckschleife durch die Fritzbox) manchmal
-    // laenger als vier Sekunden. Mit einem einzigen kurzen Versuch stand
-    // dort sporadisch "keine Antwort", obwohl das Netz in Ordnung war.
+    // Two attempts per address with a generous deadline: measured on Justin's
+    // machine, the first connection setup via the own
+    // public address (NAT loopback through the Fritzbox) sometimes takes
+    // longer than four seconds. With a single short attempt
+    // "no answer" sporadically appeared there, although the network was fine.
     for runde in 0..2u8 {
         for a in adressen.iter().copied() {
             let versuch = tokio::time::timeout(
@@ -900,8 +900,8 @@ mod tests {
 
     #[test]
     fn zusage_bringt_die_nummer_mit() {
-        // Ohne die Nummer waere eine Zusage folgenlos - der Client wuesste
-        // nicht, wohin er sich verbinden soll. Genau das muss ankommen.
+        // Without the number an approval would be inconsequential - the client would not know
+        // where to connect. Exactly that must arrive.
         let (tx, rx) = channel();
         let z = Arc::new(Mutex::new(Zustand::default()));
         let v = json!({"v":1,"t":"control-answered","by":4,"grant":true,"fvid":"497628420"});

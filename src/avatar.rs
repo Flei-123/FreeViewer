@@ -1,23 +1,23 @@
-//! Ein selbst gezeichneter Avatar statt des Kamerabilds.
+//! A self-drawn avatar instead of the camera image.
 //!
-//! Warum ueberhaupt: nicht jeder will jederzeit sein Gesicht (und sein
-//! Wohnzimmer) zeigen, aber eine schwarze Kachel ist das andere Extrem -
-//! man wirkt abwesend. Der Avatar ist der Mittelweg: er bewegt den Mund
-//! zum eigenen Mikrofonpegel, blinzelt und atmet leicht. Damit sieht die
-//! Runde, dass da jemand ist und wer gerade spricht.
+//! Why at all: not everyone wants to show their face (and their
+//! living room) at all times, but a black tile is the other extreme -
+//! you seem absent. The avatar is the middle way: it moves the mouth
+//! to the own microphone level, blinks and breathes lightly. This way the
+//! group sees that someone is there and who is speaking.
 //!
-//! Bewusst KOMPLETT selbst gezeichnet - ein paar Ellipsen und Rechtecke,
-//! keine Fremdkiste, keine Bilddateien, kein Modell. Das kostet nichts,
-//! laeuft ueberall gleich und laesst sich pruefen: die Tests messen
-//! wirklich Bildpunkte.
+//! Deliberately COMPLETELY self-drawn - a few ellipses and rectangles,
+//! no third-party crate, no image files, no model. That costs nothing,
+//! runs the same everywhere and can be checked: the tests
+//! really measure pixels.
 //!
-//! Der Mundausschlag kommt aus dem Pegel, den das Meeting ohnehin misst
-//! (`NativMeet::pegel`). Es wird NICHT so getan, als wuerde die Lippen-
-//! bewegung zum Gesprochenen passen - das koennte nur ein Modell, und ein
-//! erfundenes "Lippenlesen" waere eine Luege.
+//! The mouth movement comes from the level that the meeting measures anyway
+//! (`NativMeet::pegel`). It does NOT pretend that the lip
+//! movement matches what is spoken - only a model could do that, and an
+//! invented "lip reading" would be a lie.
 
-/// Wie der Avatar aussieht. Alles ist einstellbar, sonst haetten alle
-/// dasselbe Gesicht.
+/// What the avatar looks like. Everything is adjustable, otherwise everyone would have
+/// the same face.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aussehen {
     /// Hautton 0..5
@@ -115,8 +115,8 @@ impl Blatt<'_> {
         }
     }
 
-    /// Gefuellte Ellipse mit weichem Rand (ein Bildpunkt Uebergang) -
-    /// ohne den sieht ein Gesicht aus wie aus Bauklotzen.
+    /// Filled ellipse with a soft edge (one pixel of transition) -
+    /// without it a face looks like made of building blocks.
     fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Farbe) {
         if rx <= 0.0 || ry <= 0.0 {
             return;
@@ -130,7 +130,7 @@ impl Blatt<'_> {
                 let dx = (x as f32 + 0.5 - cx) / rx;
                 let dy = (y as f32 + 0.5 - cy) / ry;
                 let d = dx * dx + dy * dy;
-                // 1.0 = Rand. Der Uebergang haengt an der kleineren Achse.
+                // 1.0 = edge. The transition depends on the smaller axis.
                 let weich = 1.6 / rx.min(ry).max(1.0);
                 let deckung = ((1.0 - d) / weich + 0.5).clamp(0.0, 1.0);
                 self.punkt(x, y, c, deckung);
@@ -138,7 +138,7 @@ impl Blatt<'_> {
         }
     }
 
-    /// Nur die obere Haelfte einer Ellipse (fuer Haare und Lider).
+    /// Only the upper half of an ellipse (for hair and eyelids).
     fn halbellipse_oben(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Farbe) {
         let x0 = (cx - rx - 1.0).floor() as i32;
         let x1 = (cx + rx + 1.0).ceil() as i32;
@@ -164,11 +164,11 @@ impl Blatt<'_> {
     }
 }
 
-/// Den Avatar zeichnen. `out` wird auf `breite*hoehe*3` gebracht (RGB).
+/// Draw the avatar. `out` is brought to `breite*hoehe*3` (RGB).
 ///
-/// * `mund` 0..1  - wie weit der Mund offen ist (aus dem Mikrofonpegel)
-/// * `blinzeln` 0..1 - 0 offen, 1 geschlossen
-/// * `atmen` -1..1 - leichte Auf-/Abbewegung des Kopfes
+/// * `mund` 0..1  - how far the mouth is open (from the microphone level)
+/// * `blinzeln` 0..1 - 0 open, 1 closed
+/// * `atmen` -1..1 - slight up/down movement of the head
 pub fn zeichnen(
     a: &Aussehen,
     breite: u32,
@@ -182,7 +182,7 @@ pub fn zeichnen(
     out.clear();
     out.resize((b * h * 3) as usize, 0);
     let grund = hole(&GRUNDFARBEN, a.grund);
-    // Leichter Verlauf nach unten - eine voellig flache Flaeche wirkt tot.
+    // Slight gradient downwards - a completely flat area looks dead.
     for y in 0..h {
         let f = 1.0 + 0.25 * (y as f32 / h as f32);
         let c = tonen(grund, f);
@@ -199,8 +199,8 @@ pub fn zeichnen(
         h,
     };
 
-    // Alles in Anteilen der kleineren Kante, damit es in jedem
-    // Seitenverhaeltnis stimmt.
+    // Everything in fractions of the smaller edge, so that it fits in every
+    // aspect ratio.
     let e = b.min(h) as f32;
     let mx = b as f32 * 0.5;
     let my = h as f32 * 0.5 + atmen * e * 0.008;
@@ -266,7 +266,7 @@ pub fn zeichnen(
         }
     }
 
-    // Augen: Weiss, Iris, Pupille - und das Lid als Hautstreifen darueber.
+    // Eyes: white, iris, pupil - and the eyelid as a skin strip above.
     let ax = e * 0.085;
     let ay = my - e * 0.045;
     let arx = e * 0.048;
@@ -283,7 +283,7 @@ pub fn zeichnen(
             ary * 0.16,
             [0xFF, 0xFF, 0xFF],
         );
-        // Lid: faehrt beim Blinzeln von oben herunter.
+        // Eyelid: comes down from above when blinking.
         if blinzeln > 0.01 {
             let lid = ary * 2.0 * blinzeln.clamp(0.0, 1.0);
             bl.rechteck(cx - arx - 1.0, ay - ary - 1.0, cx + arx + 1.0, ay - ary + lid, haut);
@@ -305,7 +305,7 @@ pub fn zeichnen(
             let cx = mx + s * ax;
             bl.ellipse(cx, ay, arx * 1.5, ary * 1.7, rand);
             bl.ellipse(cx, ay, arx * 1.32, ary * 1.48, haut);
-            // Glas leicht andeuten - sonst sieht es aus wie ein Loch.
+            // Hint at glass lightly - otherwise it looks like a hole.
             bl.ellipse(cx, ay, arx, ary, [0xF2, 0xF2, 0xF5]);
             bl.ellipse(cx, ay, arx * 0.52, ary * 0.72, auge);
             bl.ellipse(cx, ay, arx * 0.24, ary * 0.34, [0x11, 0x11, 0x14]);
@@ -328,13 +328,13 @@ pub fn zeichnen(
         bl.ellipse(mx, my + e * 0.085, kr_x * 0.52, kr_y * 0.20, haut);
     }
 
-    // Mund - das ist der bewegte Teil.
+    // Mouth - that is the moving part.
     let auf = mund.clamp(0.0, 1.0);
     let mrx = e * (0.052 + 0.020 * auf);
     let mry = e * (0.008 + 0.052 * auf);
     bl.ellipse(mx, my + e * 0.125, mrx, mry, [0x6E, 0x2C, 0x33]);
     if auf > 0.25 {
-        // Bei weit offenem Mund werden Zaehne oben sichtbar.
+        // With a wide open mouth, teeth become visible at the top.
         bl.ellipse(
             mx,
             my + e * 0.125 - mry * 0.55,
@@ -345,13 +345,13 @@ pub fn zeichnen(
     }
 }
 
-/// Der Pegel schwankt viel zu schnell fuer einen Mund. Hier wird er
-/// geglaettet und gespreizt: leises Grundrauschen bewegt nichts, normales
-/// Sprechen bewegt deutlich.
+/// The level fluctuates far too fast for a mouth. Here it is
+/// smoothed and spread: quiet background noise moves nothing, normal
+/// speech moves clearly.
 pub fn mundstellung(pegel: f32, vorher: f32) -> f32 {
     let roh = ((pegel - 0.03) / 0.25).clamp(0.0, 1.0);
-    // Aufmachen schneller als Zumachen - so wirkt es wie ein Mund und
-    // nicht wie ein Blinker.
+    // Opening faster than closing - that way it looks like a mouth and
+    // not like a turn signal.
     if roh > vorher {
         vorher + (roh - vorher) * 0.55
     } else {
@@ -383,8 +383,8 @@ mod tests {
         // Ecke = Hintergrund, Mitte = Haut. Waeren beide gleich, waere
         // gar nichts gezeichnet worden.
         let ecke = punkt(&px, 320, 3, 3);
-        // Bewusst die WANGE: in der Bildmitte sitzen je nach Frisur die
-        // Haare, das waere ein wackliger Pruefpunkt.
+        // Deliberately the CHEEK: depending on the hairstyle, hair sits in the
+        // middle of the image, which would be a shaky check point.
         let mitte = punkt(&px, 320, 120, 185);
         assert_ne!(ecke, mitte, "es wurde offenbar nichts gezeichnet");
         let haut = HAUTTOENE[a.haut as usize];
@@ -394,12 +394,12 @@ mod tests {
         assert!(nah < 120, "in der Mitte steht keine Haut: {:?}", mitte);
     }
 
-    /// Der eigentliche Punkt der Uebung: bewegt sich der Mund WIRKLICH?
+    /// The actual point of the exercise: does the mouth REALLY move?
     #[test]
     fn offener_mund_ist_messbar_groesser_als_geschlossener() {
         let a = Aussehen::default();
         let dunkel = |px: &[u8]| {
-            // Bildpunkte im Mundbereich zaehlen, die rot-dunkel sind.
+            // Count pixels in the mouth area that are dark red.
             let mut n = 0;
             for y in 200..260u32 {
                 for x in 120..200u32 {
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn jede_einstellung_aendert_das_bild_wirklich() {
-        // Eine Auswahl, die nichts bewirkt, waere schlimmer als keine.
+        // A choice that changes nothing would be worse than none.
         let grund = Aussehen::default();
         let mut a_px = Vec::new();
         zeichnen(&grund, 160, 160, 0.0, 0.0, 0.0, &mut a_px);

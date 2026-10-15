@@ -23,8 +23,8 @@ use crate::shared::Shared;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
-/// Relative Maus (Spielmodus). Die Tastatur wird auch in der Fernwartung
-/// komplett uebernommen, die Maus aber nur im Spielmodus umgestellt.
+/// Relative mouse (game mode). The keyboard is also fully taken over
+/// in remote maintenance, but the mouse is only switched in game mode.
 static REL: AtomicBool = AtomicBool::new(false);
 static CX: AtomicI32 = AtomicI32::new(0);
 static CY: AtomicI32 = AtomicI32::new(0);

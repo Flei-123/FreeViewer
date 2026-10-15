@@ -293,8 +293,8 @@ mod win {
         /// How many "send me a frame" tokens the async MFT still owes us.
         need: i32,
         frames: u64,
-        /// Nur gesetzt, wenn der Encoder die Bilder DIREKT von der
-        /// Grafikkarte nimmt. Muss leben, solange der Encoder lebt.
+        /// Only set if the encoder takes the images DIRECTLY from the
+        /// graphics card. Must live as long as the encoder lives.
         devman: Option<IMFDXGIDeviceManager>,
     }
 
@@ -343,11 +343,11 @@ mod win {
             enc.ok_or_else(|| anyhow!("kein H.264 Encoder gefunden"))
         }
 
-        /// Encoder, der seine Bilder DIREKT als Textur von der Grafikkarte
-        /// nimmt - ohne den Umweg ueber den Hauptspeicher.
+        /// Encoder that takes its images DIRECTLY as a texture from the graphics card
+        /// - without the detour via main memory.
         ///
-        /// Nur Hardware-Encoder koennen das; ein Software-Encoder waere hier
-        /// sinnlos, weil er die Textur ohnehin herunterladen muesste.
+        /// Only hardware encoders can do that; a software encoder would be
+        /// pointless here, because it would have to download the texture anyway.
         pub fn new_d3d(dev: &ID3D11Device, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Self> {
             mf_startup();
             let w = w & !1;
@@ -373,7 +373,7 @@ mod win {
             enc.ok_or_else(|| anyhow!("kein H.264 Encoder mit Grafikkarten-Anbindung"))
         }
 
-        /// True, wenn dieser Encoder Bilder direkt von der Grafikkarte nimmt.
+        /// True if this encoder takes images directly from the graphics card.
         pub fn direkt(&self) -> bool {
             self.devman.is_some()
         }
@@ -398,8 +398,8 @@ mod win {
                         events = t.cast::<IMFMediaEventGenerator>().ok();
                     }
                 }
-                // Der Manager muss stehen, BEVOR die Formate ausgehandelt
-                // werden - danach nimmt der Treiber ihn nicht mehr an.
+                // The manager must be in place BEFORE the formats are negotiated
+                // - afterwards the driver no longer accepts it.
                 let mut devman: Option<IMFDXGIDeviceManager> = None;
                 if let Some(d) = dev {
                     let mut token = 0u32;
@@ -593,9 +593,9 @@ mod win {
             self.hineingeben(sample)
         }
 
-        /// Dasselbe, aber das Bild liegt schon als NV12-Textur auf der
-        /// Grafikkarte. Spart pro Bild einen Hin- und Rueckweg ueber den
-        /// PCIe-Bus - bei 2496x1664 rund 6 MB.
+        /// The same, but the image is already on the graphics card as an NV12 texture.
+        /// Saves a round trip per image over the
+        /// PCIe bus - about 6 MB at 2496x1664.
         pub fn encode_tex(&mut self, tex: &ID3D11Texture2D) -> Result<Vec<Chunk>> {
             if self.devman.is_none() {
                 return Err(anyhow!("dieser Encoder nimmt keine Texturen"));
@@ -623,8 +623,8 @@ mod win {
             (self.frames as i64 * dur, dur)
         }
 
-        /// Ein fertiges Sample in den Encoder schieben und abholen, was
-        /// herauskommt. Fuer beide Wege gleich.
+        /// Push a finished sample into the encoder and collect what
+        /// comes out. The same for both paths.
         fn hineingeben(&mut self, sample: IMFSample) -> Result<Vec<Chunk>> {
             let mut out = Vec::new();
             unsafe {
@@ -672,10 +672,10 @@ mod win {
         /// visible picture the host announced
         want_w: u32,
         want_h: u32,
-        /// true = die Groesse kommt aus dem Strom, nicht vom Aufrufer.
-        /// Im Meeting weiss niemand vorher, wie gross das Bild der anderen
-        /// ist - mit einer festen Wunschgroesse saehe man nur einen
-        /// Ausschnitt (genau das war beim Bildschirmteilen zu sehen).
+        /// true = the size comes from the stream, not from the caller.
+        /// In the meeting nobody knows beforehand how large the image of the others
+        /// is - with a fixed wanted size you would see only a
+        /// section (exactly that was visible when sharing the screen).
         frei: bool,
         name: String,
         nv12: Vec<u8>,
@@ -686,8 +686,8 @@ mod win {
             Self::mit_groesse(w, h, false)
         }
 
-        /// Dekodierer, der die Bildgroesse aus dem Strom uebernimmt. `w`/`h`
-        /// sind nur ein erster Anhaltspunkt fuer die Aushandlung.
+        /// Decoder that takes the image size from the stream. `w`/`h`
+        /// are only a first hint for the negotiation.
         pub fn new_auto(w: u32, h: u32) -> Result<Self> {
             Self::mit_groesse(w, h, true)
         }
@@ -777,9 +777,9 @@ mod win {
                             self.h = (size & 0xffff_ffff) as u32;
                         }
                         if self.frei {
-                            // Sichtbarer Bereich, falls der Dekodierer ihn
-                            // nennt (1080 in 1088 aufgefuellt o. ae.),
-                            // sonst die volle Flaeche.
+                            // Visible area, if the decoder
+                            // names it (1080 padded to 1088 or similar),
+                            // otherwise the full area.
                             let mut blob = [0u8; 32];
                             let mut len = 0u32;
                             let sicht = t
@@ -924,8 +924,8 @@ mod win {
 #[cfg(windows)]
 pub use win::{available, Decoder, Encoder};
 
-// Auf dem Mac uebernimmt VideoToolbox (eigene Datei, sonst wird h264.rs
-// unuebersichtlich); alles andere bekommt weiter den ehrlichen Platzhalter.
+// On the Mac VideoToolbox takes over (separate file, otherwise h264.rs
+// becomes unwieldy); everything else keeps getting the honest placeholder.
 #[cfg(target_os = "macos")]
 #[path = "h264mac.rs"]
 mod mac;
@@ -1036,10 +1036,10 @@ mod tests {
         assert!(mean < 1.5 && max <= 2, "mean {} max {}", mean, max);
     }
 
-    /// Der ganze Weg einmal durch die Maschine: Bild -> NV12 -> H.264 ->
-    /// zurueck. Laeuft ueberall, wo es einen Kodierer gibt (Windows, Mac);
-    /// auf einem nackten Linux-Server gibt es keinen, dann wird der Test
-    /// ehrlich uebersprungen statt falsch gruen zu melden.
+    /// The whole path once through the machine: image -> NV12 -> H.264 ->
+    /// back. Runs everywhere there is an encoder (Windows, Mac);
+    /// on a bare Linux server there is none, then the test is
+    /// honestly skipped instead of falsely reporting green.
     #[test]
     fn h264_hin_und_zurueck() {
         if !available() {
@@ -1080,7 +1080,7 @@ mod tests {
         assert!(bytes > 0, "nichts kodiert");
         assert!(schluessel > 0, "kein Schluesselbild");
         assert!(bilder > 0, "nichts dekodiert");
-        // Und das Bild muss auch WIRKLICH dem Original aehneln.
+        // And the image must also REALLY resemble the original.
         let (mean, _max) = rgb_vs_rgba_error(&rgb, &rgba, w, h);
         assert!(mean < 25.0, "Bild weicht zu stark ab: {}", mean);
     }

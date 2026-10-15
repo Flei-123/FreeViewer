@@ -1,11 +1,11 @@
-//! Sprachen. Jeder sichtbare Text steht genau einmal hier - Deutsch und
-//! Englisch. Weitere Sprachen sind eine weitere Spalte, sonst nichts.
+//! Languages. Every visible text appears exactly once here - German and
+//! English. Further languages are one more column, nothing else.
 //!
-//! Aufruf: `t("start.connect")`, mit Platzhalter `tf("dev.count", "7")`.
+//! Call: `t("start.connect")`, with placeholder `tf("dev.count", "7")`.
 //!
-//! WICHTIG: Diese Datei ist UTF-8 ohne BOM. Wer sie mit einem Werkzeug
-//! anfasst, das die Bytes noch einmal als UTF-8 kodiert, macht aus "ä" ein
-//! "Ã¤". Der Test `no_mojibake` unten faengt genau das ab.
+//! IMPORTANT: This file is UTF-8 without BOM. Whoever touches it with a tool
+//! that encodes the bytes as UTF-8 once more turns "ä" into
+//! "Ã¤". The test `no_mojibake` below catches exactly that.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -28,7 +28,7 @@ pub fn lang() -> &'static str {
 
 /// key, Deutsch, English
 const TABLE: &[(&str, &str, &str)] = &[
-    // Navigation und Kopfzeile
+    // Navigation and header
     ("nav.start", "Start", "Home"),
     ("nav.devices", "Geräte", "Devices"),
     ("nav.friends", "Freunde", "Friends"),
@@ -125,7 +125,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     ("start.recent", "Letzte Verbindungen", "Recent connections"),
     ("start.nosession", "Keine aktive Sitzung", "No active session"),
-    // Geräte
+    // Devices
     ("dev.count", "{} Geräte", "{} devices"),
     ("dev.add", "Hinzufügen", "Add"),
     (
@@ -334,7 +334,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("meet.opening", "Meeting wird geöffnet …", "Opening the meeting …"),
     ("meet.need_id", "Erst eine Meeting-ID eingeben.", "Enter a meeting ID first."),
     ("meet.err", "Meet-Server nicht erreichbar", "Meet server not reachable"),
-    // Das eigene Meeting-Fenster (Zoom-Ablauf)
+    // The own meeting window (Zoom flow)
     ("meet.window", "FreeViewer Meet", "FreeViewer Meet"),
     ("meet.prejoin", "Kamera und Mikrofon", "Camera and microphone"),
     ("meet.cam", "Kamera", "Camera"),
@@ -510,7 +510,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ),
     ("set.pw_dup", "Das Passwort steht schon in der Liste.", "That password is already in the list."),
     ("set.pw_max", "Mehr als 10 feste Passwörter sind nicht sinnvoll.", "More than 10 permanent passwords make no sense."),
-    // Update und Rueckmeldung
+    // Update and feedback
     ("set.update", "Update", "Update"),
     ("set.feedback", "Rückmeldung", "Feedback"),
     ("upd.check", "Nach Updates suchen", "Check for updates"),
@@ -642,7 +642,7 @@ const TABLE: &[(&str, &str, &str)] = &[
         "Damit dieser Mac freigegeben werden kann: Systemeinstellungen - Datenschutz & Sicherheit - Bildschirmaufnahme UND Bedienungshilfen fuer FreeViewer einschalten.",
         "To share this Mac: System Settings - Privacy & Security - turn on Screen Recording AND Accessibility for FreeViewer.",
     ),
-    // Lizenz (nur Marken-Builds mit dem Lizenz-Merkmal, z. B. X-Remote)
+    // Licence (only brand builds with the licence feature, e.g. X-Remote)
     ("lic.title", "Lizenz", "License"),
     (
         "lic.intro",
@@ -667,13 +667,13 @@ pub fn t(key: &str) -> &'static str {
             return marke(if en { e } else { de });
         }
     }
-    // Kein Eintrag: den Schlüssel zeigen, das fällt sofort auf
+    // No entry: show the key, that is noticed immediately
     Box::leak(key.to_string().into_boxed_str())
 }
 
-/// Andere Marke (z. B. "X-Remote"): Texte mit dem Standard-Namen folgen
-/// der Marke. Der Ersatz passiert einmal und bleibt fuer die Laufzeit
-/// bestehen - beim FreeViewer-Stand wird exakt der Tabellen-Text geliefert.
+/// Other brand (e.g. "X-Remote"): texts with the default name follow
+/// the brand. The replacement happens once and persists for the runtime
+/// - in the FreeViewer build exactly the table text is delivered.
 fn marke(s: &'static str) -> &'static str {
     if crate::brand::NAME == "FreeViewer" || !s.contains("FreeViewer") {
         return s;
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn german_texts_really_use_umlauts() {
-        // genau der Fehler, den Justin gemeldet hat: "Geraete" statt "Geräte"
+        // exactly the error Justin reported: "Geraete" instead of "Geräte"
         let ascii_sins = [
             "Geraet", "hoeren", "Groesse", "waehrend", "zuruecksetzen", "traegt", "faellt",
             "haelt", "laeuft", "waehlen", "koennen", "muessen", "moechte", "loeschen",
@@ -740,7 +740,7 @@ mod tests {
         }
     }
 
-    /// Doppelt kodiertes UTF-8 ("Ã¤" statt "ä") darf nie wieder durchrutschen.
+    /// Double-encoded UTF-8 ("Ã¤" instead of "ä") must never slip through again.
     #[test]
     fn no_mojibake() {
         let sins = ["Ã", "Â", "â€", "ï»¿"];

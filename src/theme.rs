@@ -31,7 +31,7 @@ pub struct Palette {
     pub text: Color32,
     /// dark palettes paint the soft background orbs, light ones do not
     pub dark: bool,
-    /// Farbnebel im Hintergrund? Der FleiLauncher-Look will eine ruhige Flaeche.
+    /// Colour haze in the background? The FleiLauncher look wants a calm surface.
     pub orbs: bool,
 }
 
@@ -122,7 +122,7 @@ pub const PRESETS: [(&str, &str, Palette); 4] = [
     ("gruen", "FleiLauncher", GRUEN),
 ];
 
-/// The six accents the cockpit offers, plus "wie die Vorlage".
+/// The six accents the cockpit offers, plus "like the template".
 pub const ACCENTS: [(&str, Color32); 6] = [
     ("Blau", rgb(0x2f, 0x86, 0xff)),
     ("Himmel", rgb(0x38, 0xbd, 0xf8)),
@@ -191,9 +191,9 @@ pub struct Appearance {
     pub radius: u8,
     /// Sprachkuerzel: "de" oder "en"
     pub lang: String,
-    /// Mikrofon beim Verbinden gleich an?
+    /// Microphone on right away when connecting?
     pub mic_on: bool,
-    /// Ton der anderen Seite beim Verbinden gleich an?
+    /// Sound of the other side on right away when connecting?
     pub snd_on: bool,
     /// Gewaehltes Mikrofon (None = Systemstandard)
     pub mic_dev: Option<String>,
@@ -224,7 +224,7 @@ fn path() -> std::path::PathBuf {
 pub fn load() -> Appearance {
     let mut a = Appearance::default();
     if let Ok(raw) = std::fs::read_to_string(path()) {
-        // von Hand geschriebene Dateien haben oft ein BOM davor
+        // hand-written files often have a BOM in front
         let s = raw.trim_start_matches('\u{feff}').to_string();
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
             if let Some(p) = v.get("preset").and_then(|x| x.as_str()) {
@@ -322,13 +322,13 @@ pub fn resolve(a: &Appearance) -> Palette {
     p
 }
 
-/// Sitzt unser Aussehen noch?
+/// Does our look still hold?
 ///
-/// eframe schreibt beim Start und bei jedem Wechsel des Windows-Farbmodus
-/// eigene Visuals ueber unsere. Dann sind zum Beispiel die Raender der
-/// Eingabefelder wieder weg - genau der Fehler, den Justin nach jedem
-/// Neustart gesehen hat. Die Oberflaeche prueft das jeden Frame; ist etwas
-/// anders, wird das Aussehen neu gesetzt.
+/// eframe writes its own visuals over ours at startup and on every change of
+/// the Windows colour mode. Then, for example, the borders of the
+/// input fields are gone again - exactly the error Justin saw after every
+/// restart. The UI checks this every frame; if something
+/// differs, the look is set again.
 pub fn style_is_ours(ctx: &egui::Context) -> bool {
     let p = palette();
     let s = ctx.style();
@@ -360,14 +360,14 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         ]
         .into();
     }
-    // Zeigefinger ueber ALLEM, was sich anklicken laesst - Geraetezeilen,
-    // Ordner, Knoepfe. Bisher stand das nur an einzelnen Stellen von Hand,
-    // und ueberall dort, wo es vergessen wurde, blieb der Pfeil stehen.
-    // egui kann das zentral, also gehoert es genau einmal hierher.
+    // Pointing hand over EVERYTHING that can be clicked - device rows,
+    // folders, buttons. So far this was set by hand in individual places only,
+    // and everywhere it was forgotten, the arrow stayed.
+    // egui can do this centrally, so it belongs exactly once here.
     style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     let r: u8 = a.radius;
-    // Kleine Bedienelemente (Kaestchen, Schieber, Knoepfe) bleiben eckig -
-    // mit der grossen Rundung wuerde aus einem Kaestchen ein Punkt.
+    // Small controls (checkboxes, sliders, buttons) stay square -
+    // with the big rounding a checkbox would become a dot.
     let rw: u8 = a.radius.min(4);
     {
         let v = &mut style.visuals;
@@ -377,8 +377,8 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.extreme_bg_color = p.field;
         v.faint_bg_color = p.card_hi;
         v.override_text_color = Some(p.text);
-        // Platzhalter in Textfeldern ("leer lassen fuer Anfrage") sollen
-        // aussehen wie Hinweise, nicht wie eingetragener Text.
+        // Placeholders in text fields ("leave empty for request") should
+        // look like hints, not like entered text.
         v.weak_text_color = Some(p.muted.gamma_multiply(0.45));
         v.hyperlink_color = p.accent;
         v.selection.bg_fill = p.accent.gamma_multiply(0.30);
@@ -389,8 +389,8 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, p.line);
         v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.inactive.weak_bg_fill = p.card_hi;
-        // Im hellen Modus verschwindet eine Haarlinie in der weissen Karte -
-        // Eingabefelder brauchen einen Rand, den man wirklich sieht.
+        // In light mode a hairline disappears in the white card -
+        // input fields need a border that is really visible.
         v.widgets.inactive.bg_stroke = egui::Stroke::new(
             1.0,
             if p.dark {
@@ -415,12 +415,12 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
         v.widgets.active.fg_stroke = egui::Stroke::new(1.0, p.text);
         v.widgets.active.corner_radius = rw.into();
         v.widgets.open.weak_bg_fill = p.row_sel;
-        // Kaestchen und Schieber: Flaeche sichtbar, Haken/Griff im Akzent
+        // Checkboxes and sliders: surface visible, check mark/handle in the accent
         v.widgets.noninteractive.corner_radius = rw.into();
         v.widgets.inactive.bg_fill = if p.dark {
             p.card_hi
         } else {
-            // Griff des Schiebers und Fuellungen: deutlich vom Weiss abgesetzt
+            // Slider handle and fills: clearly set apart from white
             egui::Color32::from_rgb(0xc4, 0xcd, 0xdd)
         };
         v.widgets.hovered.bg_fill = p.accent.gamma_multiply(0.45);

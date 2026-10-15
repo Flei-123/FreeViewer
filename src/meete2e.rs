@@ -379,32 +379,32 @@ impl Sender {
     }
 }
 
-// ------------------------------------------------------- H.264 (Bild) ----
+// ------------------------------------------------------- H.264 (video) ----
 //
-// WARUM Bild anders behandelt wird als Ton:
+// WHY video is treated differently from audio:
 //
-// Der Medienserver ist KEIN reiner Weiterleiter. Er bekommt entpackte Bilder
-// und setzt sie neu zu RTP-Paketen zusammen - dafuer MUSS er die Struktur
-// des Bildes verstehen (NAL-Einheiten, STAP-A). Gemessen am 07.08.2026:
-// verschluesselt man den ganzen Rahmen, scheitert er mit
-// "NaluTypeIsNotHandled" und beim Gegenueber kommt kein Bild an.
+// The media server is NOT a pure forwarder. It receives unpacked frames
+// and reassembles them into RTP packets - for that it MUST understand the structure
+// of the picture (NAL units, STAP-A). Measured on 07.08.2026:
+// if the whole frame is encrypted, it fails with
+// "NaluTypeIsNotHandled" and no video arrives at the other end.
 //
-// Deshalb bleibt die STRUKTUR sichtbar und nur der INHALT wird verschluesselt:
-//   * Startcodes und das Kopfbyte jeder NAL-Einheit bleiben im Klartext,
-//   * SPS (7), PPS (8) und AUD (9) bleiben ganz unangetastet - darin steht
-//     nur, wie gross das Bild ist, kein Bildinhalt; der Packer braucht sie,
-//   * alles andere wird verschluesselt.
+// That is why the STRUCTURE stays visible and only the CONTENT is encrypted:
+//   * start codes and the header byte of each NAL unit stay in clear text,
+//   * SPS (7), PPS (8) and AUD (9) stay completely untouched - they contain
+//     only how large the picture is, no picture content; the packer needs them,
+//   * everything else is encrypted.
 //
-// Denselben Kompromiss geht SFrame bei H.264 ein: der Server sieht die
-// Rahmenstruktur und die Groessen, aber KEINE Inhalte.
+// SFrame makes the same compromise for H.264: the server sees the
+// frame structure and the sizes, but NO content.
 //
-// Zusaetzlich noetig: der Geheimtext darf zufaellig "00 00 01" enthalten -
-// das waere ein falscher Startcode und wuerde das Bild zerlegen. Deshalb
-// wird derselbe Schutz eingesetzt, den H.264 selbst benutzt (eine 0x03
-// dazwischen, "emulation prevention").
+// Additionally needed: the ciphertext may randomly contain "00 00 01" -
+// that would be a false start code and would tear the picture apart. Therefore
+// the same protection is used that H.264 itself uses (a 0x03
+// in between, "emulation prevention").
 
-/// Wo faengt die naechste NAL-Einheit an? Liefert (Beginn des Startcodes,
-/// Beginn der Daten).
+/// Where does the next NAL unit start? Returns (start of the start code,
+/// start of the data).
 fn naechster_startcode(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
     let mut i = ab;
     while i + 3 <= daten.len() {
@@ -440,10 +440,10 @@ pub fn nal_einheiten(daten: &[u8]) -> Vec<(usize, usize, usize)> {
     aus
 }
 
-/// Muss diese NAL-Einheit im Klartext bleiben?
+/// Must this NAL unit stay in clear text?
 ///
-/// SPS/PPS beschreiben nur Groesse und Kodierparameter - kein Bildinhalt -
-/// und der Packer im Server braucht sie. AUD ist ein reiner Trenner.
+/// SPS/PPS describe only size and encoding parameters - no picture content -
+/// and the packer in the server needs them. AUD is a pure separator.
 fn nal_bleibt_klar(typ: u8) -> bool {
     matches!(typ, 7 | 8 | 9)
 }
@@ -467,7 +467,7 @@ fn epb_ein(daten: &[u8]) -> Vec<u8> {
     aus
 }
 
-/// Den Schutz wieder herausnehmen.
+/// Take the protection out again.
 fn epb_raus(daten: &[u8]) -> Vec<u8> {
     let mut aus = Vec::with_capacity(daten.len());
     let mut nullen = 0usize;
@@ -746,8 +746,8 @@ impl Wache {
 }
 
 // ------------------------------------------------------------- Base64 -----
-// URL-sicher, ohne Fuellzeichen. Selbst gerechnet, damit keine weitere
-// Abhaengigkeit noetig ist.
+// URL-safe, without padding. Self-computed, so that no further
+// dependency is needed.
 
 const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 

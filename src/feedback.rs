@@ -1,13 +1,13 @@
-//! Rückmeldung aus dem Programm heraus: Fehler melden oder Idee schicken.
+//! Feedback from within the program: report an error or send an idea.
 //!
-//! Geht als kleines JSON an den FleiTec-Server (derselbe Host, über den auch
-//! die Updates kommen). Kein Konto, keine Anmeldung - und wenn der Server
-//! gerade nicht erreichbar ist, sagt die Oberfläche das ehrlich.
+//! Goes as a small JSON to the FleiTec server (the same host the
+//! updates come through). No account, no login - and if the server
+//! is currently unreachable, the UI says so honestly.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
-/// 0 = nichts läuft, 1 = wird gesendet, 2 = angekommen, 3 = schiefgegangen
+/// 0 = nothing running, 1 = being sent, 2 = arrived, 3 = went wrong
 pub static STATE: AtomicU8 = AtomicU8::new(0);
 pub static MESSAGE: Mutex<String> = Mutex::new(String::new());
 
@@ -41,7 +41,7 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Baut den Rumpf der Meldung. Getrennt von send(), damit er prüfbar ist.
+/// Builds the body of the message. Separate from send(), so that it can be tested.
 pub fn body(kind: &str, text: &str, contact: &str, id: &str, device: &str) -> String {
     format!(
         "{{\"kind\":\"{}\",\"text\":\"{}\",\"contact\":\"{}\",\"version\":\"{}\",\"id\":\"{}\",\"device\":\"{}\",\"os\":\"{}\"}}",
@@ -55,7 +55,7 @@ pub fn body(kind: &str, text: &str, contact: &str, id: &str, device: &str) -> St
     )
 }
 
-/// Schickt die Meldung in einem eigenen Faden los.
+/// Sends the message off in its own thread.
 pub fn send(kind: &str, text: &str, contact: &str, id: &str, device: &str) {
     if text.trim().is_empty() {
         STATE.store(3, Ordering::Relaxed);

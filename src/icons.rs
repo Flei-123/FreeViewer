@@ -322,16 +322,16 @@ mod tests {
         }
     }
 
-    /// Ein Symbol darf nicht MITTEN im Strich aufhoeren.
+    /// An icon must not stop IN THE MIDDLE of a stroke.
     ///
-    /// Genau das war beim Zahnrad der Fall: der Pfad endete mit
-    /// "...c.66.28 1.09.92 1.09 1.65" und kehrte nie zum Anfang zurueck -
-    /// die rechte Seite des Zahnrads fehlte einfach. Justin hat es gesehen,
-    /// kein Test hatte es gemerkt. Ein GESCHLOSSENER Umriss endet auf "Z".
+    /// That is exactly what happened with the gear: the path ended with
+    /// "...c.66.28 1.09.92 1.09 1.65" and never returned to the start -
+    /// the right side of the gear was simply missing. Justin saw it,
+    /// no test had noticed. A CLOSED outline ends with "Z".
     #[test]
     fn geschlossene_umrisse_sind_wirklich_geschlossen() {
-        // Diese Symbole sind Umrisse (keine offenen Striche) und muessen
-        // deshalb zurueck zum Anfang laufen.
+        // These icons are outlines (not open strokes) and must
+        // therefore run back to the start.
         for name in ["settings"] {
             let s = source(name);
             let d = s
@@ -351,8 +351,8 @@ mod tests {
         }
     }
 
-    /// Ein Zahnrad ist rund - also muss es links wie rechts gleich weit
-    /// reichen. Fehlt eine Seite, faellt das hier auf.
+    /// A gear is round - so it must reach equally far to the left as to the
+    /// right. If a side is missing, this catches it.
     #[test]
     fn das_zahnrad_ist_symmetrisch() {
         let s = source("settings");

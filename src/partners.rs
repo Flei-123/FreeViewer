@@ -41,18 +41,18 @@ pub struct Partner {
     /// Encrypted password (hex), only present if the user asked for it.
     #[serde(default)]
     pub secret: Option<String>,
-    /// Ordner/Gruppe, in der das Geraet steht. Leer = "Alle".
+    /// Folder/group the device is in. Empty = "All".
     #[serde(default)]
     pub group: String,
     /// Freie Notiz zum Geraet.
     #[serde(default)]
     pub note: String,
-    /// Wann dieser Eintrag zuletzt geaendert wurde (unix Sekunden).
-    /// Der Abgleich mit dem Konto entscheidet damit, welche Fassung neuer ist.
+    /// When this entry was last changed (unix seconds).
+    /// The sync with the account uses it to decide which version is newer.
     #[serde(default)]
     pub at: u64,
-    /// Geloescht - bleibt als Grabstein liegen, damit ein auf einem PC
-    /// entferntes Geraet nicht beim naechsten Abgleich wieder auftaucht.
+    /// Deleted - stays as a tombstone, so that a device removed on one PC
+    /// does not reappear at the next sync.
     #[serde(default)]
     pub deleted: bool,
 }
@@ -94,8 +94,8 @@ impl Partner {
     }
 }
 
-/// Suche: Gross-/Kleinschreibung und Trennzeichen (Leerzeichen, Bindestrich,
-/// Unterstrich, Punkt) sind egal - "flei one" findet "FLEI-ONE".
+/// Search: upper/lower case and separators (space, hyphen,
+/// underscore, dot) do not matter - "flei one" finds "FLEI-ONE".
 pub fn search_norm(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(c, ' ' | '-' | '_' | '.'))
@@ -141,22 +141,22 @@ impl Book {
         crate::ident::config_dir().join("partners.json")
     }
 
-    /// Die Sicherheitskopie der letzten Fassung.
+    /// The backup copy of the last version.
     fn backup_path() -> std::path::PathBuf {
         crate::ident::config_dir().join("partners.bak.json")
     }
 
-    /// Wie viele echte (nicht geloeschte) Eintraege stehen gerade in der Datei?
-    /// Wird gebraucht, um zu erkennen, dass ein Schreibvorgang eine gefuellte
-    /// Liste durch eine leere ersetzen wuerde.
+    /// How many real (not deleted) entries are currently in the file?
+    /// Needed to detect that a write would replace a filled
+    /// list with an empty one.
     fn on_disk() -> Option<Self> {
         let s = std::fs::read_to_string(Self::path()).ok()?;
         serde_json::from_str(&s).ok()
     }
 
     pub fn load() -> Self {
-        // Kaputte Datei? Dann lieber die Sicherungskopie als eine leere Liste -
-        // ein Adressbuch verschwindet nicht, weil ein Byte falsch steht.
+        // Broken file? Then better the backup copy than an empty list -
+        // an address book does not vanish because one byte is wrong.
         if let Some(b) = Self::on_disk() {
             if !b.entries.is_empty() {
                 return b;
@@ -176,9 +176,9 @@ impl Book {
         let dir = crate::ident::config_dir();
         let _ = std::fs::create_dir_all(&dir);
 
-        // NIE eine gefuellte Liste durch eine leere ersetzen. Loeschen laeuft
-        // ueber Grabsteine (deleted = true), die Eintraege bleiben also immer
-        // stehen - eine leere Liste kann daher nur ein Fehler sein.
+        // NEVER replace a filled list with an empty one. Deleting works
+        // via tombstones (deleted = true), so the entries always
+        // remain - an empty list can therefore only be an error.
         if self.entries.is_empty() {
             if let Some(old) = Self::on_disk() {
                 if !old.entries.is_empty() {
@@ -200,7 +200,7 @@ impl Book {
         }
     }
 
-    /// Alle sichtbaren Eintraege (ohne Grabsteine).
+    /// All visible entries (without tombstones).
     pub fn live(&self) -> impl Iterator<Item = &Partner> {
         self.entries.iter().filter(|p| !p.deleted)
     }
@@ -276,9 +276,9 @@ impl Book {
         self.save();
     }
 
-    /// Entfernen heisst: als geloescht markieren. Der Grabstein wandert beim
-    /// naechsten Abgleich zum Konto und raeumt das Geraet auch auf den anderen
-    /// Rechnern weg. Nach 60 Tagen faellt er beim Aufraeumen selbst heraus.
+    /// Removing means: mark as deleted. The tombstone travels to the account at the
+    /// next sync and clears the device away on the other machines too.
+    /// After 60 days it drops out by itself during cleanup.
     pub fn remove(&mut self, id: &str) {
         if let Some(e) = self.entries.iter_mut().find(|p| p.id == id) {
             e.deleted = true;
@@ -329,7 +329,7 @@ impl Book {
     }
 
     fn trim(&mut self) {
-        // alte Grabsteine zuerst - die braucht nach zwei Monaten niemand mehr
+        // old tombstones first - nobody needs them after two months
         let cut = now().saturating_sub(60 * 24 * 3600);
         self.entries.retain(|p| !p.deleted || p.at > cut);
         if self.entries.len() <= MAX_ENTRIES {
@@ -348,9 +348,9 @@ impl Book {
 
     // ------------------------------------------------------ Konto-Abgleich
 
-    /// Was zum Konto hochgeht: alles ausser den gespeicherten Passwoertern.
-    /// Die sind mit der Kennung DIESES Rechners verschluesselt und waeren
-    /// woanders ohnehin nicht zu entschluesseln - also bleiben sie hier.
+    /// What goes up to the account: everything except the stored passwords.
+    /// They are encrypted with the ID of THIS machine and could not be decrypted
+    /// elsewhere anyway - so they stay here.
     pub fn to_sync(&self) -> Vec<SyncDevice> {
         self.entries
             .iter()
@@ -369,8 +369,8 @@ impl Book {
             .collect()
     }
 
-    /// Uebernimmt die Fassung des Kontos, wo sie neuer ist. Gibt zurueck, ob
-    /// sich lokal etwas geaendert hat.
+    /// Takes over the account's version where it is newer. Returns whether
+    /// anything changed locally.
     pub fn merge_remote(&mut self, remote: &[SyncDevice]) -> bool {
         let mut changed = false;
         for r in remote {
@@ -425,8 +425,8 @@ impl Book {
     }
 }
 
-/// Ein Geraet, wie es zwischen Rechner und Konto hin und her geht.
-/// Bewusst ohne Passwortfeld - siehe `Book::to_sync`.
+/// A device, as it goes back and forth between machine and account.
+/// Deliberately without a password field - see `Book::to_sync`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SyncDevice {
     pub id: String,
@@ -488,7 +488,7 @@ fn unprotect(stored: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Eigener Ordner nur fuer diesen Test.
+    /// Own folder just for this test.
     fn eigener_ordner(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("fv-book-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&d);
@@ -496,8 +496,8 @@ mod tests {
         d
     }
 
-    /// Der Ausloeser des Datenverlusts vom 31.07.2026: ein Testlauf hat ueber
-    /// merge_remote() -> save() das echte Adressbuch ueberschrieben.
+    /// The trigger of the data loss of 31.07.2026: a test run overwrote the real address book
+    /// via merge_remote() -> save().
     #[test]
     fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
         eigener_ordner("isoliert");
@@ -510,7 +510,7 @@ mod tests {
         assert!(!Book::path().starts_with(crate::ident::user_config_dir()));
     }
 
-    /// Eine gefuellte Liste darf nie durch eine leere ersetzt werden.
+    /// A filled list must never be replaced by an empty one.
     #[test]
     fn eine_leere_liste_ueberschreibt_keine_gefuellte() {
         eigener_ordner("nichtleeren");
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(wieder.sorted()[0].name, "Buero-PC");
     }
 
-    /// Kaputte Datei -> die Sicherungskopie rettet die Liste.
+    /// Broken file -> the backup copy rescues the list.
     #[test]
     fn eine_kaputte_datei_faellt_auf_die_sicherung_zurueck() {
         eigener_ordner("sicherung");
@@ -540,7 +540,7 @@ mod tests {
             ..Default::default()
         }];
         b.save();
-        // zweiter Schreibvorgang legt die Sicherungskopie an
+        // second write creates the backup copy
         b.rename("222222222", "Laptop 2");
         std::fs::write(Book::path(), b"{ kaputt").unwrap();
         let wieder = Book::load();
@@ -569,7 +569,7 @@ mod tests {
         // aelter als unserer: bleibt liegen
         assert!(!b.merge_remote(&[dev("111111111", "Noch aelter", 50)]));
         assert_eq!(b.get("111111111").unwrap().name, "Alt");
-        // neuer: wird uebernommen
+        // newer: is taken over
         assert!(b.merge_remote(&[dev("111111111", "Neu", 200)]));
         assert_eq!(b.get("111111111").unwrap().name, "Neu");
     }
@@ -591,13 +591,13 @@ mod tests {
             at: now().saturating_sub(60),
             ..Default::default()
         }];
-        // frischer Grabstein - ein uralter faellt beim Aufraeumen heraus
+        // fresh tombstone - an ancient one drops out during cleanup
         let mut tot = dev("333333333", "", now());
         tot.deleted = true;
         assert!(b.merge_remote(&[tot]));
         assert!(b.get("333333333").is_none());
         assert_eq!(b.sorted().len(), 0);
-        // der Grabstein selbst bleibt, sonst kaeme das Geraet zurueck
+        // the tombstone itself stays, otherwise the device would come back
         assert_eq!(b.to_sync().len(), 1);
         assert!(b.to_sync()[0].deleted);
     }

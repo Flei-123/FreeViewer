@@ -1,21 +1,21 @@
-//! FreeViewer Meet - Konferenzen.
+//! FreeViewer Meet - conferences.
 //!
-//! Der Medienserver (SFU) steht schon und bedient den Browser unter
-//! meet.fleitec.com. FreeViewer ist ab jetzt das Dach: hier legt man ein
-//! Meeting an, sieht was laeuft und tritt bei. Das Bild-und-Ton-Fenster ist
-//! die gleiche Oberflaeche wie im Browser, nur ohne Adressleiste - genau der
-//! Weg, den Zoom und Teams gehen. Wer die MAUS des anderen uebernehmen will,
-//! braucht ohnehin den Client, und der ist ja schon da.
+//! The media server (SFU) is already in place and serves the browser at
+//! meet.fleitec.com. FreeViewer is now the umbrella: here you create a
+//! meeting, see what is running and join. The video-and-audio window is
+//! the same UI as in the browser, just without an address bar - exactly the
+//! route Zoom and Teams take. Whoever wants to take over the other's MOUSE
+//! needs the client anyway, and it is already there.
 //!
-//! Schnittstelle des Servers (axum):
+//! Server interface (axum):
 //!   POST   /api/meeting        {titel, termin, termin_text}  -> Meeting
 //!   GET    /api/meetings                                     -> Liste ohne Passwort
 //!   GET    /api/meeting/{id}                                 -> Meeting
-//! Beitritt im Browser:  <BASE>/?room=<id>&pass=<passwort>
+//! Join in the browser:  <BASE>/?room=<id>&pass=<password>
 
 use anyhow::{anyhow, Result};
 
-/// Ueberschreibbar mit FV_MEET, damit man gegen einen Testserver arbeiten kann.
+/// Overridable with FV_MEET, so you can work against a test server.
 pub fn base() -> String {
     std::env::var("FV_MEET").unwrap_or_else(|_| "https://meet.fleitec.com".to_string())
 }
@@ -25,15 +25,15 @@ pub struct Meeting {
     /// Anzeige-ID im Zoom-Stil: "482-913-770"
     pub id: String,
     pub titel: String,
-    /// Bei der Liste leer - die gibt es bewusst nicht heraus.
+    /// Empty in the list - it is deliberately not handed out.
     pub passwort: String,
     pub termin_text: String,
-    /// Ende-zu-Ende-Schluessel als Text (43 Zeichen), leer = keiner.
+    /// End-to-end key as text (43 characters), empty = none.
     ///
-    /// WICHTIG: Der geht NIE an den Server. Er entsteht hier im Programm und
-    /// reist nur im Fragment des Links (hinter dem #). Browser schicken das
-    /// Fragment grundsaetzlich nicht mit - deshalb ist genau dort der
-    /// richtige Platz dafuer.
+    /// IMPORTANT: It NEVER goes to the server. It is created here in the program and
+    /// travels only in the fragment of the link (behind the #). Browsers never
+    /// send the fragment along - that is exactly why that is the
+    /// right place for it.
     pub e2e: String,
 }
 
@@ -49,7 +49,7 @@ fn from_json(v: &serde_json::Value) -> Meeting {
         titel: s("titel"),
         passwort: s("passwort"),
         termin_text: s("termin_text"),
-        // Nur aus der EIGENEN Liste; vom Server kommt der Schluessel nie.
+        // Only from the OWN list; the key never comes from the server.
         e2e: s("e2e"),
     }
 }
@@ -63,7 +63,7 @@ fn get_json(url: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&body).map_err(|e| anyhow!("{}", e))
 }
 
-/// Legt ein Meeting an und liefert ID + Passwort zurueck.
+/// Creates a meeting and returns ID + password.
 pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
     let url = format!("{}/api/meeting", base());
     let payload = serde_json::json!({
@@ -85,22 +85,22 @@ pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
     if m.id.is_empty() {
         return Err(anyhow!("Server hat keine Meeting-ID geliefert"));
     }
-    // Ende-zu-Ende ist eine BEWUSSTE Wahl beim Anlegen, kein Automatismus:
-    // ein verschluesseltes Meeting weist jeden ab, dessen Programm das noch
-    // nicht kann. Wuerde jedes neue Meeting verschluesselt, saessen aeltere
-    // Staende ploetzlich vor der Tuer.
+    // End-to-end is a DELIBERATE choice when creating, not automatic:
+    // an encrypted meeting rejects everyone whose program cannot do it
+    // yet. If every new meeting were encrypted, older
+    // versions would suddenly be standing at the door.
     //
-    // Der Schluessel wird HIER gewuerfelt, nicht am Server. Er geht nur im
-    // Fragment des Links weiter - der Server bekommt ihn nie zu sehen.
+    // The key is rolled HERE, not on the server. It travels on only in the
+    // fragment of the link - the server never gets to see it.
     m.e2e = schluessel_fuer(e2e);
     Ok(m)
 }
 
-/// Ein frischer Schluessel - oder gar keiner.
+/// A fresh key - or none at all.
 ///
-/// Eigene Funktion, damit die Entscheidung pruefbar ist: ohne Haken darf
-/// NICHTS entstehen, sonst traegt der Einladungslink stillschweigend einen
-/// Schluessel und das Meeting weist aeltere Staende ab.
+/// Separate function so the decision can be tested: without the tick
+/// NOTHING may be created, otherwise the invitation link silently carries a
+/// key and the meeting rejects older versions.
 pub fn schluessel_fuer(e2e: bool) -> String {
     if e2e {
         crate::meete2e::Schluessel::neu().als_text()
@@ -109,7 +109,7 @@ pub fn schluessel_fuer(e2e: bool) -> String {
     }
 }
 
-/// Wo die EIGENEN Meetings liegen.
+/// Where the OWN meetings are stored.
 fn eigene_datei() -> std::path::PathBuf {
     crate::ident::config_dir().join("meine-meetings.json")
 }
@@ -133,14 +133,14 @@ fn eigene_schreiben(liste: &[Meeting]) {
     let _ = std::fs::write(p, serde_json::to_vec_pretty(&arr).unwrap_or_default());
 }
 
-/// Die eigenen Meetings (angelegt oder beigetreten), neueste zuerst.
+/// The own meetings (created or joined), newest first.
 ///
-/// WARUM nicht mehr vom Server: der lieferte frueher ALLE Meetings mit
-/// Nummer und Titel an jeden, der fragte - ohne Anmeldung. Damit sah jeder
-/// Fremde, wer sich gerade wozu trifft. Eine Uebersicht ist das nicht wert.
-/// Jetzt merkt sich jeder Rechner seine eigenen; ob eines noch laeuft,
-/// beantwortet der Server weiterhin - dafuer muss man die Nummer aber
-/// bereits kennen.
+/// WHY not from the server anymore: it used to deliver ALL meetings with
+/// number and title to anyone who asked - without login. So every
+/// stranger could see who was meeting for what. An overview is not worth that.
+/// Now each machine remembers its own; whether one is still running,
+/// the server still answers - but you have to already know the
+/// number for that.
 pub fn eigene() -> Vec<Meeting> {
     let text = std::fs::read_to_string(eigene_datei()).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
@@ -149,7 +149,7 @@ pub fn eigene() -> Vec<Meeting> {
         .unwrap_or_default()
 }
 
-/// Ein Meeting in die eigene Liste aufnehmen (oder auffrischen).
+/// Add a meeting to the own list (or refresh it).
 pub fn merken(m: &Meeting) {
     if m.id.trim().is_empty() {
         return;
@@ -161,15 +161,15 @@ pub fn merken(m: &Meeting) {
     eigene_schreiben(&hoechstens);
 }
 
-/// Ein Meeting aus der eigenen Liste streichen.
+/// Remove a meeting from the own list.
 pub fn vergessen(id: &str) {
     let mut liste = eigene();
     liste.retain(|x| x.id != id);
     eigene_schreiben(&liste);
 }
 
-/// Die eigenen Meetings, die WIRKLICH noch laufen. Der Server wird je
-/// Nummer einzeln gefragt - abgelaufene fliegen aus der Liste.
+/// The own meetings that are REALLY still running. The server is asked
+/// for each number individually - expired ones drop out of the list.
 pub fn list() -> Result<Vec<Meeting>> {
     let mut aus = Vec::new();
     for m in eigene() {
@@ -182,7 +182,7 @@ pub fn list() -> Result<Vec<Meeting>> {
     Ok(aus)
 }
 
-/// Gibt es die ID? (Der Server antwortet ohne Passwort.)
+/// Does the ID exist? (The server answers without a password.)
 pub fn exists(id: &str) -> bool {
     let id = id.trim();
     if id.is_empty() {
@@ -193,7 +193,7 @@ pub fn exists(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Die Adresse, mit der man dem Meeting beitritt.
+/// The address used to join the meeting.
 pub fn join_url(id: &str, pass: &str) -> String {
     format!(
         "{}/?room={}&pass={}",
@@ -203,12 +203,12 @@ pub fn join_url(id: &str, pass: &str) -> String {
     )
 }
 
-/// Den Ende-zu-Ende-Schluessel an einen Link haengen - IMMER als Fragment.
+/// Attach the end-to-end key to a link - ALWAYS as a fragment.
 ///
-/// Alles hinter dem # bleibt im Browser: es steht in keiner Anfrage, in
-/// keinem Server-Protokoll und in keinem Verlauf beim Anbieter. Genau
-/// deshalb kann der Server den Schluessel nicht kennen - und genau deshalb
-/// darf er auch NIE in die Abfrage (?...) wandern.
+/// Everything behind the # stays in the browser: it is in no request, in
+/// no server log and in no history at the provider. That is exactly
+/// why the server cannot know the key - and exactly why
+/// it must NEVER wander into the query (?...).
 pub fn mit_schluessel(url: &str, e2e: &str) -> String {
     let k = e2e.trim();
     if k.is_empty() {
@@ -217,7 +217,7 @@ pub fn mit_schluessel(url: &str, e2e: &str) -> String {
     format!("{}#k={}", url, k)
 }
 
-/// Den Schluessel aus einem Link holen (Fragment ODER "k=" darin).
+/// Get the key from a link (fragment OR "k=" in it).
 pub fn schluessel_aus_link(link: &str) -> Option<String> {
     let teil = link.split('#').nth(1)?;
     for kv in teil.split('&') {
@@ -231,7 +231,7 @@ pub fn schluessel_aus_link(link: &str) -> Option<String> {
     None
 }
 
-/// Wie join_url, aber mit der eigenen FreeViewer-ID.
+/// Like join_url, but with the own FreeViewer ID.
 pub fn join_url_with_id(id: &str, pass: &str, fvid: &str) -> String {
     let ziffern: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
     if ziffern.is_empty() {
@@ -256,8 +256,8 @@ pub fn invite(m: &Meeting) -> String {
     )
 }
 
-/// Nur die Zeichen kodieren, die in ID und Passwort ueberhaupt vorkommen
-/// koennen - eine eigene Abhaengigkeit lohnt dafuer nicht.
+/// Encode only the characters that can occur in ID and password at all
+/// - an own dependency is not worth it for that.
 fn urlenc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -274,12 +274,12 @@ fn urlenc(s: &str) -> String {
     out
 }
 
-/// Haengt `app=1` an die Meeting-Adresse, solange es noch fehlt.
+/// Appends `app=1` to the meeting address as long as it is missing.
 ///
-/// Die Meet-Seite versucht bei Einladungslinks, den installierten Client
-/// ueber das freeviewer://-Schema zu starten. Dieses Fenster hier IST schon
-/// der Client - ohne das Merkmal wuerde die Seite darin das Schema erneut
-/// anstossen und sich selbst im Kreis oeffnen.
+/// For invitation links the Meet page tries to start the installed client
+/// via the freeviewer:// scheme. This window here IS already
+/// the client - without the marker the page inside it would trigger the scheme again
+/// and open itself in a circle.
 fn mit_app_merkmal(url: &str) -> String {
     if url.contains("app=") {
         return url.to_string();
@@ -288,11 +288,11 @@ fn mit_app_merkmal(url: &str) -> String {
     format!("{}{}app=1", url, trenn)
 }
 
-/// Oeffnet das Meeting in einem eigenen Fenster ohne Adressleiste.
+/// Opens the meeting in its own window without an address bar.
 ///
-/// Edge und Chrome koennen mit `--app=` genau das: ein nacktes Fenster, das
-/// wie ein Programm aussieht. Gibt es beide nicht, nehmen wir den normalen
-/// Browser - Hauptsache, der Nutzer landet im Meeting.
+/// Edge and Chrome can do exactly that with `--app=`: a bare window that looks
+/// like a program. If neither exists, we use the normal
+/// browser - the main thing is that the user ends up in the meeting.
 pub fn open_window(url: &str) -> Result<()> {
     let markiert = mit_app_merkmal(url);
     let url = markiert.as_str();
@@ -316,7 +316,7 @@ pub fn open_window(url: &str) -> Result<()> {
                 }
             }
         }
-        // Notfalls der Standardbrowser
+        // If all else fails the default browser
         let ok = std::process::Command::new("cmd")
             .args(["/c", "start", "", url])
             .spawn()
@@ -326,8 +326,8 @@ pub fn open_window(url: &str) -> Result<()> {
         }
         return Err(anyhow!("Kein Browser gefunden"));
     }
-    // macOS: dieselbe Idee, nur andere Pfade. Findet sich kein Chrome/Edge,
-    // uebernimmt `open` den Standardbrowser - Hauptsache, das Meeting geht auf.
+    // macOS: same idea, only different paths. If no Chrome/Edge is found,
+    // `open` takes the default browser - the main thing is that the meeting opens.
     #[cfg(target_os = "macos")]
     {
         let candidates = [
@@ -353,7 +353,7 @@ pub fn open_window(url: &str) -> Result<()> {
         return Err(anyhow!("Kein Browser gefunden"));
     }
 
-    // Linux und der Rest: Chrome-artige im Pfad suchen, sonst xdg-open.
+    // Linux and the rest: look for Chrome-like in the path, otherwise xdg-open.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         for exe in [
@@ -434,23 +434,23 @@ mod tests {
     fn app_merkmal_wird_genau_einmal_angehaengt() {
         let u = mit_app_merkmal("https://meet.fleitec.com/?room=1-2-3&pass=x");
         assert!(u.ends_with("&app=1"), "{}", u);
-        // Schon markiert? Dann bleibt die Adresse unangetastet.
+        // Already marked? Then the address stays untouched.
         let m = mit_app_merkmal(&u);
         assert_eq!(m, u);
-        // Ganz ohne Parameter bekommt die Adresse ein Fragezeichen.
+        // With no parameter at all the address gets a question mark.
         assert_eq!(mit_app_merkmal("https://x.test/"), "https://x.test/?app=1");
     }
 
     #[test]
     fn base_can_be_pointed_somewhere_else() {
-        // Standard bleibt der eigene Server
+        // Default stays the own server
         assert!(base().starts_with("https://"));
     }
 }
 
 // ------------------------------------------------- eigener Meeting-Modus --
 
-/// Ein Teilnehmer, wie ihn der Meet-Server gerade meldet.
+/// A participant, as the Meet server currently reports it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Teilnehmer {
     pub name: String,
@@ -458,7 +458,7 @@ pub struct Teilnehmer {
     pub mikro_aus: bool,
     pub kamera_aus: bool,
     pub hand: bool,
-    /// Bietet an, dass andere seine Maschine steuern duerfen (FreeViewer-ID).
+    /// Offers that others may control its machine (FreeViewer ID).
     pub fv: bool,
 }
 
@@ -483,8 +483,8 @@ fn tn_aus_json(v: &serde_json::Value) -> Vec<Teilnehmer> {
         .collect()
 }
 
-/// Wer sitzt gerade im Raum? Das Passwort gehoert zur Abfrage - die ID
-/// allein darf nichts verraten (gleiche Regel wie beim Loeschen).
+/// Who is currently in the room? The password belongs to the query - the ID
+/// alone must not reveal anything (same rule as for deleting).
 pub fn teilnehmer(id: &str, pass: &str) -> Result<Vec<Teilnehmer>> {
     let url = format!(
         "{}/api/meeting/{}/teilnehmer?pass={}",
@@ -496,22 +496,22 @@ pub fn teilnehmer(id: &str, pass: &str) -> Result<Vec<Teilnehmer>> {
     Ok(tn_aus_json(&v))
 }
 
-/// Mikrofone und Kameras dieses Rechners als (Mikrofone, Kameras).
+/// Microphones and cameras of this machine as (microphones, cameras).
 ///
-/// Die Namen meldet das System; der Browser nennt sie fast gleich, darum
-/// findet die Meet-Seite ein Wunschgeraet anhand seines Namens wieder.
+/// The names are reported by the system; the browser calls them almost the same, so
+/// the Meet page finds a wanted device again by its name.
 pub fn geraete() -> (Vec<String>, Vec<String>) {
     (crate::audio::input_devices(), kameras())
 }
 
-/// Kameras des Rechners. Windows fragt die Geraeteverwaltung (PnP), Linux
-/// liest die Namen der Video4Linux-Knoten, macOS den Systembericht.
-/// Alles laeuft lokal - dafuer geht kein Paket ins Netz.
+/// Cameras of the machine. Windows asks the device manager (PnP), Linux
+/// reads the names of the Video4Linux nodes, macOS the system report.
+/// Everything runs locally - no packet goes onto the network for it.
 pub fn kameras() -> Vec<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // Ohne Fenster - sonst blitzt bei jeder Abfrage eine Konsole auf.
+        // Without a window - otherwise a console flashes up on every query.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let ps = std::process::Command::new("powershell")
             .args([
@@ -572,10 +572,10 @@ pub fn kameras() -> Vec<String> {
     }
 }
 
-/// Beitritts-Adresse mit allem, was das eigene Meeting-Fenster einstellen
-/// kann: eigene FreeViewer-ID, Wunschgeraete und Startzustand von
-/// Mikrofon und Kamera. Die Meet-Seite liest die Werte aus und stellt
-/// ihren Vorbereitungsbildschirm danach.
+/// Join address with everything the own meeting window can set:
+/// own FreeViewer ID, wanted devices and start state of
+/// microphone and camera. The Meet page reads the values and sets
+/// up its preparation screen accordingly.
 pub fn join_url_ex(
     id: &str,
     pass: &str,
@@ -656,7 +656,7 @@ mod tests_meetwin {
         assert!(t[0].host && t[0].kamera_aus && t[0].fv && !t[0].mikro_aus);
         assert_eq!(t[1].name, "Gast 7");
         assert!(t[1].mikro_aus && t[1].hand && !t[1].host);
-        // Fehlende Felder sind kein Fehler - aeltere Server liefern weniger.
+        // Missing fields are not an error - older servers deliver less.
         let leer: serde_json::Value = serde_json::from_str(r#"[{"name":"N"}]"#).unwrap();
         let t = tn_aus_json(&leer);
         assert_eq!(t.len(), 1);
@@ -668,8 +668,8 @@ mod tests_meetwin {
 mod e2e_link_tests {
     use super::*;
 
-    /// Der Schluessel MUSS im Fragment stehen - alles andere landet in den
-    /// Protokollen des Servers und waere damit kein Ende-zu-Ende mehr.
+    /// The key MUST be in the fragment - anything else ends up in the
+    /// server's logs and would thus no longer be end-to-end.
     #[test]
     fn der_schluessel_steht_hinter_der_raute() {
         let k = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
@@ -693,8 +693,8 @@ mod e2e_link_tests {
         assert_eq!(schluessel_aus_link(&u).as_deref(), Some(k.as_str()));
     }
 
-    /// Unsinn im Fragment darf NICHT als Schluessel durchgehen - sonst
-    /// entschluesselt der Client mit Muell und zeigt Bildsalat.
+    /// Nonsense in the fragment must NOT pass as a key - otherwise
+    /// the client decrypts with garbage and shows garbled video.
     #[test]
     fn unsinn_im_fragment_wird_abgewiesen() {
         assert!(schluessel_aus_link("https://x/?room=1#k=zukurz").is_none());
@@ -703,9 +703,9 @@ mod e2e_link_tests {
         assert!(schluessel_aus_link("https://x/?room=1#anderes=1").is_none());
     }
 
-    /// OHNE Haken beim Anlegen entsteht kein Schluessel - und damit traegt
-    /// auch die Einladung keinen. Sonst waere jedes neue Meeting still
-    /// verschluesselt und aeltere Staende staenden vor der Tuer.
+    /// WITHOUT the tick when creating, no key is created - and thus
+    /// the invitation carries none either. Otherwise every new meeting would be silently
+    /// encrypted and older versions would be standing at the door.
     #[test]
     fn ohne_haken_kein_schluessel() {
         assert_eq!(schluessel_fuer(false), "");
@@ -721,10 +721,10 @@ mod e2e_link_tests {
         assert!(schluessel_aus_link(&text).is_none());
     }
 
-    /// LIVE gegen den echten Server - laeuft nur auf Zuruf:
+    /// LIVE against the real server - runs only on request:
     ///     cargo test -- --ignored anlegen_mit_und_ohne_haken --nocapture
-    /// Beweist am echten Meeting, dass der Haken wirklich ueber den
-    /// Schluessel im Einladungslink entscheidet.
+    /// Proves on a real meeting that the tick really decides about the
+    /// key in the invitation link.
     #[test]
     #[ignore]
     fn anlegen_mit_und_ohne_haken() {
@@ -743,7 +743,7 @@ mod e2e_link_tests {
         println!("RAUM_MIT={} PASS_MIT={} KEY={}", mit.id, mit.passwort, mit.e2e);
     }
 
-    /// MIT Haken entsteht ein gueltiger Schluessel - und jedes Mal ein anderer.
+    /// WITH the tick a valid key is created - and a different one every time.
     #[test]
     fn mit_haken_ein_frischer_schluessel() {
         let a = schluessel_fuer(true);
@@ -752,7 +752,7 @@ mod e2e_link_tests {
         assert_ne!(a, b, "zweimal derselbe Schluessel");
     }
 
-    /// Die Einladung enthaelt den Link MIT Schluessel.
+    /// The invitation contains the link WITH the key.
     #[test]
     fn die_einladung_traegt_den_schluessel() {
         let m = Meeting {

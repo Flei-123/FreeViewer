@@ -1,27 +1,27 @@
-//! Lizenz-Pruefung fuer Marken-Builds (z. B. X-Remote). Dieses Modul wird
-//! NUR mit `--features license` kompiliert - der FreeViewer-Build enthaelt
-//! keinen Lizenzcode und bleibt komplett frei.
+//! Licence check for brand builds (e.g. X-Remote). This module is compiled
+//! ONLY with `--features license` - the FreeViewer build contains
+//! no licence code and stays completely free.
 //!
-//! Prinzip: Der Lizenzschluessel ist eine Nachricht (Name, Ablaufdatum,
-//! Ausgabe) plus einer Ed25519-Signatur. Unterschreiben kann nur, wer den
-//! privaten Schluessel hat (der bleibt beim Verkaeufer, NIEMALS im Repo).
-//! Im Build steckt nur der oeffentliche Schluessel - gefaelsche Schluessel
-//! fallen bei der Pruefung durch.
+//! Principle: the licence key is a message (name, expiry date,
+//! edition) plus an Ed25519 signature. Only whoever has the private key can sign
+//! (it stays with the seller, NEVER in the repo).
+//! Only the public key is in the build - forged keys
+//! fail the check.
 //!
-//! Format des Schluessels, wie ihn der Kunde bekommt:
-//!   Base32-Crockford der Bytes  nachricht || signatur(64)
-//!   nachricht = "XRL1" || name-len u8 || name || ablauf u32 LE || ausgabe u8
-//!   in Fuenfergruppen mit Bindestrichen.
+//! Format of the key, as the customer receives it:
+//!   Base32-Crockford of the bytes  message || signature(64)
+//!   message = "XRL1" || name-len u8 || name || expiry u32 LE || edition u8
+//!   in groups of five with hyphens.
 //!
-//! Ablauf: Tage seit dem 1.1.2026, 0 = unbegrenzt. Ausgabe: 0 = Pro.
+//! Expiry: days since 1.1.2026, 0 = unlimited. Edition: 0 = Pro.
 
 use std::fs;
 use std::path::PathBuf;
 
-/// Oeffentlicher Pruef-Schluessel (Ed25519, 32 Bytes, hex). Darf per
-/// FV_LICENSE_PUBKEY beim Bauen ueberschrieben werden; der eingebaute Wert
-/// ist der Produktiv-Schluessel von X-Remote. Der zugehoerige private
-/// Schluessel liegt ausserhalb des Repos.
+/// Public verification key (Ed25519, 32 bytes, hex). May be overridden at build time via
+/// FV_LICENSE_PUBKEY; the built-in value
+/// is the production key of X-Remote. The matching private
+/// key lives outside the repo.
 pub const PUBKEY_HEX: &str = match option_env!("FV_LICENSE_PUBKEY") {
     Some(s) => s,
     None => "9c24c5d917aa3cab5f3ddc63f7e7026efd08bd68f82d5177089efc8fe5364230",
@@ -30,7 +30,7 @@ pub const PUBKEY_HEX: &str = match option_env!("FV_LICENSE_PUBKEY") {
 /// Eine gueltige Lizenz.
 #[derive(Clone, Debug)]
 pub struct License {
-    /// Wem die Lizenz gehoert (Name oder E-Mail des Kunden).
+    /// Who the licence belongs to (name or email of the customer).
     pub name: String,
     /// Ablauftag (Tage seit 1.1.2026) - 0 heisst unbegrenzt.
     pub expires: u32,
@@ -38,14 +38,14 @@ pub struct License {
     pub edition: u8,
 }
 
-/// Was die Pruefung ergeben hat.
+/// What the check came up with.
 #[derive(Clone, Debug)]
 pub enum Status {
     /// Gueltige Lizenz auf diesem Rechner gespeichert.
     Active(License),
-    /// Noch kein Schluessel eingegeben.
+    /// No key entered yet.
     Missing,
-    /// Es gibt einen Schluessel, aber er ist ungueltig oder abgelaufen.
+    /// There is a key, but it is invalid or expired.
     Invalid(String),
 }
 
@@ -55,8 +55,8 @@ fn key_file() -> PathBuf {
 
 /// Heutige Tag-Nummer (Tage seit dem 1.1.2026).
 fn today() -> u32 {
-    // Ein Tag Unschaerfe bei Ablaufdaten ist egal - die Uhr des Rechners
-    // ist ohnehin nur so genau wie der Benutzer sie stellt.
+    // A day of fuzziness for expiry dates does not matter - the machine's clock
+    // is only as accurate as the user sets it anyway.
     const EPOCH_2026: u64 = 1_767_225_600;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -104,7 +104,7 @@ impl License {
 }
 
 // ---------------------------------------------------------------- base32 ---
-// Crockford: ohne I, L, O, U - keine Verwechslungen beim Abtippen.
+// Crockford: without I, L, O, U - no mix-ups when typing.
 
 const B32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -191,7 +191,7 @@ fn verify(msg: &[u8], sig: &[u8]) -> bool {
     key.verify(msg, &signature).is_ok()
 }
 
-/// Schluessel-Text (wie ihn der Kunde eintippt) pruefen und auswerten.
+/// Check and evaluate key text (as the customer types it in).
 pub fn parse(text: &str) -> Result<License, String> {
     let raw = b32_decode(text).ok_or_else(|| "kein gueltiges Format".to_string())?;
     if raw.len() < 64 + 11 {
@@ -223,7 +223,7 @@ pub fn parse(text: &str) -> Result<License, String> {
     Ok(lic)
 }
 
-/// Gespeicherten Schluessel laden und pruefen.
+/// Load and check the stored key.
 pub fn status() -> Status {
     let Ok(text) = fs::read_to_string(key_file()) else {
         return Status::Missing;
@@ -234,7 +234,7 @@ pub fn status() -> Status {
     }
 }
 
-/// Schluessel aktivieren: pruefen, dann auf diesem Rechner ablegen.
+/// Activate a key: check, then store on this machine.
 pub fn activate(text: &str) -> Result<License, String> {
     let lic = parse(text)?;
     let dir = crate::ident::config_dir();
@@ -248,8 +248,8 @@ pub fn revoke() {
     let _ = fs::remove_file(key_file());
 }
 
-/// Einen Schluessel erzeugen - geht nur mit dem privaten Schluessel.
-/// Wird vom Schluessel-Werkzeug (bin keygen) benutzt, nie vom Client.
+/// Generate a key - only works with the private key.
+/// Used by the key tool (bin keygen), never by the client.
 pub fn make(priv_hex: &str, name: &str, expires: u32, edition: u8) -> Result<String, String> {
     use ed25519_dalek::{Signer, SigningKey};
     let raw = hex::decode(priv_hex).map_err(|_| "privater Schluessel: kein hex")?;
@@ -275,7 +275,7 @@ mod tests {
         let data = b"XRL1\x05justin\x00\x00\x00\x00\x00";
         let enc = b32_encode(data);
         assert_eq!(b32_decode(&enc).unwrap(), data);
-        // Bindestriche, Kleinschreibung und O/I-Verwechslungen verzeihen
+        // Forgive hyphens, lower case and O/I mix-ups
         assert_eq!(b32_decode(&enc.to_lowercase().replace('0', "o")).unwrap(), data);
     }
 
@@ -286,7 +286,7 @@ mod tests {
         let key = make(&hex::encode(sk.to_bytes()), "Max Mustermann", 0, 0).unwrap();
         let raw = b32_decode(&key).unwrap();
         let (msg, sig) = raw.split_at(raw.len() - 64);
-        // Signatur gegen den frischen Schluessel pruefen (statt dem eingebauten)
+        // Check the signature against the fresh key (instead of the built-in one)
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let vk = VerifyingKey::from_bytes(&sk.verifying_key().to_bytes()).unwrap();
         assert!(vk.verify(msg, &Signature::try_from(sig).unwrap()).is_ok());
@@ -296,9 +296,9 @@ mod tests {
         assert_eq!(&msg[5..19], b"Max Mustermann");
     }
 
-    /// End-to-End: einen echten, mit keygen erzeugten Schluessel gegen den
-    /// eingebauten oeffentlichen Schluessel pruefen. Laueft nur, wenn die
-    /// Umgebungsvariable XR_TEST_KEY gesetzt ist (CI/Handtest).
+    /// End-to-end: check a real key generated with keygen against the
+    /// built-in public key. Only runs when the
+    /// environment variable XR_TEST_KEY is set (CI/manual test).
     #[test]
     fn real_key_parses() {
         let Ok(k) = std::env::var("XR_TEST_KEY") else { return };

@@ -30,10 +30,10 @@ pub fn machine_config_dir() -> Option<PathBuf> {
 /// identity exists (the service installer creates it) that one wins, so every
 /// account sees the same FreeViewer ID.
 pub fn config_dir() -> PathBuf {
-    // Tests fassen NIEMALS die echte Konfiguration an. Ein Unit-Test, der
-    // ueber Book::save() in %ProgramData%\\FreeViewer landet, loescht das
-    // Adressbuch des Benutzers - genau das ist am 31.07.2026 passiert.
-    // Deshalb zeigt der Ordner im Testlauf hart auf ein eigenes Temp-Verzeichnis.
+    // Tests NEVER touch the real configuration. A unit test that ends up
+    // via Book::save() in %ProgramData%\\FreeViewer deletes the user's
+    // address book - exactly that happened on 31.07.2026.
+    // Therefore in a test run the folder points hard to a temp directory of its own.
     #[cfg(test)]
     {
         return test_config_dir();
@@ -46,22 +46,22 @@ pub fn config_dir() -> PathBuf {
 
 #[cfg(test)]
 thread_local! {
-    /// Ein einzelner Test kann sich einen eigenen Ordner geben. Pro Thread,
-    /// damit parallel laufende Tests sich nicht in die Quere kommen.
+    /// A single test can give itself its own folder. Per thread,
+    /// so that tests running in parallel do not get in each other's way.
     static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Legt den Konfigurationsordner NUR fuer diesen Testthread fest.
+/// Sets the configuration folder ONLY for this test thread.
 #[cfg(test)]
 pub fn set_test_config_dir(p: PathBuf) {
     let _ = fs::create_dir_all(&p);
     TEST_DIR.with(|d| *d.borrow_mut() = Some(p));
 }
 
-/// Eigener Wegwerf-Ordner pro Test. Cargo gibt jedem Test einen eigenen
-/// Thread, also reicht die Thread-Kennung, um Tests sauber zu trennen -
-/// sonst wuerden parallel laufende Tests sich gegenseitig die identity.txt
-/// unter den Fuessen wegschreiben.
+/// Own throwaway folder per test. Cargo gives each test its own
+/// thread, so the thread id is enough to separate tests cleanly -
+/// otherwise tests running in parallel would write away each other's identity.txt
+/// from under their feet.
 #[cfg(test)]
 pub fn test_config_dir() -> PathBuf {
     if let Some(p) = TEST_DIR.with(|d| d.borrow().clone()) {
@@ -77,7 +77,7 @@ pub fn test_config_dir() -> PathBuf {
     d
 }
 
-/// Der echte Ordner im Betrieb.
+/// The real folder in operation.
 pub fn real_config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("FV_CONFIG") {
         if !p.trim().is_empty() {
@@ -98,8 +98,8 @@ pub fn load_or_create_secret() -> String {
     if let Ok(s) = fs::read_to_string(&file) {
         let s = s.trim().to_string();
         if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-            // Dauer-Sicherung in der Registry nachziehen, falls noch keine da
-            // ist - dann ueberlebt die ID auch ein geloeschtes Konfig-Verzeichnis.
+            // Catch up the permanent backup in the registry if there is none
+            // yet - then the ID also survives a deleted config directory.
             #[cfg(windows)]
             if winid::load_backup().as_deref() != Some(s.as_str()) {
                 winid::save_backup(&s);
@@ -107,16 +107,16 @@ pub fn load_or_create_secret() -> String {
             return s;
         }
     }
-    // Datei weg oder ungueltig - erst die Dauer-Sicherung fragen.
+    // File gone or invalid - ask the permanent backup first.
     #[cfg(windows)]
     if let Some(s) = winid::load_backup() {
         let _ = fs::create_dir_all(&dir);
         let _ = fs::write(&file, &s);
         return s;
     }
-    // Ganz neu: aus Windows' eigener Maschinen-Kennung ableiten. Die bleibt
-    // ueber De- und Neuinstallationen gleich (erst ein neues Windows aendert
-    // sie) - damit aendert sich die FreeViewer-ID nie wieder.
+    // Brand new: derive from Windows' own machine id. It stays
+    // the same across uninstalls and reinstalls (only a new Windows changes
+    // it) - so the FreeViewer ID never changes again.
     #[cfg(windows)]
     let frisch = winid::machine_guid().map(|g| {
         use sha2::Digest;
@@ -135,8 +135,8 @@ pub fn load_or_create_secret() -> String {
     secret
 }
 
-/// Dauerhafte Identitaets-Sicherung (Windows): Registry-Zweig und die
-/// Maschinen-Kennung aus der Kryptografie-Registrierung.
+/// Permanent identity backup (Windows): registry branch and the
+/// machine id from the cryptography registration.
 #[cfg(windows)]
 pub mod winid {
     fn key_path() -> String {
@@ -164,7 +164,7 @@ pub mod winid {
         }
     }
 
-    /// Nur beim vollstaendigen Entfernen (--uninstall --all).
+    /// Only for complete removal (--uninstall --all).
     pub fn drop_backup() {
         if let Ok(k) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
             .open_subkey_with_flags(r"SOFTWARE", winreg::enums::KEY_ALL_ACCESS)
@@ -299,7 +299,7 @@ mod tests {
     }
 }
 
-/// Zwischenablage teilen? Aus, wenn die Datei "noclip" im Ordner liegt.
+/// Share the clipboard? Off if the file "noclip" is in the folder.
 pub fn clipboard_enabled() -> bool {
     !config_dir().join("noclip").exists()
 }
@@ -318,8 +318,8 @@ pub fn set_clipboard(on: bool) {
 mod config_dir_tests {
     use super::*;
 
-    /// Schutz gegen den Datenverlust vom 31.07.2026: im Testlauf darf der
-    /// Konfigurationsordner niemals der echte sein.
+    /// Protection against the data loss of 31.07.2026: in a test run the
+    /// configuration folder must never be the real one.
     #[test]
     fn tests_schreiben_nie_in_die_echte_konfiguration() {
         let d = config_dir();

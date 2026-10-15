@@ -39,17 +39,17 @@ pub struct Knock {
 }
 
 pub struct Shared {
-    /// Was der ferne Bildschirm an Aufloesungen wirklich kann (kommt vom Host).
+    /// What resolutions the remote screen can really do (comes from the host).
     pub remote_resolutions: Mutex<Vec<(u32, u32)>>,
     pub relay_url: String,
     // host side
     pub my_id: Mutex<String>,
-    /// Wie es um die Leitung zum Relay steht: 0 = verbinde gerade,
-    /// 1 = angemeldet und erreichbar, 2 = offline.
+    /// State of the line to the relay: 0 = connecting,
+    /// 1 = logged in and reachable, 2 = offline.
     ///
-    /// WARUM eigenes Feld: `my_id` sagt nur, dass wir irgendwann einmal
-    /// eine Nummer bekommen haben. Ob die Leitung JETZT steht, ist eine
-    /// andere Frage - und genau die will der Nutzer beantwortet haben.
+    /// WHY a separate field: `my_id` only says that we once received
+    /// a number. Whether the line is up NOW is a
+    /// different question - and exactly that is what the user wants answered.
     pub net_state: AtomicU8,
     pub password: Mutex<String>,
     pub host_status: Mutex<String>,

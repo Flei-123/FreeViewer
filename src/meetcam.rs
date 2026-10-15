@@ -1,17 +1,17 @@
-//! Natives Meeting - Stufe 2d: die ECHTE Kamera.
+//! Native meeting - stage 2d: the REAL camera.
 //!
-//! Bisher ging ein Testmuster ins Meeting (Stufe 2b). Hier kommt das Bild
-//! jetzt von der Kamera - unter Windows ueber Media Foundation, also
-//! genau die Maschine, die der Browser auch benutzt. Der Aufnahmefaden
-//! haelt immer nur das NEUESTE Bild bereit; wer langsamer abholt,
-//! ueberspringt Bilder, statt einen Rueckstau zu bauen.
+//! Until now a test pattern went into the meeting (stage 2b). Here the image
+//! now comes from the camera - on Windows via Media Foundation, i.e.
+//! exactly the machinery the browser uses too. The capture thread
+//! only ever holds the NEWEST frame ready; whoever picks up more slowly
+//! skips frames instead of building up a backlog.
 //!
-//! Geliefert wird dicht gepacktes NV12 in genau der gewuenschten Groesse.
-//! Kann die Kamera das Format/die Groesse nicht, wird hier zugeschnitten
-//! und verkleinert - so bekommt der H.264-Kodierer immer das, was er
-//! erwartet, egal welche Kamera steckt.
+//! What is delivered is tightly packed NV12 in exactly the requested size.
+//! If the camera cannot do the format/size, it is cropped here
+//! and scaled down - so the H.264 encoder always gets what it
+//! expects, whichever camera is plugged in.
 //!
-//! macOS folgt in Stufe 5 (AVFoundation), Linux hat hier nichts zu tun.
+//! macOS follows in stage 5 (AVFoundation), Linux has nothing to do here.
 
 use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,7 +25,7 @@ pub struct Geraet {
     pub id: String,
 }
 
-/// Ein Bild in dicht gepacktem NV12 (Y-Ebene, dann UV verschraenkt).
+/// A frame in tightly packed NV12 (Y plane, then interleaved UV).
 #[derive(Clone)]
 pub struct Bild {
     pub breite: u32,
@@ -33,10 +33,10 @@ pub struct Bild {
     pub nv12: Vec<u8>,
 }
 
-/// NV12 mit Zeilenabstand in dicht gepacktes NV12 kopieren.
+/// Copy NV12 with row stride into tightly packed NV12.
 ///
-/// Media Foundation liefert Zeilen oft breiter als das Bild (stride), weil
-/// die Grafikkarte das so mag. Der Kodierer will es dicht gepackt.
+/// Media Foundation often delivers rows wider than the image (stride), because
+/// the graphics card likes it that way. The encoder wants it tightly packed.
 pub fn nv12_packen(src: &[u8], stride: usize, w: u32, h: u32, out: &mut Vec<u8>) -> bool {
     let (wu, hu) = (w as usize, h as usize);
     if wu == 0 || hu == 0 || stride < wu {
@@ -61,17 +61,17 @@ pub fn nv12_packen(src: &[u8], stride: usize, w: u32, h: u32, out: &mut Vec<u8>)
     true
 }
 
-/// Aus Puffergroesse und Zeilenabstand die ECHTE Bildgroesse ableiten.
+/// Derive the REAL image size from buffer size and row stride.
 ///
-/// Media Foundation darf im Medientyp eine Groesse melden und dann eine
-/// andere liefern - gemessen am 06.08.2026: angemeldet 640x360 NV12,
-/// geliefert ein Puffer mit 1 382 400 Bytes und Zeilenabstand 1280, also in
-/// Wahrheit 1280x720. Wer der Meldung glaubt, kopiert das linke obere
-/// Viertel (Bild wirkt hineingezoomt) und liest die Farbebene mitten aus der
-/// Helligkeit (Bild wird gruen/magenta). Zeilenabstand und Puffergroesse
-/// luegen nicht - also rechnen wir die Wahrheit daraus aus.
+/// Media Foundation may report one size in the media type and then deliver
+/// another - measured on 06.08.2026: announced 640x360 NV12,
+/// delivered a buffer with 1 382 400 bytes and row stride 1280, i.e. in
+/// truth 1280x720. Whoever believes the report copies the top left
+/// quarter (image looks zoomed in) and reads the colour plane from the middle of the
+/// luma (image turns green/magenta). Row stride and buffer size
+/// do not lie - so we compute the truth from them.
 ///
-/// Rueckgabe: die Groesse, mit der der Puffer gelesen werden DARF.
+/// Returns: the size with which the buffer MAY be read.
 pub fn echte_groesse(len: usize, stride: usize, w: u32, h: u32) -> Option<(u32, u32)> {
     let (wu, hu) = (w as usize, h as usize);
     if stride == 0 || wu == 0 || hu == 0 || stride < wu {
@@ -86,25 +86,25 @@ pub fn echte_groesse(len: usize, stride: usize, w: u32, h: u32) -> Option<(u32, 
     }
     let zeilen = ((len / je_zeile) as u32) & !1;
     if zeilen < 2 || (zeilen as usize) < hu {
-        // Weniger Daten als gemeldet: der Puffer liegt nicht mit diesem
-        // Zeilenabstand da (meist dicht gepackt). Hier NICHT raten - der
-        // flache Rueckfall liest ihn richtig.
+        // Less data than reported: the buffer does not lie there with this
+        // row stride (usually tightly packed). Do NOT guess here - the
+        // flat fallback reads it correctly.
         return None;
     }
     if zeilen as usize == hu {
         return Some((w, h)); // Meldung und Puffer passen zusammen
     }
-    // MEHR Zeilen als gemeldet -> der Medientyp hat gelogen. Dann ist der
-    // Zeilenabstand zugleich die echte Breite (Kameras liefern NV12 ohne
-    // Fuellbytes) und die Zeilenzahl die echte Hoehe.
+    // MORE rows than reported -> the media type lied. Then the
+    // row stride is also the real width (cameras deliver NV12 without
+    // padding bytes) and the row count the real height.
     Some(((stride as u32) & !1, zeilen))
 }
 
-/// Mittigen Ausschnitt im Zielverhaeltnis nehmen und auf die Zielgroesse
-/// verkleinern (Flaechenmittel, damit es nicht flimmert).
+/// Take a centred section in the target ratio and scale it down to the target size
+/// (area average, so it does not flicker).
 ///
-/// Warum zuschneiden statt quetschen: ein 16:9-Bild in ein 4:3-Fenster
-/// gequetscht macht lange Gesichter. Zoom/Teams schneiden ebenfalls zu.
+/// Why crop instead of squash: a 16:9 image squashed into a 4:3 window
+/// makes long faces. Zoom/Teams crop as well.
 pub fn nv12_zuschneiden_skalieren(
     src: &[u8],
     sw: u32,
@@ -121,7 +121,7 @@ pub fn nv12_zuschneiden_skalieren(
         return false;
     }
     let (zwu, zhu) = (zw as usize, zh as usize);
-    // Ausschnitt im Zielverhaeltnis, immer gerade Kanten (NV12 braucht das).
+    // Section in the target ratio, always even edges (NV12 needs that).
     let (mut cw, mut ch) = (swu, shu);
     if sw as u64 * zh as u64 > zw as u64 * sh as u64 {
         cw = ((shu * zwu) / zhu) & !1;
@@ -136,14 +136,14 @@ pub fn nv12_zuschneiden_skalieren(
     out.clear();
     out.resize(zwu * zhu * 3 / 2, 0);
 
-    // ---- Schneller Weg: genau halbieren ----
+    // ---- Fast path: exact halving ----
     //
-    // Der haeufigste Fall ist 1280x720 -> 640x360 (die Kamera kann nur
-    // 720p, gebraucht werden 360p). Der allgemeine Weg unten rechnet fuer
-    // JEDEN Zielpunkt die Quellgrenzen neu aus - gemessen 46 ms je Bild im
-    // Debug-Bau, damit waeren 30 Bilder je Sekunde unmoeglich. Beim exakten
-    // Halbieren stehen die vier Quellpunkte aber fest; das spart die ganze
-    // Indexrechnerei.
+    // The most common case is 1280x720 -> 640x360 (the camera can only do
+    // 720p, 360p is needed). The general path below recomputes the source bounds for
+    // EVERY target point - measured 46 ms per frame in the
+    // debug build, which would make 30 frames per second impossible. With exact
+    // halving the four source points are fixed, though; that saves all the
+    // index arithmetic.
     if cw == zwu * 2 && ch == zhu * 2 {
         let uv_src = swu * shu;
         let uv_dst = zwu * zhu;
@@ -158,7 +158,7 @@ pub fn nv12_zuschneiden_skalieren(
                 out[zeile + tx] = (summe >> 2) as u8;
             }
         }
-        // Farbe: liegt schon in halber Aufloesung vor, also 2x2 Farbpaare.
+        // Colour: already at half resolution, so 2x2 colour pairs.
         let sw2 = swu; // Bytes je Farbzeile = Breite (je Punktpaar U und V)
         let (cx2, cy2) = (cx / 2, cy / 2);
         for ty in 0..zhu / 2 {
@@ -196,7 +196,7 @@ pub fn nv12_zuschneiden_skalieren(
             out[ty * zwu + tx] = (summe / n.max(1)) as u8;
         }
     }
-    // --- UV (halbe Aufloesung, U und V abwechselnd) ---
+    // --- UV (half resolution, U and V alternating) ---
     let uv_src = swu * shu;
     let uv_dst = zwu * zhu;
     let (cw2, ch2, cx2, cy2) = (cw / 2, ch / 2, cx / 2, cy / 2);
@@ -224,7 +224,7 @@ pub fn nv12_zuschneiden_skalieren(
     true
 }
 
-/// Laeuft im Hintergrund und haelt das neueste Kamerabild bereit.
+/// Runs in the background and keeps the newest camera frame ready.
 pub struct Kamera {
     pub name: String,
     pub breite: u32,
@@ -236,13 +236,13 @@ pub struct Kamera {
 }
 
 impl Kamera {
-    /// Das neueste Bild abholen (und aus dem Puffer nehmen). Kommt None,
-    /// gibt es seit dem letzten Abholen kein neues.
+    /// Pick up the newest frame (and take it out of the buffer). If None comes,
+    /// there has been no new one since the last pickup.
     pub fn neuestes(&self) -> Option<Bild> {
         self.neu.lock().ok().and_then(|mut b| b.take())
     }
 
-    /// Wie viele Bilder hat die Kamera bisher geliefert.
+    /// How many frames the camera has delivered so far.
     pub fn aufgenommen(&self) -> u64 {
         self.zaehler.load(Ordering::Relaxed)
     }
@@ -266,12 +266,12 @@ impl Drop for Kamera {
 pub fn liste() -> Vec<Geraet> {
     #[cfg(windows)]
     {
-        // Media Foundation ist der Hauptweg und steht deshalb vorn.
-        // Danach kommt DirectShow: die OBS-Virtualkamera meldet sich NUR
-        // dort an und fehlte bisher komplett in der Liste. Was Media
-        // Foundation schon kennt, wird nicht doppelt aufgefuehrt - sonst
-        // stuenden Webcams zweimal da, und man waehlte den schlechteren
-        // der beiden Wege.
+        // Media Foundation is the main path and therefore comes first.
+        // After that comes DirectShow: the OBS virtual camera registers ONLY
+        // there and was completely missing from the list so far. What Media
+        // Foundation already knows is not listed twice - otherwise
+        // webcams would appear twice, and you would choose the worse
+        // of the two paths.
         let mut aus = win::liste();
         for g in crate::camdshow::liste() {
             let doppelt = aus
@@ -293,7 +293,7 @@ pub fn liste() -> Vec<Geraet> {
     }
 }
 
-/// Kamera oeffnen. `id` leer = erste Kamera. Geliefert wird immer genau
+/// Open the camera. `id` empty = first camera. What is always delivered is exactly
 /// `breite` x `hoehe` in NV12.
 pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<Kamera> {
     let breite = breite & !1;
@@ -309,8 +309,8 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
         let fehler = Arc::new(Mutex::new(String::new()));
         let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<String, String>>();
         let (n2, z2, s2, f2) = (neu.clone(), zaehler.clone(), stop.clone(), fehler.clone());
-        // Traegt die Kennung das DirectShow-Praefix, gehoert sie einer
-        // Quelle, die Media Foundation gar nicht kennt (OBS & Co.).
+        // If the id carries the DirectShow prefix, it belongs to a
+        // source that Media Foundation does not know at all (OBS & co.).
         let ueber_dshow = id
             .as_deref()
             .is_some_and(|x| x.starts_with(crate::camdshow::PRAEFIX));
@@ -377,12 +377,12 @@ pub fn oeffnen(id: Option<String>, breite: u32, hoehe: u32, fps: u32) -> Result<
     }
 }
 
-/// RGB (3 Bytes je Punkt) auf `zb` x `zh` bringen und nach NV12 wandeln.
+/// Bring RGB (3 bytes per point) to `zb` x `zh` and convert to NV12.
 ///
-/// Kameras liefern selten genau die gewuenschte Groesse. Statt zu strecken
-/// wird der groesstmoegliche MITTIGE Ausschnitt im Zielverhaeltnis genommen
-/// und dann per Flaechenmittel verkleinert - so bleibt das Gesicht rund und
-/// der Text scharf.
+/// Cameras rarely deliver exactly the requested size. Instead of stretching,
+/// the largest possible CENTRED section in the target ratio is taken
+/// and then scaled down by area average - so the face stays round and
+/// the text sharp.
 pub fn rgb_nach_nv12(rgb: &[u8], sb: u32, sh: u32, zb: u32, zh: u32, out: &mut Vec<u8>) -> bool {
     let (sbu, shu, zbu, zhu) = (sb as usize, sh as usize, zb as usize, zh as usize);
     if sbu < 2 || shu < 2 || zbu < 2 || zhu < 2 || rgb.len() < sbu * shu * 3 {
@@ -428,8 +428,8 @@ pub fn rgb_nach_nv12(rgb: &[u8], sb: u32, sh: u32, zb: u32, zh: u32, out: &mut V
 }
 
 
-/// Kamera-Diagnose (nur Windows). Schreibt cam-roh.png / cam-fertig.png
-/// nach `ordner` und liefert den Messbericht als Text.
+/// Camera diagnostics (Windows only). Writes cam-roh.png / cam-fertig.png
+/// to `ordner` and returns the measurement report as text.
 pub fn diagnose(id: Option<String>, breite: u32, hoehe: u32, fps: u32, ordner: &str) -> String {
     #[cfg(windows)]
     {
@@ -444,10 +444,10 @@ pub fn diagnose(id: Option<String>, breite: u32, hoehe: u32, fps: u32, ordner: &
 
 // ---------------------------------------------------------------- macOS ----
 
-/// Kamera auf dem Mac. AVFoundation ist Objective-C - statt selbst eine
-/// Delegate-Klasse zu bauen, uebernimmt das nokhwa (nur fuer diese
-/// Plattform eingebunden). Der Rest ist derselbe Ablauf wie unter Windows:
-/// eigener Faden, immer nur das NEUESTE Bild, dicht gepacktes NV12.
+/// Camera on the Mac. AVFoundation is Objective-C - instead of building a
+/// delegate class ourselves, nokhwa takes care of that (only linked in for this
+/// platform). The rest is the same flow as on Windows:
+/// own thread, only ever the NEWEST frame, tightly packed NV12.
 #[cfg(target_os = "macos")]
 mod mac {
     use super::{rgb_nach_nv12, Bild, Geraet};
@@ -485,13 +485,13 @@ mod mac {
         stop: Arc<AtomicBool>,
         fehler: Arc<Mutex<String>>,
     ) {
-        // Welche Kamera? Ohne Angabe die erste.
+        // Which camera? Without a specification the first one.
         //
-        // WICHTIG: die Auswahl im Fenster liefert einen NAMEN (so wie ihn
-        // liste() meldet), keine Nummer. Frueher wurde hier nur eine Zahl
-        // gelesen - jeder Name fiel damit auf Kamera 0 zurueck, und auf dem
-        // Mac liess sich die Kamera schlicht nicht umstellen. Deshalb erst
-        // nach Namen suchen, dann nach Nummer, dann die erste.
+        // IMPORTANT: the selection in the window delivers a NAME (as
+        // liste() reports it), not a number. Earlier only a number was
+        // read here - every name thereby fell back to camera 0, and on the
+        // Mac the camera simply could not be switched. Hence search
+        // by name first, then by number, then the first.
         let welche = match id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             Some(w) => match w.parse::<u32>() {
                 Ok(n) => CameraIndex::Index(n),
@@ -514,8 +514,8 @@ mod mac {
             },
             None => CameraIndex::Index(0),
         };
-        // Naechstbeste Einstellung zu Wunschgroesse und -bildrate. NV12 ist
-        // das, was Kameras am haeufigsten koennen; nokhwa rechnet notfalls um.
+        // Closest setting to the wanted size and frame rate. NV12 is
+        // what cameras can do most often; nokhwa converts if necessary.
         let wunsch = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
             CameraFormat::new(Resolution::new(breite, hoehe), FrameFormat::NV12, fps),
         ));
@@ -616,8 +616,8 @@ mod win {
         s
     }
 
-    /// Kameras auflisten. Ruft `f` fuer jede auf; liefert `f`s erstes
-    /// Some-Ergebnis (so laesst sich in einem Rutsch suchen ODER listen).
+    /// List cameras. Calls `f` for each one; returns the first
+    /// Some result of `f` (so you can search OR list in one go).
     unsafe fn mit_kameras<T>(mut f: impl FnMut(&IMFActivate, &str, &str) -> Option<T>) -> Option<T> {
         mf_startup();
         let mut attrs: Option<IMFAttributes> = None;
@@ -659,7 +659,7 @@ mod win {
     pub fn liste() -> Vec<Geraet> {
         let mut out: Vec<Geraet> = Vec::new();
         unsafe {
-            // Nie Some liefern -> laeuft durch alle Geraete.
+            // Never return Some -> runs through all devices.
             mit_kameras::<()>(|_, name, id| {
                 out.push(Geraet {
                     name: name.to_string(),
@@ -671,7 +671,7 @@ mod win {
         out
     }
 
-    /// Der Aufnahmefaden. Lebt so lange, bis `stop` gesetzt wird.
+    /// The capture thread. Lives until `stop` is set.
     #[allow(clippy::too_many_arguments)]
     pub fn schleife(
         id: Option<String>,
@@ -688,8 +688,8 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop, &fehler);
             if let Err(e) = r {
-                // Wenn der Start schon scheiterte, hat der Aufrufer noch
-                // nichts bekommen - die Meldung muss zu ihm.
+                // If the start already failed, the caller has not yet received
+                // anything - the message has to go to them.
                 let _ = tx.send(Err(e.clone()));
                 if let Ok(mut f) = fehler.lock() {
                     *f = e;
@@ -732,8 +732,8 @@ mod win {
             None => return Err("keine Kamera gefunden".to_string()),
         };
 
-        // Der Leser darf umrechnen (Farbformat, Groesse) - sonst muessten
-        // wir MJPEG selbst dekodieren.
+        // The reader may convert (colour format, size) - otherwise we would have
+        // to decode MJPEG ourselves.
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 2).map_err(|e| format!("Attribute: {}", e))?;
         let attrs = attrs.ok_or_else(|| "Attribute leer".to_string())?;
@@ -743,14 +743,14 @@ mod win {
             .map_err(|e| format!("Leser: {}", e))?;
         let strom = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
-        // ZUERST ein Format nehmen, das die Kamera WIRKLICH kann.
+        // FIRST take a format that the camera REALLY can do.
         //
-        // Frueher wurde einfach die Wunschgroesse gesetzt. Der Leser sagt
-        // dazu "ja" - und liefert trotzdem das native Bild (gemessen:
-        // 640x360 angemeldet, 1280x720 geliefert). Das Ergebnis war ein
-        // zerschnittenes, gruenes Bild. Ein natives Format kann nicht
-        // luegen; verkleinert wird danach mit unserem eigenen, geprueften
-        // Rechenweg.
+        // Earlier the wanted size was simply set. The reader says
+        // "yes" to it - and still delivers the native image (measured:
+        // 640x360 announced, 1280x720 delivered). The result was a
+        // cut-up, green image. A native format cannot
+        // lie; scaling down is done afterwards with our own, tested
+        // calculation path.
         let mut skalieren = true;
         let mut gesetzt = false;
         if let Some(t) = bestes_format(&leser, strom, zw, zh, fps) {
@@ -759,7 +759,7 @@ mod win {
             }
         }
         if !gesetzt {
-            // Rueckfall: nur das Farbformat festlegen, Groesse offen lassen.
+            // Fallback: only set the colour format, leave the size open.
             let mt2 = MFCreateMediaType().map_err(|e| format!("Medientyp2: {}", e))?;
             mt2.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| format!("Haupttyp2: {}", e))?;
@@ -771,7 +771,7 @@ mod win {
         }
         let _ = leser.SetStreamSelection(strom, true);
 
-        // Was liefert die Kamera nun wirklich?
+        // What does the camera really deliver now?
         let (mut qw, mut qh) = groesse(&leser, strom).unwrap_or((zw, zh));
         skalieren = qw != zw || qh != zh;
         let _ = tx.send(Ok(name));
@@ -821,9 +821,9 @@ mod win {
                 None => continue,
             };
             if rw != qw || rh != qh {
-                // Der Medientyp hat gelogen - ab jetzt mit der echten
-                // Groesse weiterrechnen, sonst schneidet der Skalierer in
-                // einen falschen Ausschnitt.
+                // The media type lied - from now on keep calculating with the real
+                // size, otherwise the scaler cuts into
+                // a wrong section.
                 qw = rw;
                 qh = rh;
                 skalieren = qw != zw || qh != zh;
@@ -855,12 +855,12 @@ mod win {
     }
 
 
-    /// Kamera-Diagnose: was bietet das Geraet an, was bekommen wir wirklich,
-    /// und wie sieht das Rohbild aus.
+    /// Camera diagnostics: what the device offers, what we really get,
+    /// and what the raw image looks like.
     ///
-    /// WARUM: Justins Bild kam gruen/magenta und stark hineingezoomt an. Ob
-    /// das am Farbraum, am Zeilenabstand oder am Zuschnitt liegt, laesst
-    /// sich nur am ECHTEN Geraet messen - raten hilft hier nicht.
+    /// WHY: Justin's image arrived green/magenta and strongly zoomed in. Whether
+    /// that is down to the colour space, the row stride or the cropping can
+    /// only be measured on the REAL device - guessing does not help here.
     pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, ordner: &str) -> String {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -871,9 +871,9 @@ mod win {
     }
 
     fn fourcc(g: &GUID) -> String {
-        // MF-Videountertypen sind FOURCCs in einer festen GUID-Huelle:
-        // XXXXXXXX-0000-0010-8000-00AA00389B71 - die ersten vier Bytes
-        // ergeben direkt den Namen (NV12, YUY2, MJPG ...).
+        // MF video subtypes are FOURCCs in a fixed GUID wrapper:
+        // XXXXXXXX-0000-0010-8000-00AA00389B71 - the first four bytes
+        // directly give the name (NV12, YUY2, MJPG ...).
         let d1 = g.data1.to_le_bytes();
         if g.data2 == 0 && g.data3 == 0x10 && g.data4 == [0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71] {
             let t: String = d1
@@ -921,8 +921,8 @@ mod win {
         format!("{} {}x{} @{} fps, stride {}", sub, w, h, fr, stride)
     }
 
-    /// NV12 (dicht gepackt) als PNG ablegen - damit laesst sich das Bild
-    /// wirklich ANSEHEN statt nur Zahlen zu vergleichen.
+    /// Save NV12 (tightly packed) as PNG - so the image can really be
+    /// LOOKED AT instead of only comparing numbers.
     fn nv12_png(nv12: &[u8], w: u32, h: u32, pfad: &str) -> String {
         let mut rgba = Vec::new();
         if !crate::h264::nv12_to_rgba(nv12, w, h, w as usize, h, &mut rgba) {
@@ -1014,7 +1014,7 @@ mod win {
                 }
             }
         }
-        // Und jetzt der neue Weg: ein Format, das die Kamera WIRKLICH kann.
+        // And now the new path: a format that the camera REALLY can do.
         match bestes_format(&leser, strom, zw, zh, fps) {
             Some(t) => {
                 sag!("bestes natives NV12: {}", typ_text(&t));
@@ -1038,7 +1038,7 @@ mod win {
         }
         sag!("Quelle {}x{}, Ziel {}x{}, skalieren={}", qw, qh, zw, zh, skalieren);
 
-        // Ein paar Bilder verwerfen (Belichtung), dann eins genau ansehen.
+        // Discard a few frames (exposure), then look at one closely.
         let mut roh: Vec<u8> = Vec::new();
         let mut fertig: Vec<u8> = Vec::new();
         let mut gesehen = 0;
@@ -1105,7 +1105,7 @@ mod win {
                 }
             };
             sag!("  bild_holen ok, {} Bytes, ECHTE Groesse {}x{}", roh.len(), qw, qh);
-            // Kennzahlen: liegt die Farbe wirklich um 128?
+            // Metrics: is the colour really around 128?
             let yn = (qw as usize) * (qh as usize);
             let ys: u64 = roh[..yn].iter().map(|v| *v as u64).sum();
             let us: u64 = roh[yn..].iter().step_by(2).map(|v| *v as u64).sum();
@@ -1130,15 +1130,15 @@ mod win {
         log
     }
 
-    /// Sucht unter den Formaten, die die Kamera von sich aus beherrscht,
-    /// das beste NV12 fuer die Zielgroesse.
+    /// Looks among the formats the camera supports natively for
+    /// the best NV12 for the target size.
     ///
-    /// Bewertung, in dieser Reihenfolge:
-    ///   1. gleiches Seitenverhaeltnis wie das Ziel (sonst muss zugeschnitten
-    ///      werden - dann fehlt links und rechts etwas vom Raum),
-    ///   2. mindestens so gross wie das Ziel (hochrechnen bringt nichts),
-    ///   3. moeglichst KLEIN darueber (spart Rechenzeit beim Verkleinern),
-    ///   4. moeglichst nahe an der Wunschbildrate.
+    /// Rating, in this order:
+    ///   1. same aspect ratio as the target (otherwise it has to be cropped
+    ///      - then something of the room is missing left and right),
+    ///   2. at least as large as the target (upscaling brings nothing),
+    ///   3. as SMALL as possible above that (saves CPU time when scaling down),
+    ///   4. as close as possible to the wanted frame rate.
     unsafe fn bestes_format(
         leser: &IMFSourceReader,
         strom: u32,
@@ -1175,7 +1175,7 @@ mod win {
                     }
                 })
                 .unwrap_or(30.0);
-            // Kleiner ist besser -> negative Punkte fuer Flaeche und Abstand.
+            // Smaller is better -> negative points for area and distance.
             let verhaeltnis = w as f64 / h as f64;
             let mut punkte: i64 = 0;
             if (verhaeltnis - ziel).abs() < 0.02 {
@@ -1204,17 +1204,17 @@ mod win {
         Some((w & !1, h & !1))
     }
 
-    /// Kopiert ein Sample in dicht gepacktes NV12 und liefert die Groesse,
-    /// die WIRKLICH darin steckt.
+    /// Copies a sample into tightly packed NV12 and returns the size
+    /// that REALLY is in it.
     ///
-    /// WARUM nicht einfach dem Medientyp glauben: gemessen am 06.08.2026 auf
-    /// der "Surface Camera Front" meldet der Quell-Leser 640x360 NV12 und
-    /// liefert dann einen Puffer von 1 382 400 Bytes mit Zeilenabstand 1280 -
-    /// also in Wahrheit ein 1280x720-Bild. Wer dem Typ glaubt, kopiert die
-    /// ersten 640 Bytes von 360 Zeilen (= linkes oberes Viertel, das Bild
-    /// wirkt stark hineingezoomt) und sucht die Farbebene bei 1280*360 -
-    /// mitten in der Helligkeit. Genau daher kamen Justins gruen/magenta
-    /// Bilder. Zeilenabstand und Puffergroesse luegen nicht, der Typ schon.
+    /// WHY not simply believe the media type: measured on 06.08.2026 on
+    /// the "Surface Camera Front", the source reader reports 640x360 NV12
+    /// and then delivers a buffer of 1 382 400 bytes with row stride 1280 -
+    /// i.e. in truth a 1280x720 image. Whoever believes the type copies the
+    /// first 640 bytes of 360 rows (= top left quarter, the image
+    /// looks strongly zoomed in) and looks for the colour plane at 1280*360 -
+    /// in the middle of the luma. That is exactly where Justin's green/magenta
+    /// images came from. Row stride and buffer size do not lie, the type does.
     unsafe fn bild_holen(s: &IMFSample, w: u32, h: u32, out: &mut Vec<u8>) -> Option<(u32, u32)> {
         let (wu, hu) = (w as usize, h as usize);
         let buf = s.ConvertToContiguousBuffer().ok()?;
@@ -1225,7 +1225,7 @@ mod win {
             .or_else(|| buf.GetMaxLength().ok())
             .unwrap_or(0) as usize;
 
-        // --- Weg A: Zeilen mit Abstand (der uebliche Fall) ---
+        // --- Path A: rows with stride (the usual case) ---
         if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
             let mut zeile0: *mut u8 = std::ptr::null_mut();
             let mut pitch = 0i32;
@@ -1254,9 +1254,9 @@ mod win {
             }
         }
 
-        // --- Weg B: flach sperren. Lock() liefert bei 2D-Puffern dicht
-        // gepackte Daten. Auch hier gilt: passt die Laenge nicht zur
-        // gemeldeten Groesse, hat der Medientyp gelogen.
+        // --- Path B: lock flat. Lock() returns tightly packed
+        // data for 2D buffers. Here too: if the length does not fit the
+        // reported size, the media type lied.
         let mut p: *mut u8 = std::ptr::null_mut();
         let mut flach = 0u32;
         if buf.Lock(&mut p, None, Some(&mut flach)).is_err() || p.is_null() {
@@ -1269,8 +1269,8 @@ mod win {
             out.extend_from_slice(std::slice::from_raw_parts(p, dicht));
             Some((w, h))
         } else if flach >= dicht * 2 {
-            // Deutlich mehr Daten als erwartet: gleiches Seitenverhaeltnis
-            // annehmen und die echte Groesse ausrechnen (n*n*3/2 = flach).
+            // Clearly more data than expected: assume the same aspect ratio
+            // and compute the real size (n*n*3/2 = flat).
             let punkte = flach * 2 / 3;
             let faktor = (punkte as f64 / (wu * hu) as f64).sqrt();
             let rw = (((wu as f64 * faktor).round() as u32) & !1).max(2);
@@ -1306,15 +1306,15 @@ mod tests_stufe5 {
         let mut nv12 = Vec::new();
         assert!(rgb_nach_nv12(&rgb, sb, sh, 16, 16, &mut nv12));
         assert_eq!(nv12.len(), 16 * 16 * 3 / 2);
-        // Y von Gruen liegt bei etwa 145 (BT.601).
+        // Y of green is around 145 (BT.601).
         let y0 = nv12[0];
         assert!((120..175).contains(&y0), "Y von Gruen ist {}", y0);
     }
 
     #[test]
     fn rgb_nach_nv12_schneidet_mittig_zu() {
-        // Links und rechts ein schwarzer Rand, Mitte weiss: bei 1:1-Ziel
-        // muss die weisse Mitte uebrig bleiben.
+        // A black border left and right, white in the middle: with a 1:1 target
+        // the white middle must remain.
         let (sb, sh) = (60u32, 20u32);
         let mut rgb = vec![0u8; (sb * sh * 3) as usize];
         for y in 0..sh as usize {
@@ -1338,8 +1338,8 @@ mod tests_stufe5 {
         assert!(!rgb_nach_nv12(&[], 0, 0, 16, 16, &mut out));
     }
 
-    /// Was findet diese Maschine? Auf einem Bauknecht ohne Kamera ist eine
-    /// leere Liste richtig - abstuerzen darf es nie.
+    /// What does this machine find? On a build box without a camera an
+    /// empty list is correct - it must never crash.
     #[test]
     fn kameraliste_und_oeffnen_melden_ehrlich() {
         let l = liste();
@@ -1354,7 +1354,7 @@ mod tests_stufe5 {
             }
             return;
         }
-        // Es gibt eine: dann muss der ganze Weg bis NV12 laufen.
+        // There is one: then the whole path to NV12 must run.
         match oeffnen(None, 640, 360, 15) {
             Ok(k) => {
                 let start = std::time::Instant::now();
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn liste_stuerzt_nicht_ab() {
-        // Auf dem Server ohne Kamera muss das eine leere Liste geben.
+        // On the server without a camera this must give an empty list.
         let l = liste();
         println!("Kameras: {}", l.len());
     }
@@ -1415,10 +1415,10 @@ mod tests {
         assert_eq!(&out[16..20], &[40, 41, 42, 43]); // erste UV-Zeile
     }
 
-    /// Der echte Messwert vom 06.08.2026 (Surface Camera Front): der
-    /// Medientyp meldete 640x360, der Puffer war 1 382 400 Bytes gross bei
-    /// Zeilenabstand 1280 - das ist 1280x720. Genau dieser Fall hat Justins
-    /// Bild gruen und hineingezoomt gemacht.
+    /// The real measurement from 06.08.2026 (Surface Camera Front): the
+    /// media type reported 640x360, the buffer was 1 382 400 bytes at
+    /// row stride 1280 - that is 1280x720. Exactly this case made Justin's
+    /// image green and zoomed in.
     #[test]
     fn luegender_medientyp_wird_entlarvt() {
         assert_eq!(echte_groesse(1_382_400, 1280, 640, 360), Some((1280, 720)));
@@ -1428,13 +1428,13 @@ mod tests {
     fn ehrlicher_medientyp_bleibt_stehen() {
         // 640x360 mit Zeilenabstand 640: passt genau.
         assert_eq!(echte_groesse(640 * 360 * 3 / 2, 640, 640, 360), Some((640, 360)));
-        // Mit Fuellbytes (Zeilenabstand 768) und passend grossem Puffer.
+        // With padding bytes (row stride 768) and a suitably large buffer.
         assert_eq!(echte_groesse(768 * 360 * 3 / 2, 768, 640, 360), Some((640, 360)));
     }
 
-    /// Dicht gepackter Puffer bei grossem Zeilenabstand: hier darf NICHT
-    /// geraten werden, sonst schneidet der 2D-Weg das Bild kaputt. Der
-    /// flache Rueckfall liest ihn richtig - also None melden.
+    /// Tightly packed buffer with a large row stride: NO guessing
+    /// here, otherwise the 2D path cuts the image to pieces. The
+    /// flat fallback reads it correctly - so report None.
     #[test]
     fn dicht_gepackter_puffer_geht_an_den_rueckfall() {
         assert_eq!(echte_groesse(640 * 360 * 3 / 2, 768, 640, 360), None);
@@ -1447,8 +1447,8 @@ mod tests {
         assert_eq!(echte_groesse(100, 1280, 640, 360), None);
     }
 
-    /// Die Farbebene MUSS hinter der ganzen Helligkeit liegen. Wird sie zu
-    /// frueh gelesen, kommt Helligkeit als Farbe an - das Bild wird gruen.
+    /// The colour plane MUST lie behind the whole luma. If it is read too
+    /// early, luma arrives as colour - the image turns green.
     #[test]
     fn packen_liest_die_farbe_nicht_aus_der_helligkeit() {
         let (w, h, stride) = (8u32, 6u32, 8usize);
@@ -1479,7 +1479,7 @@ mod tests {
 
     #[test]
     fn skalieren_haelt_die_farbe() {
-        // Gleichmaessiges Bild: nach dem Verkleinern muss dasselbe rauskommen.
+        // Uniform image: after scaling down the same must come out.
         let (sw, sh) = (640u32, 480u32);
         let mut src = vec![0u8; (sw * sh * 3 / 2) as usize];
         for v in src[..(sw * sh) as usize].iter_mut() {
@@ -1497,12 +1497,12 @@ mod tests {
 
     #[test]
     fn skalieren_schneidet_mittig_zu() {
-        // 640x480 (4:3) -> 320x180 (16:9): oben/unten muss wegfallen,
-        // die Mitte muss uebrig bleiben.
+        // 640x480 (4:3) -> 320x180 (16:9): top/bottom must be dropped,
+        // the middle must remain.
         let (sw, sh) = (640u32, 480u32);
         let mut src = vec![128u8; (sw * sh * 3 / 2) as usize];
-        // obere und untere 60 Zeilen markieren - genau die, die der
-        // Zuschnitt 4:3 -> 16:9 wegnehmen muss.
+        // mark the top and bottom 60 rows - exactly those that the
+        // 4:3 -> 16:9 crop must remove.
         for y in 0..60 {
             for x in 0..sw as usize {
                 src[y * sw as usize + x] = 0;
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[test]
     fn oeffnen_ohne_kamera_meldet_sauber() {
-        // Ohne Kamera (Server) muss ein Fehler kommen, kein Absturz.
+        // Without a camera (server) an error must come, not a crash.
         match oeffnen(None, 640, 360, 15) {
             Ok(k) => {
                 println!("Kamera da: {}", k.name);
@@ -1543,11 +1543,11 @@ mod tests {
 mod tempo {
     use super::*;
 
-    /// Wie teuer ist das Verkleinern wirklich? Die Kamera liefert 1280x720,
-    /// gebraucht werden 640x360 - bei 30 Bildern je Sekunde stehen dafuer
-    /// 33 ms zur Verfuegung, und zwar fuer ALLES (Verkleinern, Kodieren,
-    /// Zeichnen). Ist allein das Verkleinern schon zu langsam, nuetzt ein
-    /// hoeherer Sendetakt nichts.
+    /// How expensive is scaling down really? The camera delivers 1280x720,
+    /// 640x360 is needed - at 30 frames per second there are 33 ms
+    /// available for it, and that for EVERYTHING (scaling down, encoding,
+    /// drawing). If scaling down alone is already too slow, a
+    /// higher send rate is of no use.
     #[test]
     fn verkleinern_ist_schnell_genug() {
         let (sw, sh) = (1280u32, 720u32);
@@ -1558,12 +1558,12 @@ mod tempo {
         let mut out = Vec::new();
         // Einmal warmlaufen (Speicher anlegen).
         assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 640, 360, &mut out));
-        // Von drei Messreihen die SCHNELLSTE nehmen. Der Rechner baut
-        // nebenher, da faellt eine Reihe schon mal doppelt so lang aus - und
-        // ein Test, der zufaellig durchfaellt, ist schlimmer als keiner.
-        // Die schnellste Reihe ist trotzdem eine ehrliche Untergrenze: eine
-        // echte Verschlechterung (der gefundene Fehler lag bei 46 ms) bleibt
-        // in JEDER Reihe langsam.
+        // Take the FASTEST of three measurement series. The machine is building
+        // on the side, so one series sometimes takes twice as long - and
+        // a test that fails by chance is worse than none.
+        // The fastest series is still an honest lower bound: a
+        // real regression (the error found was at 46 ms) stays
+        // slow in EVERY series.
         let runden = 20;
         let mut je = f64::MAX;
         for _ in 0..3 {
@@ -1574,12 +1574,12 @@ mod tempo {
             je = je.min(start.elapsed().as_secs_f64() * 1000.0 / runden as f64);
         }
         println!("1280x720 -> 640x360: {:.2} ms je Bild (schnellste von 3)", je);
-        // 30 Bilder je Sekunde heisst 33 ms fuer ALLES - Verkleinern,
-        // Kodieren, Senden, Zeichnen. Der ausgelieferte Bau ist der
-        // Release-Bau, deshalb gilt dort die scharfe Grenze. Der Debug-Bau
-        // ist um ein Vielfaches langsamer und laeuft auf einem Server, der
-        // nebenher baut - dort wird nur die grobe Entgleisung abgefangen
-        // (der Fehler, den dieser Test gefunden hat, lag bei 46 ms).
+        // 30 frames per second means 33 ms for EVERYTHING - scaling down,
+        // encoding, sending, drawing. The shipped build is the
+        // release build, so the strict limit applies there. The debug build
+        // is many times slower and runs on a server that is building
+        // on the side - there only the gross derailment is caught
+        // (the error this test found was at 46 ms).
         let grenze = if cfg!(debug_assertions) { 30.0 } else { 3.0 };
         assert!(
             je < grenze,
@@ -1589,8 +1589,8 @@ mod tempo {
         );
     }
 
-    /// Der schnelle Weg muss DASSELBE liefern wie der allgemeine. Sonst
-    /// waere die Beschleunigung ein stiller Bildfehler.
+    /// The fast path must deliver THE SAME as the general one. Otherwise
+    /// the speed-up would be a silent image error.
     #[test]
     fn schneller_weg_rechnet_wie_der_allgemeine() {
         let (sw, sh) = (64u32, 36u32);
@@ -1598,12 +1598,12 @@ mod tempo {
         for (i, v) in src.iter_mut().enumerate() {
             *v = ((i * 37) % 256) as u8;
         }
-        // 64x36 -> 32x18 ist exakt halbiert (schneller Weg),
-        // 64x36 -> 30x18 nicht (allgemeiner Weg) - beide muessen laufen.
+        // 64x36 -> 32x18 is exactly halved (fast path),
+        // 64x36 -> 30x18 is not (general path) - both must work.
         let mut halb = Vec::new();
         assert!(nv12_zuschneiden_skalieren(&src, sw, sh, 32, 18, &mut halb));
         assert_eq!(halb.len(), 32 * 18 * 3 / 2);
-        // Gegenprobe von Hand: erster Punkt = Mittel der vier oberen links.
+        // Cross-check by hand: first point = mean of the four top left.
         let erwartet = (src[0] as u32 + src[1] as u32 + src[64] as u32 + src[65] as u32) / 4;
         assert_eq!(halb[0] as u32, erwartet, "schneller Weg mittelt falsch");
         // Erste Farbe ebenso.

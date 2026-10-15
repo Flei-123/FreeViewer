@@ -1,15 +1,15 @@
-//! Aufloesung des fernen Monitors aendern (auf Wunsch des Zugreifenden).
+//! Change the resolution of the remote monitor (at the request of the accessing side).
 //!
-//! Der Viewer schickt `SetResolution`, der Host stellt den gerade
-//! gezeigten Bildschirm um. Die vorherige Aufloesung merkt sich dieses
-//! Modul pro Monitor - `restore` setzt sie am Ende der Sitzung wieder.
-//! Windows only; anderswo ist es ein kontrolliertes "geht nicht".
+//! The viewer sends `SetResolution`, the host switches the screen
+//! currently shown. This module remembers the previous resolution
+//! per monitor - `restore` sets it back at the end of the session.
+//! Windows only; elsewhere it is a controlled "not possible".
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Vorherige Aufloesung pro Monitor-Index (nur was wir selbst umgestellt haben).
+/// Previous resolution per monitor index (only what we switched ourselves).
 static ORIGINAL: Mutex<Option<HashMap<usize, (u32, u32)>>> = Mutex::new(None);
 
 fn merken(index: usize, w: u32, h: u32) {
@@ -22,21 +22,21 @@ fn nehmen(index: usize) -> Option<(u32, u32)> {
     ORIGINAL.lock().unwrap().as_mut()?.remove(&index)
 }
 
-/// Stellt den Monitor `index` auf w x h. Fehler sind nicht fatal - der
-/// Anrufer ignoriert sie bewusst (die Sitzung laeuft einfach weiter).
+/// Sets monitor `index` to w x h. Errors are not fatal - the
+/// caller deliberately ignores them (the session simply keeps running).
 pub fn set_resolution(index: usize, w: u32, h: u32) -> Result<()> {
     imp::set(index, w, h)
 }
 
-/// Stellt die vorherige Aufloesung wieder her, falls wir sie geaendert hatten.
+/// Restores the previous resolution if we had changed it.
 pub fn restore(index: usize) {
     if let Some((w, h)) = nehmen(index) {
         let _ = imp::set_keep(index, w, h);
     }
 }
 
-/// Was der Monitor wirklich kann (breiteste zuerst, Duplikate raus).
-/// Nur so landen im Auswahlmenue Aufloesungen, die Windows auch annimmt.
+/// What the monitor can really do (widest first, duplicates removed).
+/// Only this way do resolutions end up in the selection menu that Windows also accepts.
 pub fn supported(index: usize) -> Vec<(u32, u32)> {
     imp::supported(index)
 }
@@ -54,23 +54,23 @@ mod imp {
     };
     use windows::Win32::Graphics::Gdi::ENUM_DISPLAY_SETTINGS_MODE;
 
-    /// Index fuer EnumDisplaySettingsW: alle Modi durchgehen.
+    /// Index for EnumDisplaySettingsW: go through all modes.
     const fn ENUM_INDEX(i: u32) -> ENUM_DISPLAY_SETTINGS_MODE {
         ENUM_DISPLAY_SETTINGS_MODE(i)
     }
 
-    /// Bit 1 in StateFlags: dieses Geraet haengt wirklich am Desktop.
+    /// Bit 1 in StateFlags: this device is really attached to the desktop.
     const ATTACHED_TO_DESKTOP: u32 = 0x0000_0001;
 
-    /// Der Geraetename des `index`-ten ANGESCHLOSSENEN Bildschirms.
+    /// The device name of the `index`-th CONNECTED screen.
     ///
-    /// WARUM gefiltert wird: EnumDisplayDevicesW zaehlt ALLE Anzeigegeraete
-    /// mit, auch abgemeldete und Spiegeltreiber. Der Index, den der Viewer
-    /// schickt, zaehlt dagegen nur die Bildschirme, die die Aufnahme sieht
-    /// (DXGI zaehlt ausschliesslich angeschlossene Ausgaenge). Ungefiltert
-    /// zeigte der Index deshalb auf ein totes Geraet - und Windows meldete
-    /// "aktuelle Aufloesung unlesbar", die Umstellung wurde jedes Mal
-    /// abgelehnt. Genau dieser Fehler stand in Justins Protokoll.
+    /// WHY it is filtered: EnumDisplayDevicesW counts ALL display devices,
+    /// including unplugged ones and mirror drivers. The index the viewer
+    /// sends, however, counts only the screens the capture sees
+    /// (DXGI counts only connected outputs). Unfiltered,
+    /// the index therefore pointed to a dead device - and Windows reported
+    /// "current resolution unreadable", the switch was rejected every
+    /// time. Exactly this error was in Justin's log.
     fn devicename(index: usize) -> Result<Vec<u16>> {
         let mut gefunden = 0usize;
         for i in 0..64u32 {
@@ -170,10 +170,10 @@ mod imp {
             )
         };
         if r == DISP_CHANGE_SUCCESSFUL {
-            // Nach einem Moduswechsel ist die laufende Bildschirmaufnahme
-            // ungueltig (die Duplication meldet danach 0x887A0001). Der
-            // Aufnehmer baut sich bei Fehlern selbst neu auf - hier wird nur
-            // vermerkt, dass es gleich einen Aussetzer geben wird.
+            // After a mode change the running screen capture is
+            // invalid (the duplication then reports 0x887A0001). The
+            // capturer rebuilds itself on errors - here we only note
+            // that there will be a hiccup shortly.
             crate::capture::log_line(&format!("Aufloesung auf {}x{} gestellt", w, h));
             Ok(())
         } else {

@@ -1,15 +1,15 @@
-//! Natives Meeting - Stufe 2b: Bild senden.
+//! Native meeting - stage 2b: send video.
 //!
-//! Der Weg ist derselbe wie bei der Fernwartung, nur das Ziel ist ein
-//! anderes: Bild besorgen -> nach NV12 wandeln -> H.264 kodieren (Windows
-//! Media Foundation, spaeter macOS VideoToolbox) -> als RTP ins Meeting.
-//! Der Kodierer liegt schon im Projekt (src/h264.rs) und wird hier nur
-//! anders gefuettert.
+//! The path is the same as for remote maintenance, only the target is a
+//! different one: get image -> convert to NV12 -> encode H.264 (Windows
+//! Media Foundation, later macOS VideoToolbox) -> as RTP into the meeting.
+//! The encoder is already in the project (src/h264.rs) and is only
+//! fed differently here.
 //!
-//! Warum ein Testmuster? Weil sich damit die GANZE Kette messen laesst,
-//! ohne dass eine Kamera angeschlossen sein muss: der Browser bekommt ein
-//! Bild, das sich nachweislich bewegt, und wir koennen zaehlen, was
-//! ankommt. Die Kamera haengt spaeter an derselben Stelle.
+//! Why a test pattern? Because it lets the WHOLE chain be measured
+//! without a camera having to be connected: the browser gets an
+//! image that demonstrably moves, and we can count what
+//! arrives. The camera attaches later at the same spot.
 
 use anyhow::{anyhow, Result};
 
@@ -32,9 +32,9 @@ impl Muster {
         }
     }
 
-    /// Ein Bild: Farbbalken, die wandern, plus ein heller Block, der von
-    /// links nach rechts laeuft. So sieht man in der Gegenprobe sofort, ob
-    /// sich wirklich etwas bewegt und nicht nur ein Standbild ankommt.
+    /// An image: colour bars that wander, plus a bright block that runs from
+    /// left to right. This way the cross-check shows at once whether
+    /// something really moves and not just a still image arriving.
     pub fn naechstes(&mut self) -> Vec<u8> {
         let (w, h) = (self.breite as usize, self.hoehe as usize);
         let mut rgb = vec![0u8; w * h * 3];
@@ -95,8 +95,8 @@ impl Kodierer {
         })
     }
 
-    /// Ein fertiges NV12-Bild hineingeben (so liefert es die Kamera) -
-    /// spart die Umrechnung RGB->NV12 komplett.
+    /// Feed in a finished NV12 image (as the camera delivers it) -
+    /// saves the RGB->NV12 conversion completely.
     pub fn nv12_rahmen(&mut self, nv12: &[u8]) -> Result<Vec<crate::h264::Chunk>> {
         let erwartet = (self.breite as usize) * (self.hoehe as usize) * 3 / 2;
         if nv12.len() < erwartet {
@@ -114,9 +114,9 @@ impl Kodierer {
         Ok(aus)
     }
 
-    /// Das naechste Bild als Schluesselbild kodieren. Wichtig beim
-    /// Bildschirmteilen: wer spaeter dazukommt, sieht sonst bis zum
-    /// naechsten Schluesselbild nur Matsch oder gar nichts.
+    /// Encode the next image as a keyframe. Important when
+    /// sharing the screen: whoever joins later otherwise sees only mush or nothing
+    /// until the next keyframe.
     pub fn schluesselbild(&mut self) {
         self.enc.request_keyframe();
     }
@@ -134,17 +134,17 @@ impl Kodierer {
 }
 
 
-/// Dekodiert die H.264-Rahmen der anderen - je Teilnehmer ein eigener
-/// Dekodierer, weil jeder eine andere Groesse schicken kann.
+/// Decodes the H.264 frames of the others - one separate
+/// decoder per participant, because each can send a different size.
 pub struct Dekodierer {
     leute: std::collections::HashMap<u64, crate::h264::Decoder>,
     /// Letztes fertiges Bild je Teilnehmer: (Breite, Hoehe, RGBA).
     pub bilder: std::collections::HashMap<u64, (u32, u32, Vec<u8>)>,
     pub gezaehlt: u64,
     pub letzter_fehler: String,
-    /// Zaehlt je Teilnehmer hoch, sobald ein NEUES Bild fertig ist. Die
-    /// Oberflaeche laedt die Grafikkarte nur dann neu - sonst wuerde sie
-    /// jedes Bild mehrfach hochschieben.
+    /// Counts up per participant as soon as a NEW image is finished. The
+    /// UI reloads the graphics card only then - otherwise it would
+    /// upload every image several times.
     pub stand: std::collections::HashMap<u64, u64>,
 }
 
@@ -165,14 +165,14 @@ impl Dekodierer {
         }
     }
 
-    /// Einen Rahmen hineingeben. Liefert true, wenn daraus ein Bild wurde.
+    /// Feed in a frame. Returns true if it turned into an image.
     pub fn rahmen(&mut self, peer: u64, daten: &[u8]) -> bool {
         let dec = match self.leute.entry(peer) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                // Die anderen schicken, was sie wollen (Handy hochkant,
-                // Bildschirm in 1920x1080) - der Dekodierer nimmt die
-                // Groesse aus dem Strom, sonst sieht man nur einen Ausschnitt.
+                // The others send whatever they want (phone in portrait,
+                // screen at 1920x1080) - the decoder takes the
+                // size from the stream, otherwise you only see a section.
                 match crate::h264::Decoder::new_auto(BREITE, HOEHE) {
                     Ok(d) => e.insert(d),
                     Err(err) => {
@@ -204,9 +204,9 @@ impl Dekodierer {
         self.stand.remove(&peer);
     }
 
-    /// Wie hell ist das letzte Bild eines Teilnehmers (0..1)? Damit laesst
-    /// sich in einem Test ohne Bildschirm pruefen, ob wirklich etwas
-    /// Sichtbares ankommt und nicht nur schwarze Flaechen.
+    /// How bright is the last image of a participant (0..1)? This lets
+    /// a test without a screen check whether something
+    /// visible really arrives and not just black areas.
     pub fn helligkeit(&self, peer: u64) -> f32 {
         match self.bilder.get(&peer) {
             None => 0.0,
@@ -233,7 +233,7 @@ mod tests {
         let b = m.naechstes();
         assert_eq!(a.len(), (BREITE * HOEHE * 3) as usize);
         assert_ne!(a, b, "das Bild bewegt sich nicht");
-        // Es ist nicht schwarz.
+        // It is not black.
         let hell = a.iter().filter(|v| **v > 200).count();
         assert!(hell > 1000, "Bild zu dunkel: {}", hell);
     }

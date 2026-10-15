@@ -361,9 +361,9 @@ mod imp {
                 },
             ];
             let fa = SERVICE_FAILURE_ACTIONSW {
-                // Frueher 24 Stunden: bei mehreren Updates am Tag war der
-                // Zaehler ausgereizt und Windows half nicht mehr nach. Eine
-                // Stunde reicht voellig, um echte Abstuerze zu erkennen.
+                // It used to be 24 hours: with several updates a day the
+                // counter was used up and Windows no longer helped. One
+                // hour is entirely enough to detect real crashes.
                 dwResetPeriod: 3_600,
                 lpRebootMsg: PWSTR::null(),
                 lpCommand: PWSTR::null(),
@@ -722,15 +722,15 @@ mod imp {
         }
     }
 
-    /// Bittet den Dienst, sich ORDENTLICH zu beenden (wie ein "sc stop").
+    /// Asks the service to terminate PROPERLY (like an "sc stop").
     ///
-    /// WARUM das wichtig ist: bisher hat sich der Dienst beim Update per
-    /// `taskkill /f` selbst abgeschossen. Windows zaehlt das als ABSTURZ -
-    /// im Systemprotokoll steht dann "Der Dienst wurde unerwartet beendet.
-    /// Dies ist bereits 3 Mal vorgekommen" (auf HOLO-LAPTOP-3 am 06.08.2026
-    /// nachgelesen). Damit verbraucht jedes Update eine der drei
-    /// Wiederherstellungsmassnahmen - das Sicherheitsnetz war nach drei
-    /// Updates am Tag aufgebraucht. Ein sauberes Ende zaehlt nicht mit.
+    /// WHY this matters: so far the service shot itself down with
+    /// `taskkill /f` on update. Windows counts that as a CRASH -
+    /// the system log then says "The service terminated unexpectedly.
+    /// This has happened 3 times" (looked up on HOLO-LAPTOP-3 on 06.08.2026).
+    /// So every update uses up one of the three
+    /// recovery actions - the safety net was used up after three
+    /// updates a day. A clean exit does not count.
     pub fn stop_anfordern() {
         STOP.store(true, Ordering::Relaxed);
         WAKE.store(true, Ordering::Relaxed);
@@ -873,12 +873,12 @@ mod stub {
     pub fn kill_agent() {}
     pub fn stop_anfordern() {}
     pub fn log(_s: &str) {}
-    /// Auf welchem Eingabe-Desktop laeuft der Agent? Nur Windows kennt das
-    /// Problem (Anmeldebildschirm, UAC), anderswo gibt es genau einen.
+    /// On which input desktop does the agent run? Only Windows knows the
+    /// problem (login screen, UAC), elsewhere there is exactly one.
     pub fn desktop_report() -> String {
         "kein Windows - nur ein Desktop".to_string()
     }
-    /// Dem Eingabe-Desktop folgen - anderswo nicht noetig.
+    /// Follow the input desktop - not needed elsewhere.
     pub fn watch_desktop() {}
     pub fn prepare_machine_config() -> Result<PathBuf> {
         Err(anyhow!("nur unter Windows"))

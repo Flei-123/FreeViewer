@@ -1,14 +1,14 @@
-//! H.264 auf dem Mac - VideoToolbox, in Hardware.
+//! H.264 on the Mac - VideoToolbox, in hardware.
 //!
-//! Derselbe Vertrag wie die Windows-Fassung in `h264.rs`: NV12 hinein,
-//! Annex-B heraus (und beim Dekodieren umgekehrt). Damit laufen Meeting,
-//! Kamera und Bildschirmfreigabe auf dem Mac ueber genau denselben Weg wie
-//! unter Windows - nur die Maschine darunter ist eine andere.
+//! The same contract as the Windows version in `h264.rs`: NV12 in,
+//! Annex-B out (and the reverse when decoding). This way meeting,
+//! camera and screen share run on the Mac through exactly the same path as
+//! on Windows - only the machine underneath is a different one.
 //!
-//! Bewusst OHNE zusaetzliche Fremdbibliothek: die noetigen Apple-Funktionen
-//! sind hier direkt deklariert. Das spart vier neue Abhaengigkeiten samt
-//! ihrer Versions- und Merkmalsfallen; die Signaturen sind seit Jahren
-//! unveraendert und stehen so in Apples Kopfdateien.
+//! Deliberately WITHOUT an additional third-party library: the necessary Apple functions
+//! are declared directly here. That saves four new dependencies including
+//! their version and feature traps; the signatures have been
+//! unchanged for years and appear like this in Apple's headers.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
@@ -41,7 +41,7 @@ const kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: OSType = 0x3432_3076; // 
 const kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: OSType = 0x3432_3066; // '420f'
 const kCFNumberSInt32Type: c_int = 3;
 const kCFNumberFloat64Type: c_int = 6;
-/// Speicher fuer den Blockpuffer sofort belegen (kCMBlockBufferAssureMemoryNowFlag).
+/// Allocate memory for the block buffer immediately (kCMBlockBufferAssureMemoryNowFlag).
 const kCMBlockBufferAssureMemoryNowFlag: u32 = 1 << 0;
 
 #[repr(C)]
@@ -253,7 +253,7 @@ fn zahl_f64(v: f64) -> CFNumberRef {
     unsafe { CFNumberCreate(std::ptr::null(), kCFNumberFloat64Type, &v as *const f64 as *const c_void) }
 }
 
-/// Ein Woerterbuch mit genau einem Eintrag - mehr braucht hier niemand.
+/// A dictionary with exactly one entry - nobody needs more here.
 fn dict1(schluessel: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
     unsafe {
         let k = [schluessel as *const c_void];
@@ -269,7 +269,7 @@ fn dict1(schluessel: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
     }
 }
 
-/// Zerlegt einen Annex-B-Strom in seine NAL-Einheiten (ohne Startmarken).
+/// Splits an Annex-B stream into its NAL units (without start codes).
 fn nal_zerlegen(au: &[u8]) -> Vec<(usize, usize)> {
     let mut teile = Vec::new();
     let mut i = 0usize;
@@ -304,7 +304,7 @@ fn nal_typ(b: u8) -> u8 {
 
 // -------------------------------------------------------------- Kodierer ---
 
-/// Was der Rueckruf des Kodierers einsammelt.
+/// What the encoder's callback collects.
 #[derive(Default)]
 struct Ausgabe {
     fertig: Vec<Chunk>,
@@ -322,9 +322,9 @@ pub struct Encoder {
     ausgabe: Arc<Mutex<Ausgabe>>,
 }
 
-// Die Sitzung selbst ist von Apple aus fadensicher; der Rest liegt hinter
-// einem Mutex. Ohne das liesse sich der Kodierer nicht in den Arbeitsfaden
-// des Meetings stecken.
+// The session itself is thread-safe from Apple's side; the rest sits behind
+// a mutex. Without that the encoder could not be put into the meeting's
+// worker thread.
 unsafe impl Send for Encoder {}
 
 unsafe extern "C" fn kodier_rueckruf(
@@ -344,7 +344,7 @@ unsafe extern "C" fn kodier_rueckruf(
         }
         return;
     }
-    // 1) Die Nutzdaten liegen als AVCC vor: je NAL eine Laenge davor.
+    // 1) The payload is in AVCC form: a length in front of each NAL.
     let bb = CMSampleBufferGetDataBuffer(probe);
     if bb.is_null() {
         return;
@@ -356,8 +356,8 @@ unsafe extern "C" fn kodier_rueckruf(
     }
     let avcc = std::slice::from_raw_parts(zeiger, gesamt);
 
-    // 2) Nach Annex-B umschreiben (Startmarke statt Laenge) - das ist das
-    //    Format, das der Rest des Programms und str0m erwarten.
+    // 2) Rewrite to Annex-B (start code instead of length) - that is the
+    //    format the rest of the program and str0m expect.
     let mut annexb: Vec<u8> = Vec::with_capacity(gesamt + 64);
     let mut idr = false;
     let mut i = 0usize;
@@ -378,8 +378,8 @@ unsafe extern "C" fn kodier_rueckruf(
         return;
     }
 
-    // 3) Vor jedem Schluesselbild muessen SPS und PPS stehen, sonst kann
-    //    niemand einsteigen, der spaeter dazukommt.
+    // 3) SPS and PPS must precede every keyframe, otherwise
+    //    nobody who joins later can get in.
     if idr {
         let fd = CMSampleBufferGetFormatDescription(probe);
         if !fd.is_null() {
@@ -482,15 +482,15 @@ impl Encoder {
                 zahl_f64(fps.max(1) as f64),
                 true,
             );
-            // Alle zwei Sekunden ein Schluesselbild - dazwischen holt sich
-            // jeder Neuling eines ueber die Anforderung.
+            // A keyframe every two seconds - in between every
+            // newcomer gets one via the request.
             setzen(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 zahl_i32((fps.max(1) * 2) as i32),
                 true,
             );
         }
-        // Ein einziger Pixelpuffer, der immer wieder gefuellt wird.
+        // A single pixel buffer that is filled again and again.
         let mut pixel: CVPixelBufferRef = std::ptr::null_mut();
         let st = unsafe {
             CVPixelBufferCreate(
@@ -605,8 +605,8 @@ impl Encoder {
             if st != 0 {
                 return Err(anyhow!("EncodeFrame: {}", st));
             }
-            // Auf das Ergebnis warten: der Rueckruf laeuft sonst irgendwann
-            // spaeter, und wir wollen den Rahmen JETZT verschicken.
+            // Wait for the result: otherwise the callback runs at some point
+            // later, and we want to send the frame NOW.
             VTCompressionSessionCompleteFrames(self.session, CMTime::ungueltig());
         }
         let mut a = self
@@ -698,9 +698,9 @@ unsafe extern "C" fn dekodier_rueckruf(
     let yh = CVPixelBufferGetHeightOfPlane(bild, 0);
     let _uvw = CVPixelBufferGetWidthOfPlane(bild, 1);
     if !yp.is_null() && !uvp.is_null() && w > 0 && h > 0 {
-        // Die beiden Ebenen liegen NICHT zwingend hintereinander - deshalb
-        // erst in einen zusammenhaengenden NV12-Block kopieren und den
-        // gemeinsamen Umrechner benutzen.
+        // The two planes do NOT necessarily lie one after the other - hence
+        // first copy into a contiguous NV12 block and use the
+        // shared converter.
         let stride = ys.max(uvs);
         let mut nv12 = vec![0u8; stride * yh + stride * (h as usize).div_ceil(2)];
         for zeile in 0..h as usize {
@@ -744,8 +744,8 @@ impl Decoder {
         })
     }
 
-    /// Auf dem Mac gibt es nur einen Weg - die Unterscheidung existiert nur,
-    /// damit die Aufrufer auf beiden Plattformen gleich aussehen.
+    /// On the Mac there is only one path - the distinction exists only
+    /// so that the callers look the same on both platforms.
     pub fn new_auto(w: u32, h: u32) -> Result<Self> {
         Decoder::new(w, h)
     }
@@ -758,12 +758,12 @@ impl Decoder {
         (self.w, self.h)
     }
 
-    /// Breite, Hoehe, Zeilenabstand - wie bei der Windows-Fassung.
+    /// Width, height, row stride - as in the Windows version.
     pub fn raw_size(&self) -> (u32, u32, usize) {
         (self.w, self.h, self.w as usize)
     }
 
-    /// Sitzung anlegen, sobald SPS und PPS bekannt sind.
+    /// Create a session as soon as SPS and PPS are known.
     fn sitzung_bauen(&mut self) -> Result<()> {
         if !self.session.is_null() || self.sps.is_empty() || self.pps.is_empty() {
             return Ok(());
@@ -806,8 +806,8 @@ impl Decoder {
         Ok(())
     }
 
-    /// Eine Zugriffseinheit dekodieren. Gibt das Bild als RGBA plus Groesse
-    /// zurueck - oder `None`, wenn noch nichts Fertiges dabei war.
+    /// Decode one access unit. Returns the image as RGBA plus size
+    /// - or `None` if nothing finished was included yet.
     pub fn decode(&mut self, au: &[u8], rgba: &mut Vec<u8>) -> Result<Option<(u32, u32)>> {
         // 1) NALs sortieren: Parametersaetze merken, Bilddaten sammeln.
         let mut avcc: Vec<u8> = Vec::with_capacity(au.len() + 16);
@@ -826,7 +826,7 @@ impl Decoder {
                         self.sitzung_schliessen();
                     }
                 }
-                // Fuellsel und Zugriffstrenner interessieren den Dekodierer nicht.
+                // Filler and access unit delimiters do not interest the decoder.
                 9 | 12 => {}
                 _ => {
                     avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -887,9 +887,9 @@ impl Decoder {
                 return Err(anyhow!("Probenpuffer: {}", st));
             }
             let mut info = 0u32;
-            // Flags = 0: synchron dekodieren und das Bild AUSGEBEN. (1<<1
-            // waere kVTDecodeFrame_DoNotOutputFrame - damit kam im ersten
-            // Versuch nie ein Bild heraus.)
+            // Flags = 0: decode synchronously and OUTPUT the image. (1<<1
+            // would be kVTDecodeFrame_DoNotOutputFrame - with that no image
+            // ever came out on the first attempt.)
             let st = VTDecompressionSessionDecodeFrame(
                 self.session,
                 sb,
@@ -942,7 +942,7 @@ impl Drop for Decoder {
     }
 }
 
-/// Gibt es hier ueberhaupt einen H.264-Kodierer?
+/// Is there an H.264 encoder here at all?
 pub fn available() -> bool {
     Encoder::new(640, 480, 30, 2_000_000).is_ok()
 }

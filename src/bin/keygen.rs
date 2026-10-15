@@ -1,14 +1,14 @@
-//! Schluessel-Werkzeug fuer X-Remote-Lizenzen. Liegt zwar im oeffentlichen
-//! Repo, ist aber ohne den privaten Schluessel nutzlos - der bleibt beim
-//! Verkaeufer. Bauen: cargo build --release --features license --bin keygen
+//! Key tool for X-Remote licences. It lies in the public
+//! repo, but is useless without the private key - that stays with the
+//! seller. Build: cargo build --release --features license --bin keygen
 //!
-//! Aufruf:
-//!   keygen new                              -> neues Schluesselpaar (einmalig!)
-//!   keygen make <priv-hex> "Name" [tage]    -> Lizenzschluessel
-//!     tage: Laufzeit ab heute, 0 oder weglassen = unbegrenzt
+//! Usage:
+//!   keygen new                              -> new key pair (once only!)
+//!   keygen make <priv-hex> "Name" [days]    -> licence key
+//!     days: validity from today, 0 or omitted = unlimited
 //!
-//! Das Format (Nachricht || Ed25519-Signatur, Base32-Crockford) muss exakt
-//! dem in src/license.rs entsprechen - dort sitzt die Pruefung im Client.
+//! The format (message || Ed25519 signature, Base32-Crockford) must match
+//! exactly the one in src/license.rs - the check in the client lives there.
 
 const B32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 

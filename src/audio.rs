@@ -22,22 +22,22 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-// --------------------------------------------------------- Geraetewahl
+// --------------------------------------------------------- Device choice
 //
-// Windows fuehrt ein Standardmikrofon und einen Standardlautsprecher. Wer
-// mehrere Karten hat (Headset, Webcam, Monitor) will aber selbst waehlen.
-// `None` heisst: dem Systemstandard folgen, auch wenn der sich aendert.
+// Windows keeps a default microphone and a default speaker. Whoever has
+// several cards (headset, webcam, monitor) wants to choose themselves, though.
+// `None` means: follow the system default, even if it changes.
 
 static PICK_IN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 static PICK_OUT: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-/// Uebernimmt die Wahl aus den Einstellungen.
+/// Takes over the choice from the settings.
 pub fn set_devices(mic: Option<String>, spk: Option<String>) {
     *PICK_IN.write().unwrap() = mic.filter(|s| !s.is_empty());
     *PICK_OUT.write().unwrap() = spk.filter(|s| !s.is_empty());
 }
 
-/// Was gerade gewaehlt ist (fuer die Einstellungen).
+/// What is currently chosen (for the settings).
 pub fn picked() -> (Option<String>, Option<String>) {
     (
         PICK_IN.read().unwrap().clone(),
@@ -45,7 +45,7 @@ pub fn picked() -> (Option<String>, Option<String>) {
     )
 }
 
-/// Alle Aufnahmegeraete mit Klarnamen.
+/// All capture devices with plain names.
 pub fn input_devices() -> Vec<String> {
     let host = cpal::default_host();
     let mut v: Vec<String> = match host.input_devices() {
@@ -57,7 +57,7 @@ pub fn input_devices() -> Vec<String> {
     v
 }
 
-/// Alle Wiedergabegeraete mit Klarnamen.
+/// All playback devices with plain names.
 pub fn output_devices() -> Vec<String> {
     let host = cpal::default_host();
     let mut v: Vec<String> = match host.output_devices() {
@@ -69,7 +69,7 @@ pub fn output_devices() -> Vec<String> {
     v
 }
 
-/// Die Namen der beiden Systemstandards - fuer "Standardgeraet (â€¦)".
+/// The names of the two system defaults - for "Default device (...)".
 pub fn default_names() -> (String, String) {
     let host = cpal::default_host();
     let mic = host
@@ -83,7 +83,7 @@ pub fn default_names() -> (String, String) {
     (mic, spk)
 }
 
-/// Das gewaehlte Aufnahmegeraet, sonst der Systemstandard.
+/// The chosen capture device, otherwise the system default.
 fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
     let want = PICK_IN.read().unwrap().clone();
     if let Some(w) = want {
@@ -99,7 +99,7 @@ fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
     host.default_input_device()
 }
 
-/// Das gewaehlte Wiedergabegeraet, sonst der Systemstandard.
+/// The chosen playback device, otherwise the system default.
 fn pick_output(host: &cpal::Host) -> Option<cpal::Device> {
     let want = PICK_OUT.read().unwrap().clone();
     if let Some(w) = want {
@@ -117,7 +117,7 @@ fn pick_output(host: &cpal::Host) -> Option<cpal::Device> {
 
 use crate::proto::Msg;
 
-/// Wie eine neue Sitzung startet: beides aus, bis der Nutzer es anders will.
+/// How a new session starts: both off until the user wants otherwise.
 pub static DEFAULT_MIC: AtomicBool = AtomicBool::new(false);
 pub static DEFAULT_SND: AtomicBool = AtomicBool::new(false);
 
@@ -311,8 +311,8 @@ impl Voice {
     /// Starts microphone and speaker for this session. `send` puts a message
     /// into the session's outgoing pipeline (host or viewer, same signature).
     pub fn start(state: Arc<VoiceState>, send: Arc<dyn Fn(Msg) + Send + Sync>) -> Voice {
-        // Jede Sitzung beginnt mit dem, was in den Einstellungen steht -
-        // standardmaessig ist beides stumm.
+        // Every session starts with what is in the settings -
+        // by default both are muted.
         state.mic.store(
             DEFAULT_MIC.load(Ordering::Relaxed)
                 || std::env::var("FV_AUDIO_MIC").as_deref() == Ok("1"),
@@ -680,7 +680,7 @@ impl WavWriter {
 
 // ------------------------------------------------------------- test commands
 
-/// Klarnamen der beiden Geraete, fuer die Einstellungen.
+/// Plain names of the two devices, for the settings.
 pub fn device_names() -> (String, String) {
     let host = cpal::default_host();
     let mic = pick_input(&host)

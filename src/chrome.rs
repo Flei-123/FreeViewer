@@ -1,9 +1,9 @@
-//! Die Titelleiste von Windows in der Farbe des Programms.
+//! The title bar of Windows in the colour of the program.
 //!
-//! Windows 11 lässt die Leiste über DwmSetWindowAttribute einfärben
-//! (DWMWA_CAPTION_COLOR / _TEXT_COLOR / _BORDER_COLOR). Auf Windows 10 gibt
-//! es das nicht - dort schlägt der Aufruf still fehl und die Leiste bleibt
-//! wie sie ist, was in Ordnung ist.
+//! Windows 11 lets the bar be coloured via DwmSetWindowAttribute
+//! (DWMWA_CAPTION_COLOR / _TEXT_COLOR / _BORDER_COLOR). On Windows 10
+//! this does not exist - there the call fails silently and the bar stays
+//! as it is, which is fine.
 
 #[cfg(windows)]
 fn colorref(c: egui::Color32) -> u32 {
@@ -11,7 +11,7 @@ fn colorref(c: egui::Color32) -> u32 {
     (c.b() as u32) << 16 | (c.g() as u32) << 8 | c.r() as u32
 }
 
-/// Setzt Leiste, Schrift und Rand auf die Farben der Palette.
+/// Sets bar, text and border to the colours of the palette.
 #[cfg(windows)]
 pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::Color32, dark: bool) {
     use windows::Win32::Foundation::BOOL;
@@ -20,11 +20,11 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
         DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
     unsafe {
-        // ALLE eigenen Fenster einfaerben, nicht nur das Hauptfenster.
+        // Colour ALL own windows, not just the main window.
         //
-        // Das Meetingfenster ist ein eigenes Fenster - es bekam die Farbe nie
-        // und trug deshalb immer die weisse Standard-Titelleiste, egal welches
-        // Aussehen eingestellt war. Genau das hat Justin gesehen.
+        // The meeting window is a window of its own - it never got the colour
+        // and therefore always wore the white default title bar, whatever
+        // look was set. That is exactly what Justin saw.
         for hwnd in eigene_fenster() {
         let d = BOOL::from(dark);
         let _ = DwmSetWindowAttribute(
@@ -49,7 +49,7 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
     }
 }
 
-/// Alle sichtbaren Fenster oberster Ebene DIESES Programms.
+/// All visible top-level windows of THIS program.
 #[cfg(windows)]
 fn eigene_fenster() -> Vec<windows::Win32::Foundation::HWND> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
@@ -82,7 +82,7 @@ pub fn paint_caption(
 ) {
 }
 
-/// Farben aus der aktiven Palette nehmen.
+/// Take colours from the active palette.
 pub fn paint_from_theme() {
     let p = crate::theme::palette();
     paint_caption(p.card, p.text, p.line, p.dark);
