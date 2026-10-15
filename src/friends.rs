@@ -789,6 +789,7 @@ pub struct Stand {
     #[serde(rename = "konto")]
     pub account: String,
     #[serde(default)]
+    #[serde(rename = "freunde")]
     pub friends: Vec<Friend>,
     #[serde(default)]
     pub eingehend: Vec<Request>,
