@@ -85,7 +85,7 @@ async function startRelay(port, jarvisPort, extraEnv) {
 function stop(h) { h.child.kill(); fs.rmSync(h.dir, { recursive: true, force: true }); }
 
 // fake address book (fleikontakte): Justin and Anna are friends
-function startKontakte() {
+function startContacts() {
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
       const t = ((req.headers.authorization || '').match(/^Bearer (.+)$/) || [])[1];
@@ -239,10 +239,10 @@ const LINK = 'https://meet.fleitec.com/?room=482-913-770&pass=abc123';
     stop(h);
   }
   // ================= r32 with the address book (logged-in friends) =================
-  const kontakte = await startKontakte();
+  const contacts = await startContacts();
   const h2 = await startRelay(17292, jarvis.address().port, {
     FV_BUCH: '1',
-    FV_KONTAKTE: 'http://127.0.0.1:' + kontakte.address().port,
+    FV_KONTAKTE: 'http://127.0.0.1:' + contacts.address().port,
     FV_BUCH_GERAETE: path.join(os.tmpdir(), 'fveinl-buch-' + process.pid + '.json'),
   });
   const socks2 = [];
@@ -271,7 +271,7 @@ const LINK = 'https://meet.fleitec.com/?room=482-913-770&pass=abc123';
   } finally {
     socks2.forEach((w) => { try { w.close(); } catch (_) {} });
     stop(h2);
-    kontakte.close();
+    contacts.close();
     try { fs.unlinkSync(path.join(os.tmpdir(), 'fveinl-buch-' + process.pid + '.json')); } catch (_) {}
     jarvis.close();
   }
