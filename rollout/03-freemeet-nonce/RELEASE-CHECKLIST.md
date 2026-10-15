@@ -9,7 +9,7 @@ numerically (`update::newer`), 0.30.0 > 0.29.4. `Cargo.toml` + `Cargo.lock` are 
 - [ ] r59: CI has never been seen running on GitHub - look at the first run before trusting it.
 
 ## Build + publish (Boss-Ja)
-1. [ ] Windows exe: artifact of `windows.yml` (or the local build). The Windows publish script is NOT in the repo (r2/r56) - find it, then use `rollout/02-relay/50-publish-release.sh --platform win --file ... --version 0.30.0 --apply` (signs with the update key). Needs relay block 2A first.
+1. [ ] Windows exe: artifact of `windows.yml` or `tools/release/build-win.sh fv|xr` (via heavy). The Windows publish script is NOT in the repo (r2/r56) - find it, then use `rollout/02-relay/50-publish-release.sh --platform win --file ... --version 0.30.0 --apply` (signs with the update key). Needs relay block 2A first.
 2. [ ] Mac: artifact of `mac.yml` -> `rollout/02-relay/55-mac-pull.sh --brand freeviewer --apply` (+ `--brand x-remote`). Untested parts: attestation, GitHub API.
 3. [ ] `release.yml` (tag `v*`) only builds Linux/macOS/Windows archives for GitHub releases; it is NOT the update channel. Tag only when wanted: `git tag v0.30.0`.
 4. [ ] Wait until `20-gate-native.sh --native-min-version 0.30.0` is green (enough clients updated), then block 3 (browser/SFU switch).
