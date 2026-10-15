@@ -6,6 +6,7 @@
 //! move the fresh one into its place -> start it -> exit. The next start
 //! deletes the ".old" leftover.
 
+use crate::lockutil::LockExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -396,6 +397,7 @@ pub fn elevated_swap(fresh: &Path, target: &Path) -> Result<()> {
         std::process::id()
     );
     let params = wide(&args);
+    // SAFETY: `exe` and `params` are NUL-terminated UTF-16 buffers alive during the call; the verb is a static string.
     let r = unsafe {
         ShellExecuteW(
             HWND::default(),
@@ -463,7 +465,7 @@ pub fn apply_update(fresh: &Path, target: &Path, pid: u32) -> Result<()> {
 
 /// True while a session is running - never interrupt that for an update.
 fn busy(shared: &Arc<Shared>) -> bool {
-    shared.xfer.lock().unwrap().is_some()
+    shared.xfer.lock_ok().is_some()
         || shared.connected.load(Ordering::Relaxed)
         || shared.connecting.load(Ordering::Relaxed)
 }
@@ -485,7 +487,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
         match check() {
             Ok(rel) => {
                 if newer(&rel.version, VERSION) {
-                    *shared.update.lock().unwrap() = Some(rel.clone());
+                    *shared.update.lock_ok() = Some(rel.clone());
                     if darf_einspielen {
                         shared.set_update_status(format!(
                             "Update {} verfuegbar (dieser Stand: {})",
@@ -508,7 +510,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
                         ));
                     }
                 } else {
-                    *shared.update.lock().unwrap() = None;
+                    *shared.update.lock_ok() = None;
                     shared.set_update_status(format!("Aktuell (v{})", VERSION));
                 }
             }
@@ -522,7 +524,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
             if !darf_einspielen || gescheitert {
                 continue;
             }
-            let pending = shared.update.lock().unwrap().clone();
+            let pending = shared.update.lock_ok().clone();
             if let Some(rel) = pending {
                 if shared.auto_update.load(Ordering::Relaxed) && !busy(&shared) {
                     shared.set_update_status(format!("Installiere Update {} ...", rel.version));

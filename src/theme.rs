@@ -5,6 +5,7 @@
 //! Everything is stored in <config>/appearance.json, so the choice survives a
 //! restart and an update.
 
+use crate::lockutil::RwLockExt;
 use egui::Color32;
 use std::sync::RwLock;
 
@@ -135,7 +136,7 @@ pub const ACCENTS: [(&str, Color32); 6] = [
 static ACTIVE: RwLock<Palette> = RwLock::new(DUNKEL);
 
 pub fn palette() -> Palette {
-    *ACTIVE.read().unwrap()
+    *ACTIVE.read_ok()
 }
 
 pub fn bg() -> Color32 {
@@ -342,7 +343,7 @@ pub fn apply(ctx: &egui::Context, a: &Appearance) {
     crate::audio::set_defaults(a.mic_on, a.snd_on);
     crate::audio::set_devices(a.mic_dev.clone(), a.spk_dev.clone());
     let p = resolve(a);
-    *ACTIVE.write().unwrap() = p;
+    *ACTIVE.write_ok() = p;
 
     let mut style = (*ctx.style()).clone();
     {

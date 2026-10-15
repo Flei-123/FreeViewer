@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -25,7 +26,7 @@ impl App {
                 }
                 Err(e) => account::SyncOut::Failed(e.to_string()),
             };
-            *out.lock().unwrap() = Some(res);
+            *out.lock_ok() = Some(res);
             busy.store(false, Ordering::SeqCst);
         });
     }
@@ -48,7 +49,7 @@ impl App {
 
     /// Ergebnis eines Hintergrundlaufs abholen (Anmeldung oder Abgleich).
     pub(crate) fn take_sync_result(&mut self) {
-        let res = self.acc_out.lock().unwrap().take();
+        let res = self.acc_out.lock_ok().take();
         let Some(res) = res else { return };
         match res {
             account::SyncOut::Ok { devices, at } => {

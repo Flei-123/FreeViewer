@@ -16,6 +16,7 @@
 //!   FV_AUDIO_TONE=1                  send a 440 Hz tone instead of the microphone
 //!   FV_AUDIO_DUMP=<file.wav>         write everything we receive into a WAV file
 
+use crate::lockutil::{LockExt, RwLockExt};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,15 +34,15 @@ static PICK_OUT: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None
 
 /// Takes over the choice from the settings.
 pub fn set_devices(mic: Option<String>, spk: Option<String>) {
-    *PICK_IN.write().unwrap() = mic.filter(|s| !s.is_empty());
-    *PICK_OUT.write().unwrap() = spk.filter(|s| !s.is_empty());
+    *PICK_IN.write_ok() = mic.filter(|s| !s.is_empty());
+    *PICK_OUT.write_ok() = spk.filter(|s| !s.is_empty());
 }
 
 /// What is currently chosen (for the settings).
 pub fn picked() -> (Option<String>, Option<String>) {
     (
-        PICK_IN.read().unwrap().clone(),
-        PICK_OUT.read().unwrap().clone(),
+        PICK_IN.read_ok().clone(),
+        PICK_OUT.read_ok().clone(),
     )
 }
 
@@ -85,7 +86,7 @@ pub fn default_names() -> (String, String) {
 
 /// The chosen capture device, otherwise the system default.
 fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
-    let want = PICK_IN.read().unwrap().clone();
+    let want = PICK_IN.read_ok().clone();
     if let Some(w) = want {
         if let Ok(list) = host.input_devices() {
             for d in list {
@@ -101,7 +102,7 @@ fn pick_input(host: &cpal::Host) -> Option<cpal::Device> {
 
 /// The chosen playback device, otherwise the system default.
 fn pick_output(host: &cpal::Host) -> Option<cpal::Device> {
-    let want = PICK_OUT.read().unwrap().clone();
+    let want = PICK_OUT.read_ok().clone();
     if let Some(w) = want {
         if let Ok(list) = host.output_devices() {
             for d in list {
@@ -292,7 +293,7 @@ pub struct Voice {
 impl Drop for Voice {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(w) = self.dump.lock().unwrap().take() {
+        if let Some(w) = self.dump.lock_ok().take() {
             w.finish();
         }
     }
@@ -336,7 +337,7 @@ impl Voice {
                 if tone {
                     tone_loop(stop, state, send);
                 } else if let Err(e) = mic_loop(stop.clone(), state.clone(), send) {
-                    *state.problem.lock().unwrap() = format!("Mikrofon: {}", e);
+                    *state.problem.lock_ok() = format!("Mikrofon: {}", e);
                 }
             });
         }
@@ -347,7 +348,7 @@ impl Voice {
             let play = play.clone();
             std::thread::spawn(move || {
                 if let Err(e) = speaker_loop(stop, state.clone(), play) {
-                    *state.problem.lock().unwrap() = format!("Lautsprecher: {}", e);
+                    *state.problem.lock_ok() = format!("Lautsprecher: {}", e);
                 }
             });
         }
@@ -370,13 +371,13 @@ impl Voice {
             return;
         }
         self.state.level_in.store(level_of(&pcm), Ordering::Relaxed);
-        if let Some(w) = self.dump.lock().unwrap().as_mut() {
+        if let Some(w) = self.dump.lock_ok().as_mut() {
             w.write(&pcm);
         }
         if !self.state.speaker.load(Ordering::Relaxed) {
             return;
         }
-        let mut q = self.play.lock().unwrap();
+        let mut q = self.play.lock_ok();
         q.extend(pcm);
         while q.len() > MAX_QUEUE {
             q.pop_front();
@@ -412,7 +413,7 @@ fn mic_loop(
                     let s: f32 = f.iter().sum::<f32>() / channels as f32;
                     m.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
                 }
-                p2.lock().unwrap().extend(m);
+                p2.lock_ok().extend(m);
             },
             err,
             None,
@@ -425,7 +426,7 @@ fn mic_loop(
                     let s: i32 = f.iter().map(|x| *x as i32).sum::<i32>() / channels as i32;
                     m.push(s as i16);
                 }
-                p2.lock().unwrap().extend(m);
+                p2.lock_ok().extend(m);
             },
             err,
             None,
@@ -438,7 +439,7 @@ fn mic_loop(
                     let s: i32 = f.iter().map(|x| *x as i32 - 32768).sum::<i32>() / channels as i32;
                     m.push(s as i16);
                 }
-                p2.lock().unwrap().extend(m);
+                p2.lock_ok().extend(m);
             },
             err,
             None,
@@ -458,7 +459,7 @@ fn mic_loop(
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let raw: Vec<i16> = {
-            let mut p = pending.lock().unwrap();
+            let mut p = pending.lock_ok();
             if p.is_empty() {
                 continue;
             }
@@ -531,7 +532,7 @@ fn speaker_loop(
     let st = started.clone();
     let pull = move |frames: usize| -> Vec<i16> {
         let need = ((frames as u64 * RATE as u64) / rate as u64) as usize + 1;
-        let mut queue = q.lock().unwrap();
+        let mut queue = q.lock_ok();
         if !st.load(Ordering::Relaxed) {
             if queue.len() < START_QUEUE {
                 return vec![0; frames];
@@ -739,7 +740,7 @@ pub fn loopback_test(secs: u64) -> String {
     let s2 = seen.clone();
     let sink: Arc<dyn Fn(Msg) + Send + Sync> = Arc::new(move |m: Msg| {
         if let Msg::Audio { data, .. } = m {
-            s2.lock().unwrap().push(data);
+            s2.lock_ok().push(data);
         }
     });
     let voice = Voice::start(state.clone(), sink);
@@ -749,7 +750,7 @@ pub fn loopback_test(secs: u64) -> String {
     while t0.elapsed().as_secs() < secs {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let packets: Vec<Vec<u8>> = {
-            let mut g = seen.lock().unwrap();
+            let mut g = seen.lock_ok();
             std::mem::take(&mut *g)
         };
         for p in packets {
@@ -771,7 +772,7 @@ pub fn loopback_test(secs: u64) -> String {
         state.level_out.load(Ordering::Relaxed),
         state.level_in.load(Ordering::Relaxed),
         {
-            let p = state.problem.lock().unwrap().clone();
+            let p = state.problem.lock_ok().clone();
             if p.is_empty() {
                 String::new()
             } else {

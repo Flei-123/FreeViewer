@@ -19,6 +19,7 @@
 
 #![allow(dead_code)]
 
+use crate::lockutil::LockExt;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -67,8 +68,8 @@ pub fn publish_loop(shared: std::sync::Arc<crate::shared::Shared>) {
     std::thread::spawn(move || {
         let mut last = String::new();
         loop {
-            let id = shared.my_id.lock().unwrap().clone();
-            let pw = shared.password.lock().unwrap().clone();
+            let id = shared.my_id.lock_ok().clone();
+            let pw = shared.password.lock_ok().clone();
             if !id.is_empty() {
                 let p = Published {
                     id: id.clone(),

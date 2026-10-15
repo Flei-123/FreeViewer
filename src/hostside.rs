@@ -1,5 +1,6 @@
 //! Host side: share this machine's screen and execute remote input.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -121,8 +122,8 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
             }
         }
         shared.set_net_state(2);
-        *shared.my_id.lock().unwrap() = String::new();
-        *shared.host_peer.lock().unwrap() = "Keine aktive Sitzung".to_string();
+        *shared.my_id.lock_ok() = String::new();
+        *shared.host_peer.lock_ok() = "Keine aktive Sitzung".to_string();
         if replaced && !agent {
             // Another process (usually the service) took over this ID at the relay.
             // Striking back immediately would trigger an endless
@@ -160,7 +161,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
         }
     });
 
-    let my_name = shared.device_name.lock().unwrap().clone();
+    let my_name = shared.device_name.lock_ok().clone();
     tx.send(WsMsg::text(net::json_register(secret, &my_name)))?;
 
     let mut sess: Option<Session> = None;
@@ -195,7 +196,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 let mut drop_session = false;
                 if let Some(s) = sess.as_mut() {
                     if let Err(e) = s.poll_confirm(&tx, shared) {
-                        *shared.host_peer.lock().unwrap() = format!("Sitzung beendet: {}", e);
+                        *shared.host_peer.lock_ok() = format!("Sitzung beendet: {}", e);
                         drop_session = true;
                     }
                 }
@@ -219,7 +220,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string();
-                        *shared.my_id.lock().unwrap() = id;
+                        *shared.my_id.lock_ok() = id;
                         shared.set_net_state(1);
                         shared.set_host_status(crate::i18n::t("net.ready_wait"));
                     }
@@ -229,14 +230,14 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                         }
                         let from = peer_key_from(&v);
                         sess = Some(Session::new(from));
-                        *shared.host_peer.lock().unwrap() =
+                        *shared.host_peer.lock_ok() =
                             "Eingehende Verbindung - Authentifizierung...".to_string();
                     }
                     "peer_gone" => {
                         if let Some(s) = sess.take() {
                             s.stop();
                         }
-                        *shared.host_peer.lock().unwrap() = "Keine aktive Sitzung".to_string();
+                        *shared.host_peer.lock_ok() = "Keine aktive Sitzung".to_string();
                     }
                     "replaced" => return Err(anyhow!("an anderer Stelle neu registriert")),
                     "error" => {
@@ -250,7 +251,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 let mut drop_session = false;
                 if let Some(s) = sess.as_mut() {
                     if let Err(e) = s.on_binary(b.as_ref(), &tx, shared) {
-                        *shared.host_peer.lock().unwrap() = format!("Sitzung beendet: {}", e);
+                        *shared.host_peer.lock_ok() = format!("Sitzung beendet: {}", e);
                         drop_session = true;
                     }
                 }
@@ -526,7 +527,7 @@ impl Session {
                 let key = crypto::session_key(secret, client_pub, salt);
                 let code = crypto::session_code(&key);
                 shared.knock_answer.store(0, Ordering::Relaxed);
-                *shared.knock.lock().unwrap() = Some(crate::shared::Knock {
+                *shared.knock.lock_ok() = Some(crate::shared::Knock {
                     from: if from.is_empty() {
                         "Unbekanntes Geraet".to_string()
                     } else {
@@ -538,7 +539,7 @@ impl Session {
                     unverified: true,
                     friend_like,
                 });
-                *shared.host_peer.lock().unwrap() =
+                *shared.host_peer.lock_ok() =
                     "Verbindungsanfrage - bitte bestaetigen".to_string();
                 // make sure the question is actually visible
                 crate::tray::show_window();
@@ -558,7 +559,7 @@ impl Session {
                         .cipher
                         .as_ref()
                         .ok_or_else(|| anyhow!("kein Schluessel"))?;
-                    let mut c = c.lock().unwrap();
+                    let mut c = c.lock_ok();
                     c.open(data)
                         .ok_or_else(|| anyhow!("Entschluesselung fehlgeschlagen"))?
                 };
@@ -566,7 +567,7 @@ impl Session {
                     match m {
                         Msg::Ping { ts } => {
                             if let Some(c) = self.cipher.as_ref() {
-                                let sealed = c.lock().unwrap().seal(&encode(&Msg::Pong { ts }));
+                                let sealed = c.lock_ok().seal(&encode(&Msg::Pong { ts }));
                                 tx.send(WsMsg::Binary(sealed.into()))?;
                             }
                         }
@@ -602,7 +603,7 @@ impl Session {
                         }
                         Msg::SetMode { mode } => {
                             self.mode.store(mode, Ordering::Relaxed);
-                            *shared.host_peer.lock().unwrap() = if mode == proto::MODE_GAME {
+                            *shared.host_peer.lock_ok() = if mode == proto::MODE_GAME {
                                 "Verbunden - Spielmodus (relative Maus)".to_string()
                             } else {
                                 "Verbunden - Fernwartung".to_string()
@@ -634,7 +635,7 @@ impl Session {
         tx: &mpsc::UnboundedSender<WsMsg>,
         shared: &Arc<Shared>,
     ) -> Result<()> {
-        *shared.session_code.lock().unwrap() = crypto::session_code(&key);
+        *shared.session_code.lock_ok() = crypto::session_code(&key);
                 let cipher = Arc::new(Mutex::new(Cipher::new(&key, true)));
                 // 0x04 alone for old viewers and for ask mode (no shared
                 // secret); 0x04 || host_proof when the viewer asked for it
@@ -674,7 +675,7 @@ impl Session {
                                 }
                             }
                         }
-                        let sealed = { c2.lock().unwrap().seal(&plain) };
+                        let sealed = { c2.lock_ok().seal(&plain) };
                         if tx2.send(WsMsg::Binary(sealed.into())).is_err() {
                             break;
                         }
@@ -694,7 +695,7 @@ impl Session {
                         let sh2 = sh.clone();
                         tokio::spawn(p_punch.punch_loop(move |direct, rtt| {
                             sh2.direct.store(direct, Ordering::Relaxed);
-                            *sh2.host_peer.lock().unwrap() = if direct {
+                            *sh2.host_peer.lock_ok() = if direct {
                                 format!("Verbunden - direkter Weg ({} ms)", rtt)
                             } else {
                                 "Verbunden - ueber Relay".to_string()
@@ -734,7 +735,7 @@ impl Session {
                     self.cipher = Some(cipher);
                     self.input_tx = Some(in_tx);
                     self.stage = Stage::Live;
-                    *shared.host_peer.lock().unwrap() =
+                    *shared.host_peer.lock_ok() =
                         "Connected - synthetic test screen".to_string();
                     return Ok(());
                 }
@@ -763,7 +764,7 @@ impl Session {
                 self.cipher = Some(cipher);
                 self.input_tx = Some(in_tx);
                 self.stage = Stage::Live;
-                *shared.host_peer.lock().unwrap() =
+                *shared.host_peer.lock_ok() =
                     "Verbunden - Bildschirm wird geteilt".to_string();
                 Ok(())
     }
@@ -791,12 +792,12 @@ impl Session {
         let too_late = since.elapsed() > Duration::from_secs(60);
         if answer == 1 {
             shared.knock_answer.store(0, Ordering::Relaxed);
-            *shared.knock.lock().unwrap() = None;
+            *shared.knock.lock_ok() = None;
             return self.go_live(key, tx, shared);
         }
         if answer == 2 || too_late {
             shared.knock_answer.store(0, Ordering::Relaxed);
-            *shared.knock.lock().unwrap() = None;
+            *shared.knock.lock_ok() = None;
             tx.send(WsMsg::Binary(vec![crypto::TAG_FAIL].into()))?;
             return Err(anyhow!(if too_late {
                 "Anfrage wurde nicht beantwortet"
@@ -1310,7 +1311,7 @@ fn direkt_senden(
             }
             if z.fenster.elapsed() >= Duration::from_secs(1) {
                 let secs = z.fenster.elapsed().as_secs_f32();
-                let mut st = shared.stats.lock().unwrap();
+                let mut st = shared.stats.lock_ok();
                 st.fps = z.frames as f32 / secs;
                 st.kbps = (z.bytes as f32 * 8.0 / 1000.0) / secs;
                 z.frames = 0;
@@ -1377,7 +1378,7 @@ fn capture_loop(
         };
         let (mut sw, mut sh) = cap.size();
         let (mut ox, mut oy) = cap.origin();
-        *screen_grab.lock().unwrap() = ScreenRect {
+        *screen_grab.lock_ok() = ScreenRect {
             x: ox,
             y: oy,
             w: sw,
@@ -1479,7 +1480,7 @@ fn capture_loop(
                 sh = nh;
                 ox = nx;
                 oy = ny;
-                *screen_grab.lock().unwrap() = ScreenRect {
+                *screen_grab.lock_ok() = ScreenRect {
                     x: ox,
                     y: oy,
                     w: sw,
@@ -1830,7 +1831,7 @@ fn capture_loop(
                 ));
             }
             {
-                let mut st = shared.stats.lock().unwrap();
+                let mut st = shared.stats.lock_ok();
                 st.fps = frames as f32 / secs;
                 st.kbps = (bytes as f32 * 8.0 / 1000.0) / secs;
             }
@@ -1861,8 +1862,8 @@ fn input_loop(
             let _ = out2.send(encode(&m));
         })
     };
-    shared.xfers.lock().unwrap().clear();
-    *shared.xfer.lock().unwrap() = Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
+    shared.xfers.lock_ok().clear();
+    *shared.xfer.lock_ok() = Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -1870,7 +1871,7 @@ fn input_loop(
         }
         match rx.recv_timeout(Duration::from_millis(40)) {
             Ok(m) => {
-                let rect = *screen.lock().unwrap();
+                let rect = *screen.lock_ok();
                 match m {
                     Msg::MouseMove { x, y } => inj.mouse_abs(x, y, rect),
                     Msg::MouseDelta { dx, dy } => inj.mouse_delta(dx, dy),
@@ -1895,7 +1896,7 @@ fn input_loop(
                         if shared.clip_on.load(Ordering::Relaxed) { clip.set(&text); }
                     }
                     other if crate::xfer::is_file_msg(&other) => {
-                        if let Some(x) = shared.xfer.lock().unwrap().as_mut() {
+                        if let Some(x) = shared.xfer.lock_ok().as_mut() {
                             x.on_msg(other);
                         }
                     }
@@ -1913,7 +1914,7 @@ fn input_loop(
         }
     }
 
-    if let Some(mut x) = shared.xfer.lock().unwrap().take() {
+    if let Some(mut x) = shared.xfer.lock_ok().take() {
         x.shutdown();
     }
     // never leave keys stuck on the host when a session dies
@@ -1969,7 +1970,7 @@ mod verbindungstests {
         // 1) it must first become "ready" at all
         let mut war_bereit = false;
         for _ in 0..40 {
-            if shared.net_state() == 1 && !shared.my_id.lock().unwrap().is_empty() {
+            if shared.net_state() == 1 && !shared.my_id.lock_ok().is_empty() {
                 war_bereit = true;
                 break;
             }
@@ -1992,10 +1993,10 @@ mod verbindungstests {
             "stille Leitung blieb 'bereit' - genau der Fehler, um den es geht"
         );
         assert!(
-            shared.my_id.lock().unwrap().is_empty(),
+            shared.my_id.lock_ok().is_empty(),
             "die eigene Nummer muss weg sein, wenn niemand sie mehr kennt"
         );
-        let text = shared.host_status.lock().unwrap().clone();
+        let text = shared.host_status.lock_ok().clone();
         assert!(
             text.contains("Offline") || text.contains("offline"),
             "Statuszeile sagt nicht offline, sondern: {}",

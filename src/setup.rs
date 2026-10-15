@@ -99,6 +99,7 @@ mod imp {
         if let Some(dir) = link.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        // SAFETY: COM is initialised on this thread first; every string pointer comes from a `wide()` buffer that outlives the call using it.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;

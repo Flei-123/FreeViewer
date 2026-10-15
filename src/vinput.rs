@@ -15,6 +15,7 @@
 //! the host to release every key and button we might still hold, otherwise a
 //! "W" pressed for walking would keep running forever on the remote machine.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -48,7 +49,7 @@ fn host_key_pressed() {
     }
     set_active(false);
     let now = std::time::Instant::now();
-    let mut p = PRESSES.lock().unwrap();
+    let mut p = PRESSES.lock_ok();
     p.retain(|t| now.duration_since(*t) < std::time::Duration::from_millis(1500));
     p.push(now);
     let code = if p.len() >= 3 {
@@ -89,6 +90,8 @@ mod imp {
     const LLKHF_EXTENDED: u32 = 0x01;
     const LLKHF_INJECTED: u32 = 0x10;
 
+    /// # Safety
+    /// Only valid as a WH_KEYBOARD_LL hook: for `code >= 0`, `l` points to a KBDLLHOOKSTRUCT supplied by Windows.
     unsafe extern "system" fn hook_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
             let info = &*(l.0 as *const KBDLLHOOKSTRUCT);
@@ -130,6 +133,7 @@ mod imp {
         if STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
+        // SAFETY: Win32 hook/message APIs run on this dedicated thread, which owns the hook and pumps its messages; `hook_proc` has the HOOKPROC signature.
         std::thread::spawn(move || unsafe {
             // the hook must be owned by a thread that pumps messages
             let _hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {

@@ -5,6 +5,7 @@
 //! (cursor position, key state, clipboard). Every step is printed with a
 //! timestamp so the two logs can be lined up afterwards.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ pub fn input_selftest(shared: Arc<Shared>, argv: &[String], pos: usize) -> ! {
     let start = Instant::now();
     while !shared.connected.load(Ordering::Relaxed) {
         if start.elapsed() > Duration::from_secs(20) {
-            println!("FAIL: {}", shared.viewer_status.lock().unwrap());
+            println!("FAIL: {}", shared.viewer_status.lock_ok());
             std::process::exit(1);
         }
         nap(100);
@@ -130,8 +131,8 @@ pub fn input_selftest(shared: Arc<Shared>, argv: &[String], pos: usize) -> ! {
     });
     nap(600);
 
-    let st = *shared.stats.lock().unwrap();
-    let (rw, rh) = *shared.remote_size.lock().unwrap();
+    let st = *shared.stats.lock_ok();
+    let (rw, rh) = *shared.remote_size.lock_ok();
     println!(
         "OK: inputtest durch, Remote {}x{}, {:.0} fps, {:.0} kbit/s, {:.0} ms rtt",
         rw, rh, st.fps, st.kbps, st.latency_ms

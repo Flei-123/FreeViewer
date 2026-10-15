@@ -92,7 +92,10 @@ freeviewer --captest [n]                     # DXGI vs xcap capture timings
 +---------------+                         +--------------+                         +---------------+
 ```
 
-- `src/main.rs` - egui GUI, session view, input forwarding, mode switch
+- `src/main.rs` - entry point, command-line dispatch, `App` state and view types
+- `src/app_*.rs` - the egui GUI (`impl App`, split by area: session view, meetings, devices, settings, ...), `src/app_frame.rs` (frame loop, key mapping)
+- `src/cli_*.rs` - the scripted command-line modes split out of `main` (`cli_meet`, `cli_session`, `cli_tools`)
+- `src/widgets.rs` - fonts, theme and small egui widgets; `src/startup.rs` - start error reporting; `src/lockutil.rs` - poison-tolerant `lock_ok()`
 - `src/capture.rs` - DXGI desktop duplication backend + xcap fallback
 - `src/encoder.rs` - downscale, tile delta detection, JPEG encode, tile blit
 - `src/hostside.rs` - capture thread, input thread, host session, profiles

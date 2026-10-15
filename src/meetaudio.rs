@@ -16,6 +16,7 @@
 //! Windows and Mac. How good it really is gets
 //! measured (ERLE in dB, see tests below), not claimed.
 
+use crate::lockutil::LockExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -686,7 +687,7 @@ fn geraete_faden(
     while !ende.load(Ordering::Relaxed) {
         // Fetch a 20 ms pair of microphone and reference.
         let mikro = {
-            let mut r = mikro_ring.lock().unwrap();
+            let mut r = mikro_ring.lock_ok();
             if r.len() < RAHMEN {
                 None
             } else {
@@ -698,7 +699,7 @@ fn geraete_faden(
             continue;
         };
         let referenz = {
-            let mut r = referenz_ring.lock().unwrap();
+            let mut r = referenz_ring.lock_ok();
             if r.len() >= RAHMEN {
                 r.drain(0..RAHMEN).collect::<Vec<f32>>()
             } else {

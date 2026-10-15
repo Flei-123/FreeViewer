@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -99,7 +100,7 @@ if let Some(path) = self.shot.clone() {
     /// Kopfzeile: Seitenname, Suche, eigener Zustand.
     pub(crate) fn header(&mut self, ctx: &egui::Context) {
         let p = theme::palette();
-        let my_id = self.shared.my_id.lock().unwrap().clone();
+        let my_id = self.shared.my_id.lock_ok().clone();
         let online = !my_id.is_empty();
         egui::TopBottomPanel::top("fv_header")
             .exact_height(48.0)

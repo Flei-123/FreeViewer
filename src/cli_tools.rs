@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 // Tausch mit Administrator-Rechten (vom Updater gestartet):
@@ -248,8 +249,8 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     app.book.started("987654321", "", false);
     app.selected = Some("123456789".to_string());
     app.partner_id = "123456789".to_string();
-    *shared.my_id.lock().unwrap() = "497628420".to_string();
-    *shared.knock.lock().unwrap() = Some(shared::Knock {
+    *shared.my_id.lock_ok() = "497628420".to_string();
+    *shared.knock.lock_ok() = Some(shared::Knock {
         from: "Pait Laptop".to_string(),
         code: "1234".to_string(),
         at: std::time::Instant::now(),
@@ -287,7 +288,7 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     // The session view needs an image and both bars once:
     // in the window and floating in fullscreen.
     shared.connected.store(true, Ordering::Relaxed);
-    *shared.remote_size.lock().unwrap() = (1920, 1080);
+    *shared.remote_size.lock_ok() = (1920, 1080);
     for (name, full) in [("Sitzung", false), ("Sitzung Vollbild", true)] {
         app.full = full;
         let input = egui::RawInput {

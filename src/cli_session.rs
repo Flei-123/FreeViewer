@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) -> eframe::Result<()> {
@@ -32,7 +33,7 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
     loop {
         std::thread::sleep(Duration::from_millis(200));
         if !mons_printed {
-            let mons = shared.monitors.lock().unwrap().clone();
+            let mons = shared.monitors.lock_ok().clone();
             if !mons.is_empty() {
                 mons_printed = true;
                 for (i, m) in mons.iter().enumerate() {
@@ -48,7 +49,7 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
             }
             if let Some(f) = file_arg.clone() {
                 let path = std::path::PathBuf::from(&f);
-                match shared.xfer.lock().unwrap().as_mut() {
+                match shared.xfer.lock_ok().as_mut() {
                     Some(x) => {
                         println!("sending file {}", f);
                         x.send_path(path);
@@ -60,7 +61,7 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
         if mon_arg.is_some() && !mon_switched && shared.connected.load(Ordering::Relaxed) {
             let act = shared.active_monitor.load(Ordering::Relaxed);
             if Some(act) == mon_arg {
-                let (rw, rh) = *shared.remote_size.lock().unwrap();
+                let (rw, rh) = *shared.remote_size.lock_ok();
                 println!("monitor active {} -> {}x{}", act, rw, rh);
                 mon_switched = true;
             }
@@ -107,8 +108,8 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
             println!("frame {} {}x{}", seq.0, seq.1, seq.2);
         }
         if last >= want {
-            let st = *shared.stats.lock().unwrap();
-            let cur = *shared.remote_cursor.lock().unwrap();
+            let st = *shared.stats.lock_ok();
+            let cur = *shared.remote_cursor.lock_ok();
             let udp = shared.udp_frames.load(Ordering::Relaxed);
             println!(
                 "OK: {} Frames in {:.1}s, {:.0} fps, {:.0} kbit/s, {:.0} ms rtt, Cursor {:?}",
@@ -130,13 +131,13 @@ pub(crate) fn cli_connect(pos: usize, argv: Vec<String>, shared: Arc<Shared>) ->
             );
             std::process::exit(0);
         }
-        let status = shared.viewer_status.lock().unwrap().clone();
+        let status = shared.viewer_status.lock_ok().clone();
         if shared.viewer_failed.load(Ordering::Relaxed) {
             println!("FAIL: {}", status);
             std::process::exit(1);
         }
         if start.elapsed() > Duration::from_secs(30) {
-            println!("FAIL: {}", shared.viewer_status.lock().unwrap());
+            println!("FAIL: {}", shared.viewer_status.lock_ok());
             std::process::exit(1);
         }
     }
@@ -172,11 +173,11 @@ pub(crate) fn cli_ask(pos: usize, argv: Vec<String>, shared: Arc<Shared>) -> efr
                 "OK: {} Frames in {:.1}s, Code {}",
                 last,
                 start.elapsed().as_secs_f32(),
-                shared.session_code.lock().unwrap()
+                shared.session_code.lock_ok()
             );
             std::process::exit(0);
         }
-        let status = shared.viewer_status.lock().unwrap().clone();
+        let status = shared.viewer_status.lock_ok().clone();
         if shared.viewer_failed.load(Ordering::Relaxed) {
             println!("FAIL: {}", status);
             std::process::exit(1);
@@ -220,7 +221,7 @@ pub(crate) fn cli_shot(i: usize, shared: Arc<Shared>) -> eframe::Result<()> {
                 app.book.started("987654321", "", false);
                 app.selected = Some("123456789".to_string());
                 app.partner_id = "123456789".to_string();
-                *shot_shared.my_id.lock().unwrap() = "497628420".to_string();
+                *shot_shared.my_id.lock_ok() = "497628420".to_string();
             }
             if let Some(i) = std::env::args().position(|a| a == "--meetdemo") {
                 app.meet_demo = Some(
@@ -232,7 +233,7 @@ pub(crate) fn cli_shot(i: usize, shared: Arc<Shared>) -> eframe::Result<()> {
                 app.headless = true;
             }
             if knock {
-                *shot_shared.knock.lock().unwrap() = Some(shared::Knock {
+                *shot_shared.knock.lock_ok() = Some(shared::Knock {
                     from: "Laptop von Justin".to_string(),
                     code: "1234".to_string(),
                     at: std::time::Instant::now(),

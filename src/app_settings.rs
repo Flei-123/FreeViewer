@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -89,10 +90,10 @@ impl App {
             // Empty means: nothing of its own is entered yet - then we show
             // the machine name, just as the other side sees it too.
             let mut name = {
-                let mut n = self.shared.device_name.lock().unwrap().clone();
+                let mut n = self.shared.device_name.lock_ok().clone();
                 if n.trim().is_empty() {
                     n = presence::machine_name();
-                    *self.shared.device_name.lock().unwrap() = n.clone();
+                    *self.shared.device_name.lock_ok() = n.clone();
                 }
                 n
             };
@@ -106,7 +107,7 @@ impl App {
                 .changed()
             {
                 let clean = presence::clean(&name);
-                *self.shared.device_name.lock().unwrap() = clean.clone();
+                *self.shared.device_name.lock_ok() = clean.clone();
                 let _ = presence::save_device_name(&clean);
             }
             ui.add_space(8.0);
@@ -247,7 +248,7 @@ impl App {
                 .changed()
             {
                 self.pw_fixed = keep;
-                let pw = self.shared.password.lock().unwrap().clone();
+                let pw = self.shared.password.lock_ok().clone();
                 let store = if keep { Some(pw.as_str()) } else { None };
                 let _ = ident::set_fixed_password(store);
             }

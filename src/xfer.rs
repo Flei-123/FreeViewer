@@ -6,6 +6,7 @@
 //! window (unacknowledged bytes) keeps a big file from starving the video
 //! stream and from filling the receiver's memory.
 
+use crate::lockutil::LockExt;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -134,7 +135,7 @@ impl Xfer {
     }
 
     fn set_progress(shared: &Arc<Shared>, p: Progress) {
-        let mut list = shared.xfers.lock().unwrap();
+        let mut list = shared.xfers.lock_ok();
         match list.iter_mut().find(|x| x.id == p.id && x.incoming == p.incoming) {
             Some(slot) => *slot = p,
             None => {
@@ -336,7 +337,7 @@ impl Xfer {
     pub fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::FileOffer { id, name, size } => {
-                let dir = self.shared.drop_dir.lock().unwrap().clone();
+                let dir = self.shared.drop_dir.lock_ok().clone();
                 let _ = fs::create_dir_all(&dir);
                 let clean = safe_name(&name);
                 let path = unique_path(&dir, &clean);
@@ -416,7 +417,7 @@ impl Xfer {
                         ok: false,
                         msg: err.clone(),
                     });
-                    let mut list = self.shared.xfers.lock().unwrap();
+                    let mut list = self.shared.xfers.lock_ok();
                     if let Some(p) = list.iter_mut().find(|x| x.id == id && x.incoming) {
                         p.finished = true;
                         p.error = err;
@@ -425,7 +426,7 @@ impl Xfer {
                 }
                 let done = self.incoming.get(&id).map(|i| i.got);
                 if let Some(done) = done {
-                    let mut list = self.shared.xfers.lock().unwrap();
+                    let mut list = self.shared.xfers.lock_ok();
                     if let Some(p) = list.iter_mut().find(|x| x.id == id && x.incoming) {
                         p.done = done;
                     }
@@ -435,7 +436,7 @@ impl Xfer {
                 if let Some(mut inc) = self.incoming.remove(&id) {
                     let _ = inc.file.flush();
                     (self.send)(Msg::FileAck { id, got: inc.got });
-                    let mut list = self.shared.xfers.lock().unwrap();
+                    let mut list = self.shared.xfers.lock_ok();
                     if let Some(p) = list.iter_mut().find(|x| x.id == id && x.incoming) {
                         p.finished = true;
                         p.done = inc.got;
@@ -452,7 +453,7 @@ impl Xfer {
                     }
                 } else {
                     // the other side reports a problem with something we send
-                    let mut list = self.shared.xfers.lock().unwrap();
+                    let mut list = self.shared.xfers.lock_ok();
                     if let Some(p) = list.iter_mut().find(|x| x.id == id && !x.incoming) {
                         p.finished = true;
                         if !ok {
@@ -465,7 +466,7 @@ impl Xfer {
                 if let Some(a) = self.acks.get(&id) {
                     a.fetch_max(got, Ordering::Relaxed);
                 }
-                let mut list = self.shared.xfers.lock().unwrap();
+                let mut list = self.shared.xfers.lock_ok();
                 if let Some(p) = list.iter_mut().find(|x| x.id == id && !x.incoming) {
                     if p.size > 0 && got >= p.size {
                         p.finished = true;
@@ -488,7 +489,7 @@ impl Xfer {
             fragment.push(".unvollstaendig");
             let _ = fs::rename(&inc.path, PathBuf::from(fragment));
         }
-        let mut list = self.shared.xfers.lock().unwrap();
+        let mut list = self.shared.xfers.lock_ok();
         for p in list.iter_mut() {
             if p.incoming && !p.finished && ids.contains(&p.id) {
                 p.finished = true;

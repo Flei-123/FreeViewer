@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -243,8 +244,8 @@ impl App {
                 if accent_button(ui, i18n::t("fb.send"), !busy && !self.fb_text.trim().is_empty())
                     .clicked()
                 {
-                    let id = self.shared.my_id.lock().unwrap().clone();
-                    let dev = self.shared.device_name.lock().unwrap().clone();
+                    let id = self.shared.my_id.lock_ok().clone();
+                    let dev = self.shared.device_name.lock_ok().clone();
                     feedback::send(
                         if self.fb_bug { "fehler" } else { "idee" },
                         &self.fb_text,
@@ -257,7 +258,7 @@ impl App {
                 if st == 2 {
                     self.fb_text.clear();
                 }
-                let msg = feedback::MESSAGE.lock().unwrap().clone();
+                let msg = feedback::MESSAGE.lock_ok().clone();
                 if !msg.is_empty() {
                     ui.label(
                         egui::RichText::new(msg)
@@ -402,7 +403,7 @@ impl App {
         self.pw_old_input = old_input;
         if yes {
             let current = ident::fixed_password()
-                .unwrap_or_else(|| self.shared.password.lock().unwrap().clone());
+                .unwrap_or_else(|| self.shared.password.lock_ok().clone());
             if !secstore::same_secret(self.pw_old_input.trim(), &current) {
                 self.pw_old_wrong = true;
                 return;
@@ -411,7 +412,7 @@ impl App {
                 PwOverwrite::Regenerate => ident::random_password(),
                 PwOverwrite::Setup(pw) => pw,
             };
-            *self.shared.password.lock().unwrap() = fresh.clone();
+            *self.shared.password.lock_ok() = fresh.clone();
             let _ = ident::set_fixed_password(Some(fresh.as_str()));
             self.pw_fixed = true;
             self.pw_overwrite = None;

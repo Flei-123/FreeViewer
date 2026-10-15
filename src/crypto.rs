@@ -21,6 +21,7 @@
 //! The relay never learns the password (only a proof bound to this one
 //! session's ephemeral keys) and cannot decrypt the stream.
 
+use crate::lockutil::LockExt;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
@@ -311,7 +312,7 @@ impl UdpCipher {
         }
         // check the window before spending time on decryption ...
         {
-            let (high, mask) = *self.window.lock().unwrap();
+            let (high, mask) = *self.window.lock_ok();
             if ctr <= high {
                 let d = high - ctr;
                 if d >= 64 || mask & (1u64 << d) != 0 {
@@ -324,7 +325,7 @@ impl UdpCipher {
             .decrypt(Nonce::from_slice(nonce), &frame[13..])
             .ok()?;
         // ... and only mark it as seen once it is proven authentic
-        let mut w = self.window.lock().unwrap();
+        let mut w = self.window.lock_ok();
         let (high, mask) = *w;
         if ctr > high {
             let shift = ctr - high;

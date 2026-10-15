@@ -266,6 +266,7 @@ pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
                     return None;
                 }
                 let mut p = POINT::default();
+                // SAFETY: `p` is a local POINT that the call fills in.
                 if unsafe { GetCursorPos(&mut p) }.is_err() {
                     return None;
                 }
@@ -293,6 +294,7 @@ pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
             return None;
         }
         let mut p = POINT::default();
+        // SAFETY: `p` is a local POINT that the call fills in.
         if unsafe { GetCursorPos(&mut p) }.is_err() {
             return None;
         }

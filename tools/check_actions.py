@@ -26,7 +26,9 @@ for e in r.errors:
 if not r.errors:
     print('ok   api/ACTIONS lints clean (%d actions)' % len(r.actions))
 
-main = open(os.path.join(ROOT, 'src', 'main.rs'), encoding='utf8').read()
+# the flags are dispatched in main.rs and handled in main.rs plus the cli_*.rs modules split out of it (r35)
+main = ''.join(open(os.path.join(ROOT, 'src', f), encoding='utf8').read()
+               for f in sorted(os.listdir(os.path.join(ROOT, 'src'))) if f == 'main.rs' or f.startswith('cli_'))
 flags = set(re.findall(r'"(--[a-z0-9-]+)"', main))
 missing = []
 for a in r.actions:

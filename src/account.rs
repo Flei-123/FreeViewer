@@ -14,6 +14,7 @@
 //! same password as on the website. The relay only passes the login
 //! through and later asks to whom a token belongs.
 
+use crate::lockutil::LockExt;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -329,7 +330,7 @@ pub fn sync_async(
                 }
             }
         };
-        *out.lock().unwrap() = Some(res);
+        *out.lock_ok() = Some(res);
         busy.store(false, Ordering::SeqCst);
     });
 }
@@ -559,7 +560,7 @@ pub fn setup_create_async(
             Ok((code, link, web)) => SetupOut::Created { code, link, web },
             Err(e) => SetupOut::Failed(e.to_string()),
         };
-        *out.lock().unwrap() = Some(res);
+        *out.lock_ok() = Some(res);
         busy.store(false, Ordering::SeqCst);
     });
 }
@@ -580,7 +581,7 @@ pub fn setup_inbox_async(
             Ok((pending, claimed)) => SetupOut::Inbox { pending, claimed },
             Err(e) => SetupOut::Failed(e.to_string()),
         };
-        *out.lock().unwrap() = Some(res);
+        *out.lock_ok() = Some(res);
         busy.store(false, Ordering::SeqCst);
     });
 }

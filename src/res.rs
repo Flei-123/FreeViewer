@@ -5,6 +5,7 @@
 //! per monitor - `restore` sets it back at the end of the session.
 //! Windows only; elsewhere it is a controlled "not possible".
 
+use crate::lockutil::LockExt;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -13,13 +14,13 @@ use std::sync::Mutex;
 static ORIGINAL: Mutex<Option<HashMap<usize, (u32, u32)>>> = Mutex::new(None);
 
 fn merken(index: usize, w: u32, h: u32) {
-    let mut g = ORIGINAL.lock().unwrap();
+    let mut g = ORIGINAL.lock_ok();
     let map = g.get_or_insert_with(HashMap::new);
     map.entry(index).or_insert((w, h));
 }
 
 fn nehmen(index: usize) -> Option<(u32, u32)> {
-    ORIGINAL.lock().unwrap().as_mut()?.remove(&index)
+    ORIGINAL.lock_ok().as_mut()?.remove(&index)
 }
 
 /// Sets monitor `index` to w x h. Errors are not fatal - the
@@ -76,6 +77,7 @@ mod imp {
         for i in 0..64u32 {
             let mut dd = DISPLAY_DEVICEW::default();
             dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            // SAFETY: `dd` is a local DISPLAY_DEVICEW with `cb` set to its size.
             let ok = unsafe { EnumDisplayDevicesW(None, i, &mut dd, 0) };
             if !ok.as_bool() {
                 break;
@@ -104,6 +106,7 @@ mod imp {
         let name = devicename(index)?;
         let mut dm = DEVMODEW::default();
         dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer; `dm` is a local DEVMODEW with `dmSize` set.
         let ok = unsafe {
             EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm)
         };
@@ -122,6 +125,7 @@ mod imp {
         loop {
             let mut dm = DEVMODEW::default();
             dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            // SAFETY: `name` is a NUL-terminated UTF-16 buffer; `dm` is a local DEVMODEW with `dmSize` set.
             let ok = unsafe {
                 EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_INDEX(i), &mut dm)
             };
@@ -160,6 +164,7 @@ mod imp {
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
         dm.dmPelsWidth = w;
         dm.dmPelsHeight = h;
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer and `dm` a local DEVMODEW, both alive during the call.
         let r = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(name.as_ptr()),

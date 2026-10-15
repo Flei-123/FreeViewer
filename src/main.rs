@@ -8,6 +8,7 @@
 //! Relay can be overridden with the FV_RELAY environment variable,
 //! the session password with FV_PASSWORD.
 
+use crate::lockutil::LockExt;
 mod audio;
 mod authguard;
 mod brand;
@@ -27,6 +28,7 @@ mod icons;
 mod ident;
 #[cfg(feature = "license")]
 mod license;
+mod lockutil;
 mod link;
 mod machineacl;
 mod meet;
@@ -123,6 +125,7 @@ fn make_dpi_aware() {
     use windows::Win32::UI::HiDpi::{
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
+    // SAFETY: plain Win32 call with an integer constant; no pointers or memory involved.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -348,8 +351,8 @@ fn main() -> eframe::Result<()> {
                     .saturating_sub(p.at)
                     < 90;
                 if frisch && !p.id.is_empty() {
-                    *sh.my_id.lock().unwrap() = p.id;
-                    *sh.password.lock().unwrap() = p.password;
+                    *sh.my_id.lock_ok() = p.id;
+                    *sh.password.lock_ok() = p.password;
                 }
             }
             std::thread::sleep(Duration::from_secs(2));
@@ -371,13 +374,13 @@ fn main() -> eframe::Result<()> {
         }
         loop {
             std::thread::sleep(Duration::from_secs(2));
-            let id = shared.my_id.lock().unwrap().clone();
+            let id = shared.my_id.lock_ok().clone();
             if !id.is_empty() {
                 println!(
                     "ID {} | {} | {}",
                     id,
-                    shared.host_status.lock().unwrap(),
-                    shared.host_peer.lock().unwrap()
+                    shared.host_status.lock_ok(),
+                    shared.host_peer.lock_ok()
                 );
             }
         }

@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -266,8 +267,8 @@ impl App {
         }
         self.shared.connected.store(false, Ordering::Relaxed);
         self.shared.connecting.store(false, Ordering::Relaxed);
-        *self.shared.input_tx.lock().unwrap() = None;
-        *self.shared.frame.lock().unwrap() = None;
+        *self.shared.input_tx.lock_ok() = None;
+        *self.shared.frame.lock_ok() = None;
         self.shared.set_viewer_status("Getrennt");
         self.tex = None;
         self.last_seq = 0;
@@ -352,7 +353,7 @@ impl App {
                 egui::Stroke::new(2.0, p.accent),
                 egui::StrokeKind::Inside,
             );
-            let live = self.shared.xfer.lock().unwrap().is_some();
+            let live = self.shared.xfer.lock_ok().is_some();
             pt.text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
@@ -375,7 +376,7 @@ impl App {
         if files.is_empty() {
             return;
         }
-        let mut guard = self.shared.xfer.lock().unwrap();
+        let mut guard = self.shared.xfer.lock_ok();
         match guard.as_mut() {
             Some(x) => {
                 let n = files.len();
@@ -395,7 +396,7 @@ impl App {
             .set_title("Datei(en) an die Gegenstelle senden")
             .pick_files();
         if let Some(files) = files {
-            let mut guard = self.shared.xfer.lock().unwrap();
+            let mut guard = self.shared.xfer.lock_ok();
             if let Some(x) = guard.as_mut() {
                 for p in files {
                     x.send_path(p);
@@ -407,7 +408,7 @@ impl App {
     }
 
     pub(crate) fn open_drop_dir(&self) {
-        let dir = self.shared.drop_dir.lock().unwrap().clone();
+        let dir = self.shared.drop_dir.lock_ok().clone();
         let _ = std::fs::create_dir_all(&dir);
         #[cfg(windows)]
         {
@@ -417,7 +418,7 @@ impl App {
 
     /// Bottom bar with every running/finished transfer of this session.
     pub(crate) fn transfer_ui(&mut self, ctx: &egui::Context) {
-        let list = self.shared.xfers.lock().unwrap().clone();
+        let list = self.shared.xfers.lock_ok().clone();
         if list.is_empty() {
             return;
         }
@@ -476,8 +477,8 @@ impl App {
 
     /// Row for the self-update.
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
-        let pending = self.shared.update.lock().unwrap().clone();
-        let status = self.shared.update_status.lock().unwrap().clone();
+        let pending = self.shared.update.lock_ok().clone();
+        let status = self.shared.update_status.lock_ok().clone();
         let dienst = service::installed();
         ui.horizontal(|ui| {
             if icons::text_button(ui, "refresh", i18n::t("upd.check"), false).clicked() {
@@ -491,7 +492,7 @@ impl App {
                                 i18n::t("upd.found"),
                                 rel.version
                             ));
-                            *sh.update.lock().unwrap() = Some(rel);
+                            *sh.update.lock_ok() = Some(rel);
                         } else {
                             sh.set_update_status(format!(
                                 "{} (v{})",
@@ -536,7 +537,7 @@ impl App {
     }
     pub(crate) fn pull_frame(&mut self, ctx: &egui::Context) {
         let img = {
-            let guard = self.shared.frame.lock().unwrap();
+            let guard = self.shared.frame.lock_ok();
             match guard.as_ref() {
                 Some(f) if f.seq != self.last_seq => {
                     self.last_seq = f.seq;
@@ -566,7 +567,7 @@ impl App {
 
     /// Header: brand on the left, the three areas as pills, status on the right.
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let my_id = self.shared.my_id.lock().unwrap().clone();
+        let my_id = self.shared.my_id.lock_ok().clone();
         let online = !my_id.is_empty();
         ui.horizontal(|ui| {
             ui.add_space(2.0);

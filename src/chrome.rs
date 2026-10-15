@@ -19,6 +19,7 @@ pub fn paint_caption(caption: egui::Color32, text: egui::Color32, border: egui::
         DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
         DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
+    // SAFETY: DwmSetWindowAttribute gets handles of this process's own windows and pointers to locals whose size is passed along.
     unsafe {
         // Colour ALL own windows, not just the main window.
         //
@@ -57,6 +58,8 @@ fn eigene_fenster() -> Vec<windows::Win32::Foundation::HWND> {
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
+    /// # Safety
+    /// Only valid as the EnumWindows callback: `l` must be the `*mut Vec<HWND>` passed by `eigene_fenster`.
     unsafe extern "system" fn sammeln(h: HWND, l: LPARAM) -> BOOL {
         let liste = &mut *(l.0 as *mut Vec<HWND>);
         let mut pid = 0u32;
@@ -67,6 +70,7 @@ fn eigene_fenster() -> Vec<windows::Win32::Foundation::HWND> {
         BOOL::from(true)
     }
     let mut liste: Vec<HWND> = Vec::new();
+    // SAFETY: EnumWindows is synchronous; the Vec behind LPARAM outlives it and only `sammeln` touches it.
     unsafe {
         let _ = EnumWindows(Some(sammeln), LPARAM(&mut liste as *mut _ as isize));
     }

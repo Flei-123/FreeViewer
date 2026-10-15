@@ -41,6 +41,7 @@
 // Until then the public building blocks are "unused" from the point of view of the
 // binary program - without this line dozens of warnings would appear here.
 #![allow(dead_code)]
+use crate::lockutil::LockExt;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1126,7 +1127,7 @@ impl Dienst {
     /// Konto-Zeichen setzen (`None` = abgemeldet weiterarbeiten).
     pub fn konto_setzen(&self, token: Option<&str>) {
         let neu = token.unwrap_or("").trim().to_string();
-        let mut t = self.token.lock().unwrap();
+        let mut t = self.token.lock_ok();
         if *t != neu {
             *t = neu;
             self.sofort.store(true, Ordering::SeqCst);
@@ -1134,11 +1135,11 @@ impl Dienst {
     }
 
     pub fn namen_setzen(&self, name: &str) {
-        *self.name.lock().unwrap() = crate::presence::clean(name);
+        *self.name.lock_ok() = crate::presence::clean(name);
     }
 
     pub fn angemeldet(&self) -> bool {
-        !self.token.lock().unwrap().is_empty()
+        !self.token.lock_ok().is_empty()
     }
 
     /// Did the last sync succeed?
@@ -1167,29 +1168,29 @@ impl Dienst {
     /// The friend list - online first. Comes from the cache,
     /// so it never waits for the network.
     pub fn liste(&self) -> Vec<Freund> {
-        self.buch.lock().unwrap().sortiert()
+        self.buch.lock_ok().sortiert()
     }
 
     /// Alle offenen Anfragen, beide Richtungen.
     pub fn offene_anfragen(&self) -> Vec<Anfrage> {
-        self.buch.lock().unwrap().anfragen.clone()
+        self.buch.lock_ok().anfragen.clone()
     }
 
     /// Only those I have to answer.
     pub fn eingehende(&self) -> Vec<Anfrage> {
-        self.buch.lock().unwrap().eingehende()
+        self.buch.lock_ok().eingehende()
     }
 
     pub fn ausgehende(&self) -> Vec<Anfrage> {
-        self.buch.lock().unwrap().ausgehende()
+        self.buch.lock_ok().ausgehende()
     }
 
     pub fn blockierte(&self) -> Vec<Blockiert> {
-        self.buch.lock().unwrap().blockiert.clone()
+        self.buch.lock_ok().blockiert.clone()
     }
 
     pub fn ist_freund(&self, fvid: &str) -> bool {
-        self.buch.lock().unwrap().ist_freund(fvid)
+        self.buch.lock_ok().ist_freund(fvid)
     }
 
     /// Reachable friend? (Offer one-click meeting/remote support only then.)
@@ -1204,12 +1205,12 @@ impl Dienst {
 
     /// Eine Abschrift des ganzen Buches.
     pub fn buch(&self) -> Buch {
-        self.buch.lock().unwrap().clone()
+        self.buch.lock_ok().clone()
     }
 
     /// Next message from the mailbox (and out of it).
     pub fn meldung(&self) -> Option<Meldung> {
-        let mut p = self.postfach.lock().unwrap();
+        let mut p = self.postfach.lock_ok();
         if p.is_empty() {
             None
         } else {
@@ -1218,7 +1219,7 @@ impl Dienst {
     }
 
     fn melde(&self, m: Meldung) {
-        let mut p = self.postfach.lock().unwrap();
+        let mut p = self.postfach.lock_ok();
         if p.len() > 20 {
             p.remove(0);
         }
@@ -1244,8 +1245,8 @@ impl Dienst {
             return Err(Fehler::KontoNoetig);
         }
         {
-            let mut b = self.buch.lock().unwrap();
-            let name = self.name.lock().unwrap().clone();
+            let mut b = self.buch.lock_ok();
+            let name = self.name.lock_ok().clone();
             b.anfrage_stellen(&id, &name)?;
             b.save();
         }
@@ -1268,7 +1269,7 @@ impl Dienst {
         let id = ziel_norm(fvid);
         let wer;
         {
-            let mut b = self.buch.lock().unwrap();
+            let mut b = self.buch.lock_ok();
             wer = b.anzeige_fuer(&id);
             b.annehmen(&id)?;
             b.save();
@@ -1290,7 +1291,7 @@ impl Dienst {
         let id = ziel_norm(fvid);
         let wer;
         {
-            let mut b = self.buch.lock().unwrap();
+            let mut b = self.buch.lock_ok();
             wer = b.anzeige_fuer(&id);
             b.ablehnen(&id)?;
             b.save();
@@ -1312,7 +1313,7 @@ impl Dienst {
         let id = ziel_norm(fvid);
         let wer;
         {
-            let mut b = self.buch.lock().unwrap();
+            let mut b = self.buch.lock_ok();
             wer = b.anzeige_fuer(&id);
             b.entfernen(&id)?;
             b.save();
@@ -1333,7 +1334,7 @@ impl Dienst {
     pub fn blockieren(&self, fvid: &str, an: bool) -> Result<(), Fehler> {
         let id = ziel_norm(fvid);
         {
-            let mut b = self.buch.lock().unwrap();
+            let mut b = self.buch.lock_ok();
             b.blockieren(&id, an)?;
             b.save();
         }
@@ -1352,7 +1353,7 @@ impl Dienst {
 
     /// The invitations currently in the mailbox (newest first).
     pub fn einladungen(&self) -> Vec<Einladung> {
-        self.einladungen.lock().unwrap().clone()
+        self.einladungen.lock_ok().clone()
     }
 
     /// Send a created meeting to a friend. The link must not carry a
@@ -1382,7 +1383,7 @@ impl Dienst {
     /// Tick off an invitation (accepted or discarded): it disappears
     /// here immediately, at the relay in the background.
     pub fn einladung_erledigt(&self, id: &str) {
-        self.einladungen.lock().unwrap().retain(|e| e.id != id);
+        self.einladungen.lock_ok().retain(|e| e.id != id);
         let (relay, geheimnis, token, name) = self.zugang();
         let ids = vec![id.to_string()];
         std::thread::spawn(move || {
@@ -1399,7 +1400,7 @@ impl Dienst {
         }
         let mut neu = Vec::new();
         {
-            let mut gemeldet = self.einl_gemeldet.lock().unwrap();
+            let mut gemeldet = self.einl_gemeldet.lock_ok();
             for e in &liste {
                 if gemeldet.insert(e.id.clone()) {
                     neu.push(e.clone());
@@ -1410,7 +1411,7 @@ impl Dienst {
                 gemeldet.extend(liste.iter().map(|e| e.id.clone()));
             }
         }
-        *self.einladungen.lock().unwrap() = liste;
+        *self.einladungen.lock_ok() = liste;
         for e in &neu {
             self.melde(Meldung::EinladungErhalten(e.von(), e.titel.clone()));
         }
@@ -1444,7 +1445,7 @@ impl Dienst {
     pub fn abgleich_blockierend(&self) -> Result<Stand, Fehler> {
         let (relay, geheimnis, token, name) = self.zugang();
         let stand = hole_stand(&relay, &geheimnis, &token, &name)?;
-        let mut b = self.buch.lock().unwrap();
+        let mut b = self.buch.lock_ok();
         if b.uebernehmen(&stand) {
             b.save();
         } else {
@@ -1463,7 +1464,7 @@ impl Dienst {
             Ok(_) => {
                 self.verbunden.store(true, Ordering::Relaxed);
                 {
-                    let b = self.buch.lock().unwrap();
+                    let b = self.buch.lock_ok();
                     self.melde(Meldung::Abgeglichen {
                         freunde: b.freunde.len(),
                         offen: b.anfragen.len(),
@@ -1483,8 +1484,8 @@ impl Dienst {
         (
             self.relay.clone(),
             self.geheimnis.clone(),
-            self.token.lock().unwrap().clone(),
-            self.name.lock().unwrap().clone(),
+            self.token.lock_ok().clone(),
+            self.name.lock_ok().clone(),
         )
     }
 
@@ -1506,7 +1507,7 @@ struct Briefkasten {
 
 impl Briefkasten {
     fn melde(&self, m: Meldung) {
-        let mut p = self.postfach.lock().unwrap();
+        let mut p = self.postfach.lock_ok();
         if p.len() > 20 {
             p.remove(0);
         }

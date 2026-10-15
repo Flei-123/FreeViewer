@@ -66,6 +66,7 @@ mod imp {
     };
 
     fn send(inputs: &[INPUT]) {
+        // SAFETY: `inputs` is a valid slice of INPUT structs and the size passed matches `INPUT`.
         unsafe {
             SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
         }
@@ -88,6 +89,7 @@ mod imp {
     }
 
     fn key(vk: u16, ext: bool, down: bool) {
+        // SAFETY: plain Win32 call with integer arguments.
         let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if ext {
@@ -119,6 +121,7 @@ mod imp {
     /// caller is allowed to (a service, or the "SoftwareSASGeneratedByServices"
     /// policy). Returns false when the call was not possible.
     fn send_sas() -> bool {
+        // SAFETY: loads sas.dll by a static name; `SendSAS` has the signature `extern "system" fn(i32)`, so the transmute matches.
         unsafe {
             let name = windows::core::w!("sas.dll");
             let lib: HMODULE = match LoadLibraryW(name) {
@@ -141,6 +144,7 @@ mod imp {
         pub fn mouse_abs(&mut self, nx: i32, ny: i32, screen: ScreenRect) {
             let px = screen.x as i64 + (nx as i64 * screen.w as i64 / 10000);
             let py = screen.y as i64 + (ny as i64 * screen.h as i64 / 10000);
+            // SAFETY: GetSystemMetrics takes plain integer constants.
             unsafe {
                 let vx = GetSystemMetrics(SM_XVIRTUALSCREEN) as i64;
                 let vy = GetSystemMetrics(SM_YVIRTUALSCREEN) as i64;

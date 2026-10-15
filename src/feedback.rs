@@ -4,6 +4,7 @@
 //! updates come through). No account, no login - and if the server
 //! is currently unreachable, the UI says so honestly.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -59,13 +60,13 @@ pub fn body(kind: &str, text: &str, contact: &str, id: &str, device: &str) -> St
 pub fn send(kind: &str, text: &str, contact: &str, id: &str, device: &str) {
     if text.trim().is_empty() {
         STATE.store(3, Ordering::Relaxed);
-        *MESSAGE.lock().unwrap() = "Bitte erst etwas hineinschreiben.".to_string();
+        *MESSAGE.lock_ok() = "Bitte erst etwas hineinschreiben.".to_string();
         return;
     }
     let payload = body(kind, text, contact, id, device);
     let target = url();
     STATE.store(1, Ordering::Relaxed);
-    *MESSAGE.lock().unwrap() = String::new();
+    *MESSAGE.lock_ok() = String::new();
     std::thread::spawn(move || {
         let res = ureq::post(&target)
             .header("Content-Type", "application/json")
@@ -73,15 +74,15 @@ pub fn send(kind: &str, text: &str, contact: &str, id: &str, device: &str) {
         match res {
             Ok(r) if r.status() == 200 => {
                 STATE.store(2, Ordering::Relaxed);
-                *MESSAGE.lock().unwrap() = "Danke - ist angekommen.".to_string();
+                *MESSAGE.lock_ok() = "Danke - ist angekommen.".to_string();
             }
             Ok(r) => {
                 STATE.store(3, Ordering::Relaxed);
-                *MESSAGE.lock().unwrap() = format!("Server sagt {}", r.status());
+                *MESSAGE.lock_ok() = format!("Server sagt {}", r.status());
             }
             Err(e) => {
                 STATE.store(3, Ordering::Relaxed);
-                *MESSAGE.lock().unwrap() = format!("Nicht erreichbar: {}", e);
+                *MESSAGE.lock_ok() = format!("Nicht erreichbar: {}", e);
             }
         }
     });

@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 pub(crate) fn map_key(k: egui::Key) -> Option<(u32, bool)> {
@@ -92,7 +93,7 @@ impl eframe::App for App {
         // Setup job from the browser download: as soon as the host
         // has its ID from the relay, everything happens by itself (no pairing).
         if let Some((code, name)) = self.auto_setup.clone() {
-            let fertige_id = !self.shared.my_id.lock().unwrap().is_empty();
+            let fertige_id = !self.shared.my_id.lock_ok().is_empty();
             if fertige_id {
                 self.auto_setup = None;
                 self.setup_dlg = Some(SetupDlg {
@@ -195,7 +196,7 @@ impl eframe::App for App {
         // the main window stays usable (open a second session, search a
         // file), and fullscreen only affects the remote screen.
         if connected {
-            let title = match self.shared.host_peer.lock().unwrap().clone() {
+            let title = match self.shared.host_peer.lock_ok().clone() {
                 s if s.is_empty() => i18n::t("sess.window").to_string(),
                 _ => {
                     let id = self.partner_id.clone();

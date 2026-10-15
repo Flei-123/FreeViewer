@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 /// The host already runs in its own threads - here we only wait and
@@ -8,8 +9,8 @@ pub(crate) fn ohne_fenster_weiterlaufen(shared: &Arc<Shared>) -> ! {
     let mut zuletzt = String::new();
     loop {
         std::thread::sleep(Duration::from_secs(5));
-        let id = shared.my_id.lock().unwrap().clone();
-        let status = shared.host_status.lock().unwrap().clone();
+        let id = shared.my_id.lock_ok().clone();
+        let status = shared.host_status.lock_ok().clone();
         let zeile = format!("ohne Fenster: ID {} | {}", id, status);
         if zeile != zuletzt {
             capture::log_line(&zeile);
@@ -109,6 +110,7 @@ pub(crate) fn fehlerfenster(text: &str) {
         .encode_utf16()
         .collect();
     titel.push(0);
+    // SAFETY: `t` and `titel` are NUL-terminated UTF-16 buffers that outlive the blocking MessageBoxW call.
     unsafe {
         MessageBoxW(
             None,

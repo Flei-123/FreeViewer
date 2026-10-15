@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -471,7 +472,7 @@ impl App {
                     // Re-reading runs in the background again - the
                     // PnP query takes almost a second on Windows.
                     self.meet_win.geraete_da = false;
-                    *self.meet_win.geraete.lock().unwrap() = None;
+                    *self.meet_win.geraete.lock_ok() = None;
                     let slot = self.meet_win.geraete.clone();
                     std::thread::spawn(move || {
                         let (mics, mut cams) = meet::geraete();
@@ -480,7 +481,7 @@ impl App {
                             cams = echte.into_iter().map(|g| g.name).collect();
                         }
                         let (_, spks) = crate::meetaudio::geraete_liste();
-                        *slot.lock().unwrap() = Some((mics, cams, spks));
+                        *slot.lock_ok() = Some((mics, cams, spks));
                     });
                 }
                 meetfenster::Aktion::EinladungKopieren => {

@@ -1,5 +1,6 @@
 //! Viewer side: connect to a remote FreeViewer host through the relay.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,7 +47,7 @@ impl Canvas {
     }
 
     fn publish(&self, shared: &Arc<Shared>) {
-        *shared.frame.lock().unwrap() = Some(FrameData {
+        *shared.frame.lock_ok() = Some(FrameData {
             width: self.w,
             height: self.h,
             rgba: self.rgba.clone(),
@@ -63,7 +64,7 @@ fn clipboard_worker(shared: Arc<Shared>) {
         return;
     }
     while shared.connected.load(Ordering::Relaxed) {
-        let incoming = shared.clip_in.lock().unwrap().take();
+        let incoming = shared.clip_in.lock_ok().take();
         if let Some(text) = incoming {
             if shared.clip_on.load(Ordering::Relaxed) { clip.set(&text); }
         }
@@ -352,7 +353,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                         cipher = Some(Arc::new(Mutex::new(Cipher::new(&key, false))));
                         session_key = Some(key);
                         let code = crypto::session_code(&key);
-                        *shared.session_code.lock().unwrap() = code.clone();
+                        *shared.session_code.lock_ok() = code.clone();
 
                         match auth {
                             Auth::Password(password) => {
@@ -369,7 +370,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             }
                             Auth::Ask => {
                                 // tell them who is knocking, then wait
-                                let me = shared.device_name.lock().unwrap().clone();
+                                let me = shared.device_name.lock_ok().clone();
                                 let mut out = Vec::with_capacity(1 + me.len());
                                 out.push(crypto::TAG_ASK);
                                 out.extend_from_slice(me.as_bytes());
@@ -407,12 +408,12 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
 
                         // input pipeline: GUI -> encrypt -> relay
                         let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Msg>();
-                        *shared.input_tx.lock().unwrap() = Some(in_tx);
+                        *shared.input_tx.lock_ok() = Some(in_tx);
                         let c2 = c.clone();
                         let tx2 = tx.clone();
                         tokio::spawn(async move {
                             while let Some(m) = in_rx.recv().await {
-                                let sealed = { c2.lock().unwrap().seal(&encode(&m)) };
+                                let sealed = { c2.lock_ok().seal(&encode(&m)) };
                                 if tx2.send(WsMsg::Binary(sealed.into())).is_err() {
                                     break;
                                 }
@@ -424,8 +425,8 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             let sh = shared.clone();
                             let send_msg: Arc<dyn Fn(Msg) + Send + Sync> =
                                 Arc::new(move |m: Msg| sh.send_input(m));
-                            shared.xfers.lock().unwrap().clear();
-                            *shared.xfer.lock().unwrap() =
+                            shared.xfers.lock_ok().clear();
+                            *shared.xfer.lock_ok() =
                                 Some(crate::xfer::Xfer::new(shared.clone(), send_msg));
                         }
 
@@ -518,7 +519,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 let ts = started.elapsed().as_millis() as u64;
                                 let sealed =
-                                    { c3.lock().unwrap().seal(&encode(&Msg::Ping { ts })) };
+                                    { c3.lock_ok().seal(&encode(&Msg::Ping { ts })) };
                                 if tx3.send(WsMsg::Binary(sealed.into())).is_err() {
                                     break;
                                 }
@@ -537,20 +538,20 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 Some(c) => c,
                                 None => continue,
                             };
-                            match c.lock().unwrap().open(data) {
+                            match c.lock_ok().open(data) {
                                 Some(p) => p,
                                 None => continue,
                             }
                         };
                         match decode(&plain) {
                             Some(Msg::ScreenInfo { width, height }) => {
-                                *shared.remote_size.lock().unwrap() = (width, height);
+                                *shared.remote_size.lock_ok() = (width, height);
                             }
                             Some(Msg::Resolutions { list }) => {
-                                *shared.remote_resolutions.lock().unwrap() = list;
+                                *shared.remote_resolutions.lock_ok() = list;
                             }
                             Some(Msg::Monitors { active, list }) => {
-                                *shared.monitors.lock().unwrap() = list;
+                                *shared.monitors.lock_ok() = list;
                                 shared.active_monitor.store(active, Ordering::Relaxed);
                             }
                             Some(Msg::Audio { seq, data }) => {
@@ -558,11 +559,11 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                     v.feed(seq, &data);
                                 }
                             }                            Some(Msg::Cursor { x, y, visible }) => {
-                                *shared.remote_cursor.lock().unwrap() = (x, y, visible);
+                                *shared.remote_cursor.lock_ok() = (x, y, visible);
                             }
                             Some(Msg::Clipboard { text }) => {
                                 shared.clip_from_host.fetch_add(1, Ordering::Relaxed);
-                                *shared.clip_in.lock().unwrap() = Some(text);
+                                *shared.clip_in.lock_ok() = Some(text);
                             }
                             Some(Msg::Frame {
                                 width,
@@ -628,7 +629,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                                 }
                             }
                             Some(m) if crate::xfer::is_file_msg(&m) => {
-                                if let Some(x) = shared.xfer.lock().unwrap().as_mut() {
+                                if let Some(x) = shared.xfer.lock_ok().as_mut() {
                                     x.on_msg(m);
                                 }
                             }
@@ -640,7 +641,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             Some(Msg::Pong { ts }) => {
                                 let now = started.elapsed().as_millis() as u64;
                                 let rtt = now.saturating_sub(ts) as f32;
-                                shared.stats.lock().unwrap().latency_ms = rtt;
+                                shared.stats.lock_ok().latency_ms = rtt;
                             }
                             _ => {}
                         }
@@ -650,7 +651,7 @@ async fn viewer_once(shared: &Arc<Shared>, id: &str, auth: &Auth) -> Result<()> 
                             win_frames += shared.video_frames.swap(0, Ordering::Relaxed);
                             win_bytes += shared.video_bytes.swap(0, Ordering::Relaxed) as usize;
                             {
-                                let mut st = shared.stats.lock().unwrap();
+                                let mut st = shared.stats.lock_ok();
                                 st.fps = win_frames as f32 / secs;
                                 st.kbps = (win_bytes as f32 * 8.0 / 1000.0) / secs;
                             }
@@ -800,7 +801,7 @@ fn video_worker(
         match d.decode(&data, &mut rgba) {
             Ok(Some((dw, dh))) => {
                 let seq = shared.next_frame_seq();
-                *shared.frame.lock().unwrap() = Some(FrameData {
+                *shared.frame.lock_ok() = Some(FrameData {
                     width: dw,
                     height: dh,
                     rgba: std::mem::take(&mut rgba),

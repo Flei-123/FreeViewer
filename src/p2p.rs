@@ -23,6 +23,7 @@
 //! is dropped and a fresh keyframe is requested over the reliable channel -
 //! the same recovery the viewer already uses.
 
+use crate::lockutil::LockExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -153,13 +154,13 @@ impl P2p {
             }
         }
         crate::capture::log_line(&format!("p2p Kandidaten der Gegenstelle: {:?}", list));
-        *self.remote.lock().unwrap() = list;
+        *self.remote.lock_ok() = list;
     }
 
     /// Sends one proto message as encrypted fragments. Returns false when no
     /// direct path is up (caller falls back to the relay).
     pub async fn send_msg(&self, plain: &[u8]) -> bool {
-        let peer = match *self.peer.lock().unwrap() {
+        let peer = match *self.peer.lock_ok() {
             Some(p) => p,
             None => return false,
         };
@@ -205,19 +206,19 @@ impl P2p {
         while !self.stop.load(Ordering::Relaxed) {
             let direct = self.is_direct();
             let targets: Vec<SocketAddr> = if direct {
-                self.peer.lock().unwrap().iter().copied().collect()
+                self.peer.lock_ok().iter().copied().collect()
             } else {
-                self.remote.lock().unwrap().clone()
+                self.remote.lock_ok().clone()
             };
             let stamp = started.elapsed().as_millis() as u64;
             for a in targets {
                 self.send_to(a, PUNCH, stamp).await;
             }
             if direct {
-                let quiet = self.last_rx.lock().unwrap().elapsed();
+                let quiet = self.last_rx.lock_ok().elapsed();
                 if quiet > DEAD_AFTER {
                     self.direct.store(false, Ordering::Relaxed);
-                    *self.peer.lock().unwrap() = None;
+                    *self.peer.lock_ok() = None;
                     announced = false;
                     on_state(false, 0);
                     crate::capture::log_line("p2p: direkte Verbindung verloren");
@@ -270,13 +271,13 @@ impl P2p {
             if plain.is_empty() {
                 continue;
             }
-            *self.last_rx.lock().unwrap() = Instant::now();
+            *self.last_rx.lock_ok() = Instant::now();
             match plain[0] {
                 PUNCH => {
                     let stamp = be64(&plain[1..]);
                     self.send_to(from, PUNCH_ACK, stamp).await;
                     // hearing from the peer is enough to know where to send
-                    let mut p = self.peer.lock().unwrap();
+                    let mut p = self.peer.lock_ok();
                     if p.is_none() {
                         crate::capture::log_line(&format!("p2p: Gegenstelle antwortet von {}", from));
                         *p = Some(from);
@@ -287,7 +288,7 @@ impl P2p {
                     let now = started.elapsed().as_millis() as u64;
                     self.rtt_ms
                         .store(now.saturating_sub(stamp) as u32, Ordering::Relaxed);
-                    let mut p = self.peer.lock().unwrap();
+                    let mut p = self.peer.lock_ok();
                     if p.is_none() {
                         *p = Some(from);
                     }

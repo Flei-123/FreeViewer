@@ -6,6 +6,7 @@
 //! *all* the relay learns. Screens, input and passwords stay end-to-end
 //! encrypted, the directory holds no secrets.
 
+use crate::lockutil::LockExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,6 +115,7 @@ fn win_computer_name() -> String {
         GetComputerNameExW, ComputerNamePhysicalDnsHostname,
     };
     use windows::core::PWSTR;
+    // SAFETY: the length pointer is a local; the second call gets a buffer of `have` u16 that lives for the call.
     unsafe {
         // the first call only fetches the length (it fails on purpose)
         let mut len: u32 = 0;
@@ -209,11 +211,11 @@ impl Watch {
 
     /// Which IDs the list currently shows. Cheap, called from the GUI.
     pub fn watch(&self, ids: Vec<String>) {
-        *self.wanted.lock().unwrap() = ids;
+        *self.wanted.lock_ok() = ids;
     }
 
     pub fn get(&self, id: &str) -> Option<Presence> {
-        self.state.lock().unwrap().get(id).cloned()
+        self.state.lock_ok().get(id).cloned()
     }
 
     pub fn online(&self, id: &str) -> bool {
@@ -227,11 +229,11 @@ impl Watch {
         }
         let me = self.clone();
         std::thread::spawn(move || loop {
-            let ids = me.wanted.lock().unwrap().clone();
+            let ids = me.wanted.lock_ok().clone();
             if !ids.is_empty() {
                 let token = crate::account::load().map(|a| a.token).unwrap_or_default();
                 if let Ok(map) = query(&me.relay, &ids, &token) {
-                    let mut st = me.state.lock().unwrap();
+                    let mut st = me.state.lock_ok();
                     for (k, v) in map {
                         st.insert(k, v);
                     }

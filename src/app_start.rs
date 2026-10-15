@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -6,9 +7,9 @@ impl App {
     /// Start page: this PC on the left, the way out on the right. Deliberately
     /// little text - what needs explaining is in the tooltip.
     pub(crate) fn start_view(&mut self, ui: &mut egui::Ui) {
-        let my_id = self.shared.my_id.lock().unwrap().clone();
-        let host_status = self.shared.host_status.lock().unwrap().clone();
-        let host_peer = self.shared.host_peer.lock().unwrap().clone();
+        let my_id = self.shared.my_id.lock_ok().clone();
+        let host_status = self.shared.host_status.lock_ok().clone();
+        let host_peer = self.shared.host_peer.lock_ok().clone();
         let connecting = self.shared.connecting.load(Ordering::Relaxed);
         let p = theme::palette();
 
@@ -44,7 +45,7 @@ impl App {
                 label_small(ui, i18n::t("start.password"));
                 // The session password is rolled by dice, not typed. Fixed
                 // passwords are in the settings under "Zugriff".
-                let pw_now = self.shared.password.lock().unwrap().clone();
+                let pw_now = self.shared.password.lock_ok().clone();
                 if self.pw_visible {
                     match self.pw_visible_at {
                         Some(t) if t.elapsed() < PW_REVEAL_SECS => {
@@ -79,7 +80,7 @@ impl App {
                                 // replaces the stored permanent password: ask first
                                 self.pw_overwrite = Some(PwOverwrite::Regenerate);
                             } else {
-                                *self.shared.password.lock().unwrap() = ident::random_password();
+                                *self.shared.password.lock_ok() = ident::random_password();
                             }
                         }
                         if icon_ghost(
@@ -409,7 +410,7 @@ impl App {
 
     pub(crate) fn is_me(&self, id: &str) -> bool {
         let ziffern: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
-        let me = self.shared.my_id.lock().unwrap().clone();
+        let me = self.shared.my_id.lock_ok().clone();
         !ziffern.is_empty() && ziffern == me
     }
 

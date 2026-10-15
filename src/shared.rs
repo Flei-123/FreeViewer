@@ -1,5 +1,6 @@
 //! State shared between the GUI thread and the async worker tasks.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -172,16 +173,16 @@ impl Shared {
     }
 
     pub fn set_host_status(&self, s: impl Into<String>) {
-        *self.host_status.lock().unwrap() = s.into();
+        *self.host_status.lock_ok() = s.into();
     }
     pub fn set_update_status(&self, s: impl Into<String>) {
-        *self.update_status.lock().unwrap() = s.into();
+        *self.update_status.lock_ok() = s.into();
     }
     pub fn set_viewer_status(&self, s: impl Into<String>) {
-        *self.viewer_status.lock().unwrap() = s.into();
+        *self.viewer_status.lock_ok() = s.into();
     }
     pub fn send_input(&self, m: Msg) {
-        if let Some(tx) = self.input_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self.input_tx.lock_ok().as_ref() {
             let _ = tx.send(m);
         }
     }

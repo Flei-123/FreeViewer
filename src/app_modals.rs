@@ -1,10 +1,11 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
     /// Collect the results of the setup background runs.
     pub(crate) fn take_setup_result(&mut self) {
-        let res = self.dep_out.lock().unwrap().take();
+        let res = self.dep_out.lock_ok().take();
         let Some(res) = res else { return };
         match res {
             account::SetupOut::Created { link, web, .. } => {
@@ -284,20 +285,20 @@ impl App {
             return;
         };
         // Ergebnis des Einloesens abholen
-        let got = dlg.out.lock().unwrap().take();
+        let got = dlg.out.lock_ok().take();
         if let Some(res) = got {
             match res {
                 Ok(r) => {
                     let name = presence::clean(&dlg.name);
-                    *self.shared.device_name.lock().unwrap() = name.clone();
+                    *self.shared.device_name.lock_ok() = name.clone();
                     let _ = presence::save_device_name(&name);
                     if !r.password.is_empty() {
-                        let current = self.shared.password.lock().unwrap().clone();
+                        let current = self.shared.password.lock_ok().clone();
                         if self.pw_fixed && current != r.password {
                             // never replace an existing permanent password silently
                             self.pw_overwrite = Some(PwOverwrite::Setup(r.password.clone()));
                         } else {
-                            *self.shared.password.lock().unwrap() = r.password.clone();
+                            *self.shared.password.lock_ok() = r.password.clone();
                             let _ = ident::set_fixed_password(Some(&r.password));
                             self.pw_fixed = true;
                         }
@@ -431,14 +432,14 @@ impl App {
             let relay = self.shared.relay_url.clone();
             let code = dlg.code.clone();
             let name = presence::clean(&dlg.name);
-            let id = self.shared.my_id.lock().unwrap().clone();
+            let id = self.shared.my_id.lock_ok().clone();
             let busy = dlg.busy.clone();
             let out = dlg.out.clone();
             if !busy.swap(true, Ordering::SeqCst) {
                 std::thread::spawn(move || {
                     let res = account::setup_claim(&relay, &code, &id, &name)
                         .map_err(|e| e.to_string());
-                    *out.lock().unwrap() = Some(res);
+                    *out.lock_ok() = Some(res);
                     busy.store(false, Ordering::SeqCst);
                 });
             }

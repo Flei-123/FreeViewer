@@ -1,4 +1,5 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
@@ -16,10 +17,10 @@ impl App {
         std::thread::spawn(move || {
             match meet::list() {
                 Ok(v) => {
-                    *list.lock().unwrap() = v;
-                    err.lock().unwrap().clear();
+                    *list.lock_ok() = v;
+                    err.lock_ok().clear();
                 }
-                Err(e) => *err.lock().unwrap() = format!("{}", e),
+                Err(e) => *err.lock_ok() = format!("{}", e),
             }
             busy.store(false, Ordering::Relaxed);
         });
@@ -157,8 +158,8 @@ impl App {
             ui.add_space(12.0);
             section(ui, i18n::t("meet.running"));
             card(ui, |ui| {
-                let err = self.meet_err.lock().unwrap().clone();
-                let list = self.meet_list.lock().unwrap().clone();
+                let err = self.meet_err.lock_ok().clone();
+                let list = self.meet_list.lock_ok().clone();
                 if !err.is_empty() {
                     ui.label(
                         egui::RichText::new(format!("{}: {}", i18n::t("meet.err"), err))
@@ -227,7 +228,7 @@ impl App {
         self.meet_win.beigetreten = false;
         self.meet_win.toast = None;
         self.meet_win.meeting = Some(m);
-        self.meet_win.tn.lock().unwrap().clear();
+        self.meet_win.tn.lock_ok().clear();
         // Check right away who is already there.
         self.meet_win.tn_next = std::time::Instant::now();
         // Recolor the title bar of the meeting window. It only appears
@@ -263,7 +264,7 @@ impl App {
                     cams = echte.into_iter().map(|g| g.name).collect();
                 }
                 let (_, spks) = crate::meetaudio::geraete_liste();
-                *slot.lock().unwrap() = Some((mics, cams, spks));
+                *slot.lock_ok() = Some((mics, cams, spks));
             });
         }
     }
@@ -291,7 +292,7 @@ impl App {
         let busy = self.meet_win.tn_busy.clone();
         std::thread::spawn(move || {
             if let Ok(v) = meet::teilnehmer(&id, &pass) {
-                *tn.lock().unwrap() = v;
+                *tn.lock_ok() = v;
             }
             busy.store(false, Ordering::Relaxed);
         });
@@ -332,7 +333,7 @@ impl App {
     pub(crate) fn meet_win_ui(&mut self, ctx: &egui::Context) {
         // Take over the device list as soon as the background thread is done.
         if !self.meet_win.geraete_da {
-            if let Some((mics, cams, spks)) = self.meet_win.geraete.lock().unwrap().clone() {
+            if let Some((mics, cams, spks)) = self.meet_win.geraete.lock_ok().clone() {
                 self.meet_win.mics = mics;
                 self.meet_win.cams = cams;
                 self.meet_win.spks = spks;
@@ -434,7 +435,7 @@ impl App {
         if std::mem::take(&mut self.meet_win.nativ_start) {
             self.vorprobe.aus();
             self.nativ_eigen = None;
-            let me = self.shared.my_id.lock().unwrap().clone();
+            let me = self.shared.my_id.lock_ok().clone();
             let name = if self.meet_win.name.trim().is_empty() {
                 presence::device_name()
             } else {

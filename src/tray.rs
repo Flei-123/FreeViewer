@@ -9,6 +9,7 @@
 //! (`ShowWindow`) on purpose: it has to work even while egui draws no frames
 //! because nothing is visible.
 
+use crate::lockutil::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -38,7 +39,7 @@ pub fn state() -> u8 {
 
 /// Something the user should know about (autostart could not be written...).
 pub fn take_error() -> Option<String> {
-    let mut g = LAST_ERROR.lock().unwrap();
+    let mut g = LAST_ERROR.lock_ok();
     if g.is_empty() {
         None
     } else {
@@ -47,7 +48,7 @@ pub fn take_error() -> Option<String> {
 }
 
 fn set_error(s: impl Into<String>) {
-    *LAST_ERROR.lock().unwrap() = s.into();
+    *LAST_ERROR.lock_ok() = s.into();
 }
 
 /// Tooltip text plus the state it belongs to. Lives outside the Windows
@@ -264,9 +265,9 @@ mod imp {
             Some(s) => s,
             None => return (0, crate::brand::NAME.to_string()),
         };
-        let id = sh.my_id.lock().unwrap().clone();
-        let peer = sh.host_peer.lock().unwrap().clone();
-        let status = sh.host_status.lock().unwrap().clone();
+        let id = sh.my_id.lock_ok().clone();
+        let peer = sh.host_peer.lock_ok().clone();
+        let status = sh.host_status.lock_ok().clone();
         let in_session =
             sh.connected.load(Ordering::Relaxed) || peer.to_lowercase().contains("sitzung mit");
         tip_for(crate::update::VERSION, &id, &status, &peer, in_session)
@@ -279,7 +280,7 @@ mod imp {
         }
         let (state, tip) = tip_now();
         {
-            let mut last = LAST_TIP.lock().unwrap();
+            let mut last = LAST_TIP.lock_ok();
             if state == SHOWN.load(Ordering::Relaxed) && *last == tip {
                 return;
             }
@@ -372,7 +373,7 @@ mod imp {
             Some(s) => s,
             None => return,
         };
-        let id = sh.my_id.lock().unwrap().clone();
+        let id = sh.my_id.lock_ok().clone();
         if id.is_empty() {
             set_error("Noch keine ID - FreeViewer ist nicht beim Relay angemeldet");
             return;
@@ -554,7 +555,7 @@ mod imp {
             data.hIcon = HICON(ICONS[state as usize].load(Ordering::Relaxed) as *mut _);
             put(&mut data.szTip, &tip);
             let _ = Shell_NotifyIconW(NIM_ADD, &data);
-            *LAST_TIP.lock().unwrap() = tip;
+            *LAST_TIP.lock_ok() = tip;
             SHOWN.store(state, Ordering::Relaxed);
             STATE.store(state, Ordering::Relaxed);
 

@@ -284,6 +284,10 @@ mod dpapi {
     }
 
     /// Copies the system allocated output and frees it.
+    ///
+    /// # Safety
+    /// `out` must come from a successful `CryptProtectData`/`CryptUnprotectData` call; its buffer is
+    /// system-allocated and freed here, so it must not be used afterwards.
     unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
         let v = if out.pbData.is_null() {
             Vec::new()
@@ -300,6 +304,7 @@ mod dpapi {
         let input = blob(plain);
         let entropy = blob(super::DPAPI_ENTROPY);
         let mut out = CRYPT_INTEGER_BLOB::default();
+        // SAFETY: `input`/`entropy` borrow `plain` and the static entropy, which outlive the call; `out` is a local the API fills, and `take` runs only after `.ok()?` succeeded.
         unsafe {
             CryptProtectData(
                 &input,
@@ -323,6 +328,7 @@ mod dpapi {
         let input = blob(sealed);
         let entropy = blob(entropy);
         let mut out = CRYPT_INTEGER_BLOB::default();
+        // SAFETY: same as in `protect`: the blobs borrow data that outlives the call, `take` runs only after a successful call.
         unsafe {
             CryptUnprotectData(
                 &input,

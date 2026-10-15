@@ -1,9 +1,10 @@
 //! Split out of main.rs (r35): mechanical move, behaviour unchanged.
+use crate::lockutil::LockExt;
 use super::*;
 
 impl App {
     pub(crate) fn knock_ui(&mut self, ctx: &egui::Context) {
-        let knock = self.shared.knock.lock().unwrap().clone();
+        let knock = self.shared.knock.lock_ok().clone();
         let Some(k) = knock else {
             return;
         };
@@ -79,7 +80,7 @@ impl App {
     /// (on top in the window and floating in fullscreen), but the content only
     /// once - so it collects its wishes here.
     pub(crate) fn session_bar(&mut self, ui: &mut egui::Ui, a: &mut BarActs, kompakt: bool) {
-        let stats = *self.shared.stats.lock().unwrap();
+        let stats = *self.shared.stats.lock_ok();
         let game = self.shared.game_mode();
         let p = theme::palette();
 
@@ -124,7 +125,7 @@ impl App {
             a.mode = Some(proto::MODE_GAME);
         }
 
-        let mons = self.shared.monitors.lock().unwrap().clone();
+        let mons = self.shared.monitors.lock_ok().clone();
         if mons.len() > 1 {
             ui.separator();
             let act = self.shared.active_monitor.load(Ordering::Relaxed) as usize;
@@ -154,11 +155,11 @@ impl App {
         // the previous one at the end of the session.
         ui.separator();
         {
-            let (rw, rh) = *self.shared.remote_size.lock().unwrap();
+            let (rw, rh) = *self.shared.remote_size.lock_ok();
             // What the remote screen can really do (the host says); as long as
             // there is nothing, the common steps.
             let modi = {
-                let l = self.shared.remote_resolutions.lock().unwrap().clone();
+                let l = self.shared.remote_resolutions.lock_ok().clone();
                 if l.is_empty() {
                     vec![
                         (1280u32, 720u32),
@@ -248,7 +249,7 @@ impl App {
         }
 
         ui.separator();
-        let (rw, rh) = *self.shared.remote_size.lock().unwrap();
+        let (rw, rh) = *self.shared.remote_size.lock_ok();
         let direct = self.shared.direct.load(Ordering::Relaxed);
         let text = if kompakt {
             format!("{:.0} fps  {:.0} ms", stats.fps, stats.latency_ms)
@@ -512,7 +513,7 @@ impl App {
         if !game {
             return;
         }
-        let (x, y, visible) = *self.shared.remote_cursor.lock().unwrap();
+        let (x, y, visible) = *self.shared.remote_cursor.lock_ok();
         if !visible {
             return;
         }
