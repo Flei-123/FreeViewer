@@ -76,3 +76,11 @@ jobs:
       - run: node --test web-patch/
       - run: pip install cryptography
       - run: python3 tools/freemeet-e2e/ref.py --check
+
+  german-guard:
+    name: German-in-code guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Fails if German comments, identifiers or strings rise above tools/german-guard/baseline.json.
+      - run: python3 tools/german-guard/german_guard.py
