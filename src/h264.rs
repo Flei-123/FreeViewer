@@ -153,6 +153,9 @@ mod win {
     static MF_INIT: Once = Once::new();
 
     fn mf_startup() {
+        // SAFETY: MFStartup has no pointer arguments and is guarded by `Once`, so it runs at most
+        // once per process; its result is ignored on purpose (later MFT calls then fail with an
+        // error that is propagated).
         MF_INIT.call_once(|| unsafe {
             let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
         });
@@ -171,6 +174,9 @@ mod win {
     }
 
     fn activate_name(a: &IMFActivate) -> String {
+        // SAFETY: `p` and `len` are local out-slots that outlive the call. On success
+        // GetAllocatedString returns a NUL-terminated CoTaskMem string that we own: it is copied
+        // into a Rust String and freed exactly once with CoTaskMemFree afterwards.
         unsafe {
             let mut p = PWSTR::null();
             let mut len = 0u32;
@@ -194,6 +200,11 @@ mod win {
         output: MFT_REGISTER_TYPE_INFO,
         mut pick: impl FnMut(&IMFActivate, &str) -> Option<T>,
     ) -> Option<T> {
+        // SAFETY: MFTEnumEx allocates the array `list` (`count` entries of Option<IMFActivate>)
+        // with CoTaskMemAlloc and hands ownership to us; it is checked for null and every index
+        // stays below `count`. Entries are only borrowed while `pick` runs. Afterwards each entry
+        // is released exactly once with drop_in_place, and the array is freed once with
+        // CoTaskMemFree; nothing from `list` is used after that (`pick` only gets a reference).
         unsafe {
             let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
             let mut count = 0u32;
@@ -228,6 +239,9 @@ mod win {
     }
 
     fn set_codec_api(t: &IMFTransform, bitrate: u32, gop: u32) {
+        // SAFETY: `t` is a live IMFTransform and `api` the ICodecAPI obtained by a successful cast;
+        // the VARIANTs are temporaries that outlive each SetValue call and are cleared by their
+        // Drop. Errors are ignored on purpose (encoders support different properties).
         unsafe {
             let api: ICodecAPI = match t.cast() {
                 Ok(a) => a,
@@ -246,6 +260,8 @@ mod win {
     }
 
     fn force_key(t: &IMFTransform) {
+        // SAFETY: `t` is a live IMFTransform; the cast checks that it supports ICodecAPI, and the
+        // VARIANT temporary outlives the call.
         unsafe {
             if let Ok(api) = t.cast::<ICodecAPI>() {
                 let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32));
@@ -253,6 +269,9 @@ mod win {
         }
     }
 
+    // SAFETY: caller contract: `s` is a live IMFSample. The buffer pointer from Lock stays valid
+    // for `len` bytes until Unlock, which happens after the bytes were copied into a Vec; there is
+    // no early return between Lock and Unlock, and the pointer is not used after Unlock.
     /// Copies an IMFSample into a plain byte vector.
     unsafe fn sample_bytes(s: &IMFSample) -> Result<Vec<u8>> {
         let buf = s.ConvertToContiguousBuffer()?;
@@ -264,6 +283,11 @@ mod win {
         Ok(out)
     }
 
+    // SAFETY: caller contract: none beyond a started Media Foundation. The memory buffer is created
+    // with capacity `data.len()` and Lock returns a pointer to at least that many writable bytes,
+    // so copying `data.len()` bytes is in bounds; source and destination cannot overlap (Rust slice
+    // vs. freshly allocated MF memory). Unlock and SetCurrentLength follow before the sample is
+    // built.
     unsafe fn sample_from_bytes(data: &[u8], time: i64, dur: i64) -> Result<IMFSample> {
         let buf = MFCreateMemoryBuffer(data.len() as u32)?;
         let mut p: *mut u8 = std::ptr::null_mut();
@@ -388,6 +412,12 @@ mod win {
             bitrate: u32,
             dev: Option<&ID3D11Device>,
         ) -> Result<Self> {
+            // SAFETY: Media Foundation COM calls on objects created here (`t`, `man`, `out`, ...)
+            // or borrowed live (`a`, `dev`). `token`/`man` are local out-slots; the device manager
+            // is reset with the same token it was created with. ProcessMessage(SET_D3D_MANAGER)
+            // takes the raw pointer of `man` as an integer; the MFT takes its own reference, and
+            // `man` is additionally stored in `devman` (declared to live as long as the encoder),
+            // so the manager outlives its use by the MFT.
             unsafe {
                 let t: IMFTransform = a.ActivateObject()?;
                 let mut events = None;
@@ -496,6 +526,10 @@ mod win {
             force_key(&self.t);
         }
 
+        // SAFETY: caller contract: called with `&mut self` on the thread that owns the encoder,
+        // only for an async MFT whose `events` generator was set up in `build` (it returns early
+        // otherwise). No additional memory-safety precondition; it is `unsafe` because it calls
+        // `pull`.
         /// Drains everything the async MFT has to say. Returns the encoded
         /// chunks that were ready.
         unsafe fn drain(&mut self, blocking: bool, out: &mut Vec<Chunk>) -> Result<()> {
@@ -531,6 +565,11 @@ mod win {
             }
         }
 
+        // SAFETY: caller contract: `self.t` is a started MFT (streaming begun in `build`) and calls
+        // come from one thread via `&mut self`. The output buffer lives in a ManuallyDrop struct:
+        // ProcessOutput may replace `pSample` (MFT-provided samples) or fill ours, and `pEvents`
+        // may be set by the MFT; both are taken out exactly once right after the call, even on
+        // error, so each reference is released once. `status` is a local out-slot.
         /// One ProcessOutput round.
         unsafe fn pull(&mut self, out: &mut Vec<Chunk>) -> Result<Option<()>> {
             let sample = if self.provides_samples {
@@ -589,6 +628,9 @@ mod win {
                 ));
             }
             let (time, dur) = self.zeitmarke();
+            // SAFETY: `sample_from_bytes` is called with the first `nv12_len()` bytes of `nv12`, a
+            // slice whose length was checked just above, so the copy reads in bounds; Media
+            // Foundation is started in `new`.
             let sample = unsafe { sample_from_bytes(&nv12[..self.nv12_len()], time, dur)? };
             self.hineingeben(sample)
         }
@@ -601,6 +643,11 @@ mod win {
                 return Err(anyhow!("dieser Encoder nimmt keine Texturen"));
             }
             let (time, dur) = self.zeitmarke();
+            // SAFETY: `tex` is a live D3D11 texture and this encoder was built with a DXGI device
+            // manager (`devman` is Some, checked above), so wrapping the texture in a DXGI surface
+            // buffer is valid; the IID matches the texture interface. The buffer and sample are
+            // owned COM objects released on drop; the sample keeps the texture alive until the
+            // encoder has consumed it.
             let sample = unsafe {
                 let buf = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, tex, 0, FALSE)
                     .map_err(|e| anyhow!("DXGI-Puffer: {}", e))?;
@@ -627,6 +674,11 @@ mod win {
         /// comes out. The same for both paths.
         fn hineingeben(&mut self, sample: IMFSample) -> Result<Vec<Chunk>> {
             let mut out = Vec::new();
+            // SAFETY: `self.events`, if set, is the event generator of the live async MFT
+            // (`self.t`). `drain` requires `&mut self` on the owning thread. `sample` is a live
+            // IMFSample that ProcessInput references (the MFT takes its own reference). `need`
+            // counts the input tokens granted by the MFT, so a frame is only pushed when one is
+            // available.
             unsafe {
                 if self.events.is_some() {
                     // async MFT: wait for a token, then push the frame in
@@ -652,6 +704,9 @@ mod win {
 
     impl Drop for Encoder {
         fn drop(&mut self) {
+            // SAFETY: `self.t` is a live IMFTransform; the flush/end messages carry no pointer
+            // argument (0). Drop runs once and the transform is not used afterwards; errors are
+            // ignored on purpose.
             unsafe {
                 let _ = self.t.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                 let _ = self.t.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
@@ -724,6 +779,10 @@ mod win {
         }
 
         fn build(a: &IMFActivate, name: &str, w: u32, h: u32, frei: bool) -> Result<Self> {
+            // SAFETY: Media Foundation COM calls on `a` (live borrow) and on objects created here.
+            // `inp` and the attribute values are owned/by-value, `t` is moved into `Self` only
+            // after SetInputType succeeded, and the begin/start-of-stream messages carry no pointer
+            // (0).
             unsafe {
                 let t: IMFTransform = a.ActivateObject()?;
                 if let Ok(attrs) = t.GetAttributes() {
@@ -761,6 +820,10 @@ mod win {
         /// Selects the first NV12 output type the decoder offers and remembers
         /// the geometry it decided on.
         fn pick_output(&mut self) -> Result<()> {
+            // SAFETY: `self.t` is a live decoder MFT. `t` (output type), `blob`, and `len` are
+            // locals: `blob` is a 32-byte buffer and GetBlob never writes more than the buffer
+            // length we pass (the slice carries its size), `len` is checked before the data is
+            // parsed. `SetOutputType` uses a type object returned by the same MFT.
             unsafe {
                 let mut i = 0u32;
                 loop {
@@ -840,6 +903,10 @@ mod win {
         /// Decodes one access unit. Returns the picture as RGBA plus its size,
         /// or `None` when the decoder still needs more data.
         pub fn decode(&mut self, au: &[u8], rgba: &mut Vec<u8>) -> Result<Option<(u32, u32)>> {
+            // SAFETY: `self.t` is a live decoder MFT used from the owning thread via `&mut self`.
+            // `sample_from_bytes` copies `au` into a fresh MF buffer (in bounds, see there). The
+            // decoded NV12 bytes are copied out by `pull`; `nv12_to_rgba` then works on the owned
+            // Vec and bounds-checks its input.
             unsafe {
                 let s = sample_from_bytes(au, 0, 0)?;
                 match self.t.ProcessInput(0, &s, 0) {
@@ -868,6 +935,11 @@ mod win {
             }
         }
 
+        // SAFETY: caller contract: `self.t` is a started MFT and calls come from one thread via
+        // `&mut self`. As in the encoder, `pSample` and `pEvents` live in ManuallyDrop and are
+        // taken out exactly once right after ProcessOutput (also on error), so the references are
+        // released once; `status` is a local out-slot. On a stream change the output type is
+        // renegotiated (`pick_output`) before the next call.
         unsafe fn pull(&mut self) -> Result<Option<()>> {
             let sample = if self.provides_samples {
                 None
@@ -909,6 +981,9 @@ mod win {
 
     impl Drop for Decoder {
         fn drop(&mut self) {
+            // SAFETY: `self.t` is a live IMFTransform; end-of-streaming carries no pointer (0).
+            // Drop runs once and the transform is not used afterwards; errors are ignored on
+            // purpose.
             unsafe {
                 let _ = self.t.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             }

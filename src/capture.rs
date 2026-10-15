@@ -212,6 +212,8 @@ mod gdi {
             let list = super::list_monitors(false);
             let (x, y, w, h) = match list.get(index) {
                 Some(m) if m.w > 0 && m.h > 0 => (m.x, m.y, m.w, m.h),
+                // SAFETY: GetSystemMetrics takes only an integer index and no pointers; there is no
+                // precondition to violate.
                 _ => unsafe {
                     (
                         GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -221,6 +223,12 @@ mod gdi {
                     )
                 },
             };
+            // SAFETY: Win32 GDI calls on handles created in this block. Every handle (`desktop_dc`,
+            // `display_dc`, `mem`) is checked with is_invalid() before it is used, `info` and
+            // `bits` are locals that outlive CreateDIBSection, and `bits` is only stored here,
+            // never dereferenced. On the failure paths after the DIB exists the DIB and the DCs are
+            // deleted/released again; on success the kept DC, `mem` and `bmp` move into `Self`,
+            // which frees them in Drop.
             unsafe {
                 let desktop_dc = GetDC(HWND::default());
                 let display_dc = CreateDCW(w!("DISPLAY"), None, None, None);
@@ -326,6 +334,12 @@ mod gdi {
 
     impl Backend for GdiCap {
         fn next(&mut self, _timeout_ms: u32) -> Next {
+            // SAFETY: `self.mem` and `self.screen` are the DCs created in `new_index`; they stay
+            // valid until Drop and are only used on the capture thread that owns this backend.
+            // `self.bits` is the DIB-section pointer (checked non-null) of `self.bmp`, a top-down
+            // 32 bpp bitmap of w*h*4 bytes that is selected into `self.mem`; `self.buf` was
+            // allocated with exactly w*h*4 bytes in `new_index` and is never resized, so the copy
+            // is in bounds for source and destination, and a GDI section and a Vec cannot overlap.
             unsafe {
                 if BitBlt(
                     self.mem,
@@ -370,6 +384,8 @@ mod gdi {
         }
 
         fn cursor(&self) -> (i32, i32, bool) {
+            // SAFETY: `ci` is a local, initialised CURSORINFO with `cbSize` set as the API
+            // requires; GetCursorInfo only writes into it and keeps no pointer.
             unsafe {
                 let mut ci = CURSORINFO {
                     cbSize: std::mem::size_of::<CURSORINFO>() as u32,
@@ -390,6 +406,11 @@ mod gdi {
 
     impl Drop for GdiCap {
         fn drop(&mut self) {
+            // SAFETY: Drop runs once: `bmp`, `mem` and `screen` are the handles this struct owns
+            // (created in `new_index`) and nothing uses them afterwards, including `bits`, which
+            // points into the bitmap memory. `screen` is freed the way it was acquired (DeleteDC
+            // for CreateDC, ReleaseDC for GetDC). Return values are ignored on purpose; a failure
+            // here only leaks a GDI object.
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(self.bmp.0));
                 let _ = DeleteDC(self.mem);
@@ -556,6 +577,9 @@ mod dxgi {
 
     impl Drop for Dxgi {
         fn drop(&mut self) {
+            // SAFETY: `self.dupl` is a live IDXGIOutputDuplication. `holding` is true only between
+            // a successful AcquireNextFrame and its ReleaseFrame, so a frame is released at most
+            // once; the HRESULT is ignored on purpose in Drop.
             unsafe {
                 if self.holding {
                     let _ = self.dupl.ReleaseFrame();
@@ -570,6 +594,8 @@ mod dxgi {
     /// driver.
     fn mehrfaedig_schuetzen(ctx: &ID3D11DeviceContext) {
         if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
+            // SAFETY: `mt` is a valid ID3D11Multithread obtained by a successful cast of the live
+            // context; SetMultithreadProtected only toggles an internal flag of the context.
             unsafe {
                 let _ = mt.SetMultithreadProtected(true);
             }
@@ -590,6 +616,12 @@ mod dxgi {
         } else {
             D3D_DRIVER_TYPE_HARDWARE
         };
+        // SAFETY: All pointers handed to D3D11CreateDevice are valid for the call: `base` is a
+        // reference to a live adapter (or None, then the HARDWARE driver type is used; with an
+        // adapter UNKNOWN is required), `levels` is a stack array that outlives the call, `device`
+        // and `ctx` are local Option out-slots that receive owned COM pointers, and the unused
+        // feature-level out parameter is None. HMODULE::default() is NULL, which is required for
+        // HARDWARE/UNKNOWN (no software rasterizer).
         unsafe {
             D3D11CreateDevice(
                 base.as_ref(),
@@ -627,6 +659,11 @@ mod dxgi {
     fn friendly(device_name: &str) -> String {
         use windows::core::PCWSTR;
         use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+        // SAFETY: The DISPLAY_DEVICEW structs are locals, zero-initialised with `cb` set to their
+        // size as EnumDisplayDevicesW requires, and only written by the API. `wname` is a
+        // NUL-terminated UTF-16 buffer that outlives the call (PCWSTR::null() means enumerate the
+        // adapters). The fixed-size name arrays are read through `wide()`, which stops at the first
+        // NUL or at the array end.
         unsafe {
             let mut i = 0u32;
             loop {
@@ -666,6 +703,10 @@ mod dxgi {
     /// factory (instead of just our own adapter) also finds virtual displays
     /// that live on a second, software adapter.
     pub fn enumerate() -> Result<Vec<Out>> {
+        // SAFETY: Plain DXGI enumeration: the factory, adapters and outputs are owned COM wrappers
+        // that live until the end of the block, `desc` is a local out value, and `Out` stores
+        // clones (separately reference-counted), so nothing refers to a temporary after the loop.
+        // No raw pointers are kept.
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
             let mut list: Vec<Out> = Vec::new();
@@ -751,6 +792,9 @@ mod dxgi {
             MiscFlags: 0,
         };
         let mut tex: Option<ID3D11Texture2D> = None;
+        // SAFETY: `desc` is a fully initialised local that outlives the call; no initial data is
+        // passed (None), so the API retains no pointer into our memory. `tex` is a local out-slot
+        // that receives an owned COM pointer on success.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut tex))
@@ -802,6 +846,11 @@ mod dxgi {
             oh: u32,
             nv12: bool,
         ) -> Result<Self> {
+            // SAFETY: Direct3D11 video COM calls on live borrows (`device`, `ctx`). The descriptors
+            // (`desc`, `ivd`, `ovd`) are locals that outlive the calls and are copied by the API;
+            // the views are created from `src`/`dst`, which are kept alive by the COM reference
+            // counts (`src` moves into `Self`, the output view holds `dst`). All out-slots are
+            // Option locals that are checked before use, and no raw pointer outlives the block.
             unsafe {
                 let vdev: ID3D11VideoDevice = device
                     .cast()
@@ -972,6 +1021,15 @@ mod dxgi {
             frame: &ID3D11Texture2D,
             teil: (f32, f32, f32, f32),
         ) -> Result<()> {
+            // SAFETY: `ctx`, `frame` and the members used here are live COM objects (the references
+            // keep them alive); `frame` is the full-size duplication texture, `self.src` has the
+            // same size and format (`in_size`). `ziel` and `rect` are locals copied by the video
+            // context during each call. `stream.pInputSurface` holds one extra reference to
+            // `in_view`; `stream.clone()` is a bitwise copy (windows crate: transmute_copy, no
+            // AddRef) inside a temporary array that never releases it, so exactly one
+            // ManuallyDrop::drop on `stream`, done before the error is propagated, balances that
+            // single reference. The past/future surface pointers are null, matching the zero
+            // counts.
             unsafe {
                 ctx.CopyResource(&self.src, frame);
                 let (iw, ih) = self.in_size;
@@ -1054,6 +1112,11 @@ mod dxgi {
             }
             let i = self.ring_i % self.ring.len();
             self.ring_i = self.ring_i.wrapping_add(1);
+            // SAFETY: `self.ring` was filled just above (non-empty), and `i` is taken modulo its
+            // length, so the index is in bounds. `src` and `dst` are live textures (COM wrappers
+            // that release their own reference on drop); CopyResource only records a GPU copy
+            // between two NV12 textures of the same size and format (`out_view`'s resource and the
+            // ring entry are both created with out_size/NV12).
             unsafe {
                 let src: ID3D11Resource = self.out_view.GetResource()?;
                 let dst: ID3D11Resource = self.ring[i].cast()?;
@@ -1064,6 +1127,14 @@ mod dxgi {
 
         /// The classic way: output texture -> staging -> main memory.
         fn rueck_ins_ram(&mut self, ctx: &ID3D11DeviceContext) -> Result<()> {
+            // SAFETY: `self.stage` is a CPU-readable staging texture of out_size, mapped for READ.
+            // While mapped, `base` is valid for `RowPitch` bytes per row: the Y plane covers rows
+            // 0..h and, for NV12, the interleaved UV plane starts at row h (D3D11 NV12 layout) and
+            // spans h/2 rows; every row has at least `w` bytes (RGB path: 4*w bytes). All reads
+            // stay inside that: the row index is below h (or h + h/2) and at most `w` (or 4*w)
+            // bytes are read per row. Destination slices are bounds-checked and `self.buf` was
+            // resized to the needed length before. There is no early return between Map and Unmap,
+            // and `base` is not used after Unmap.
             unsafe {
                 let dst_tex: ID3D11Resource = self.out_view.GetResource()?;
                 ctx.CopyResource(&self.stage, &dst_tex);
@@ -1135,6 +1206,9 @@ mod dxgi {
             MiscFlags: 0,
         };
         let mut tex: Option<ID3D11Texture2D> = None;
+        // SAFETY: `desc` is a fully initialised local that outlives the call; no initial data is
+        // passed (None), so the API retains no pointer into our memory. `tex` is a local out-slot
+        // that receives an owned COM pointer on success.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut tex))
@@ -1156,6 +1230,8 @@ mod dxgi {
             let rect = outs[i].rect;
             let w = (rect.right - rect.left).max(1) as u32;
             let h = (rect.bottom - rect.top).max(1) as u32;
+            // SAFETY: `output` and `device` are live, owned COM interfaces for the whole call;
+            // DuplicateOutput returns an owned IDXGIOutputDuplication, or it fails.
             let dupl = unsafe {
                 output
                     .DuplicateOutput(&device)
@@ -1192,6 +1268,9 @@ mod dxgi {
         /// Rebuilds the duplication after ACCESS_LOST (resolution change, UAC
         /// prompt, session switch, ...).
         fn recreate(&mut self) -> Result<()> {
+            // SAFETY: `self.dupl` is a live duplication interface. ReleaseFrame is only called
+            // while `holding` is true (a frame is acquired and not yet released) and `holding` is
+            // reset right after, so a frame is never released twice.
             unsafe {
                 if self.holding {
                     let _ = self.dupl.ReleaseFrame();
@@ -1206,6 +1285,8 @@ mod dxgi {
             let h = (rect.bottom - rect.top).max(1) as u32;
             // a screen can move to another GPU (hot plug, hybrid graphics), in
             // that case the old device cannot duplicate it any more
+            // SAFETY: `output` and `self.device` are live, owned COM interfaces for the whole call;
+            // DuplicateOutput returns an owned interface, or it fails.
             self.dupl = match unsafe { output.DuplicateOutput(&self.device) } {
                 Ok(d) => d,
                 Err(_) => {
@@ -1214,6 +1295,8 @@ mod dxgi {
                     self.ctx = ctx;
                     self.staging = make_staging(&self.device, w, h)?;
                     self.w = 0; // force the buffer rebuild below
+                    // SAFETY: same as above: `output` is alive and `self.device` was just replaced
+                    // by the new live device, so the call has valid arguments.
                     unsafe { output.DuplicateOutput(&self.device)? }
                 }
             };
@@ -1232,6 +1315,13 @@ mod dxgi {
         fn collect_rects(&mut self) -> Result<bool> {
             self.dirty.clear();
             self.moves.clear();
+            // SAFETY: GetFrameMoveRects/GetFrameDirtyRects write at most `bytes` bytes through the
+            // pointer we give them. The Vec was resized to `cap` elements immediately before and
+            // `bytes = cap * size_of::<T>()`, so the pointer is valid for exactly that many bytes.
+            // After Ok, `needed` (bytes the API wrote) is at most `bytes`, so `truncate(needed /
+            // size_of)` only shrinks; on MORE_DATA the Vec is regrown and the call repeated. Only
+            // valid while a frame is held, which `next` guarantees (called after a successful
+            // AcquireNextFrame).
             unsafe {
                 // move rects first (the API guarantees they were applied first)
                 let mut needed = 0u32;
@@ -1287,6 +1377,14 @@ mod dxgi {
         /// Copies the changed regions into the CPU buffer.
         fn read_back(&mut self, src: &ID3D11Texture2D, full: bool) -> Result<()> {
             let stride = self.w as usize * 4;
+            // SAFETY: `self.ctx`, `self.staging` and `src` are live COM objects. Copy boxes are
+            // clamped to [0,w]x[0,h], the size of both `staging` and the duplication surface `src`,
+            // so CopySubresourceRegion stays inside both textures. After a successful Map(READ),
+            // `src_ptr` is valid for `pitch` bytes on each of the h rows, with pitch >= 4*w.
+            // `copy_rows` reads (x1-x0)*4 bytes of a row y < h starting at x0*4, with x1 <= w
+            // (rects are clamped to the same w/h), so it stays inside the mapped row; destination
+            // slices are bounds-checked and `stride == 4*w` matches `self.buf` (w*h*4). No early
+            // return between Map and Unmap, and `src_ptr` is not used after Unmap.
             unsafe {
                 if full {
                     self.ctx.CopyResource(&self.staging, src);
@@ -1366,6 +1464,12 @@ mod dxgi {
 
     impl Backend for Dxgi {
         fn next(&mut self, timeout_ms: u32) -> Next {
+            // SAFETY: All COM objects used here (`self.dupl`, `self.ctx`, `self.device`, the
+            // textures) are live and owned by this backend, which is only used from the capture
+            // thread that owns it. AcquireNextFrame writes into the local out-slots `info` and
+            // `res`. `holding` records whether a frame is outstanding, so ReleaseFrame runs exactly
+            // once per acquired frame; `tex` is a reference-counted copy and is only used before
+            // the next ReleaseFrame. Rectangle/box arithmetic is clamped to w/h as in `read_back`.
             unsafe {
                 if self.holding {
                     let _ = self.dupl.ReleaseFrame();

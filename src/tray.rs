@@ -129,6 +129,9 @@ mod imp {
     /// Is the GUI of this user already running? (GUI marker)
     pub fn gui_running() -> bool {
         // OpenMutexW sitzt in Synchronization, nicht in Security
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer that outlives OpenMutexW. If the call
+        // succeeds, the returned handle is owned by us and closed exactly once right away; it is
+        // not used otherwise.
         unsafe {
             use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::Threading::{OpenMutexW, MUTEX_ALL_ACCESS};
@@ -150,6 +153,12 @@ mod imp {
     }
 
     pub fn claim_single_instance(agent: bool) -> bool {
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer that outlives CreateMutexW (null
+        // security attributes = default). On success the mutex handle is either dropped into
+        // `INSTANCE_MUTEX` and intentionally never closed (it must live as long as the process to
+        // keep the name claimed) or, for a second instance, left to process exit. GetLastError is
+        // read right after CreateMutexW, and the message id from RegisterWindowMessageW is only
+        // used if non-zero.
         unsafe {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
             // GUI and service agent may run side by side - the agent is
@@ -184,6 +193,11 @@ mod imp {
         HWND(TRAY_HWND.load(Ordering::Relaxed) as *mut _)
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. `xor` holds 32*32*4 bytes (32
+    // bpp) and `and` holds 32*32/8 bytes (1 bpp, 4 bytes per row, which satisfies the WORD row
+    // alignment), exactly the sizes CreateIcon reads for a 32x32 icon with 1 plane and 32 bits.
+    // Both Vecs outlive the call; CreateIcon copies the bits. The returned HICON is owned by the
+    // process (stored in `ICONS` for the process lifetime).
     /// Draws a 32x32 "eye": coloured ring, dark iris, white centre. Round on
     /// purpose - `CreateIcon` takes device dependent bits whose row order is
     /// bottom up, and a symmetric shape cannot end up upside down.
@@ -273,6 +287,11 @@ mod imp {
         tip_for(crate::update::VERSION, &id, &status, &peer, in_session)
     }
 
+    // SAFETY: caller contract: only call on the tray thread (it runs from the window procedure's
+    // timer). `hwnd` comes from `TRAY_HWND` and is checked for non-null, `data` is a local
+    // NOTIFYICONDATAW whose `cbSize` is set in `nid`, and `put` truncates every string to the fixed
+    // array size and always keeps the terminating zero. `ICONS[state]` is a checked index (state is
+    // 0..=2) and the stored value is either 0 or a valid icon handle.
     unsafe fn refresh_icon() {
         let hwnd = tray_hwnd();
         if hwnd.0.is_null() {
@@ -295,6 +314,10 @@ mod imp {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 process; the tray window handle is read
+    // from `TRAY_HWND` and checked for non-null. `data` is a local with a correct `cbSize`, and
+    // `put` truncates the title and text to the fixed arrays and keeps the terminating zero, so
+    // Shell_NotifyIconW reads only memory inside `data`.
     /// A balloon, used exactly once: when the window disappears into the tray
     /// for the first time, so nobody thinks the program is gone.
     pub unsafe fn balloon(title: &str, text: &str) {
@@ -310,6 +333,11 @@ mod imp {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }
 
+    // SAFETY: window enumeration callback; the signature and `system` ABI match WNDENUMPROC.
+    // `lparam` is the address of the local `found` of `main_hwnd`, valid and exclusively used for
+    // the duration of the synchronous EnumWindows call, so the write through it is valid; it is the
+    // only place that dereferences `lparam`. `pid` and `buf` are locals, and GetWindowTextW is
+    // limited to the slice length.
     /// Finds our own main window.
     ///
     /// Going by "first window of this process with a caption" is not enough:
@@ -340,6 +368,10 @@ mod imp {
         false.into()
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. `found` is a local isize whose
+    // address is passed through LPARAM to `find_main` and is only accessed during the synchronous
+    // EnumWindows call. The returned HWND is just an identifier; it may become stale later, which
+    // Win32 handles by failing the following calls.
     pub unsafe fn main_hwnd() -> Option<HWND> {
         let mut found: isize = 0;
         let _ = EnumWindows(Some(find_main), LPARAM(&mut found as *mut isize as isize));
@@ -350,6 +382,8 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. The HWND comes from `main_hwnd`
+    // just before; a stale or foreign window makes the Win32 calls fail, not misbehave.
     pub unsafe fn show_main() {
         if let Some(h) = main_hwnd() {
             let _ = ShowWindow(h, SW_SHOW);
@@ -361,6 +395,8 @@ mod imp {
         HIDDEN.store(false, Ordering::Relaxed);
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. The HWND comes from `main_hwnd`
+    // just before; a stale or foreign window makes ShowWindow fail, not misbehave.
     pub unsafe fn hide_main() {
         if let Some(h) = main_hwnd() {
             let _ = ShowWindow(h, SW_HIDE);
@@ -384,6 +420,10 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: `hwnd` is the tray window and the call must come from its thread (it
+    // runs from the window procedure). The menu handle is owned here and destroyed exactly once.
+    // The text buffers (`open`, `copy`, `auto`, `quit`) are NUL-terminated and outlive
+    // TrackPopupMenu, and `p` is a local out value.
     unsafe fn menu(hwnd: HWND) {
         let hmenu = match CreatePopupMenu() {
             Ok(m) => m,
@@ -421,6 +461,8 @@ mod imp {
         let _ = DestroyMenu(hmenu);
     }
 
+    // SAFETY: caller contract: only call on the tray thread from the window procedure. It takes no
+    // pointers; the functions it calls have no further preconditions.
     unsafe fn command(id: usize) {
         match id {
             ID_OPEN => show_main(),
@@ -447,6 +489,9 @@ mod imp {
         }
     }
 
+    // SAFETY: window procedure registered in `start`; the signature and `system` ABI match WNDPROC.
+    // It runs on the tray thread that created the window and never dereferences `w` or `l` (only
+    // integer masks); unknown messages go to DefWindowProcW with the original arguments.
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
         let show = SHOW_MSG.load(Ordering::Relaxed);
         if show != 0 && msg == show {
@@ -485,6 +530,10 @@ mod imp {
         if h == 0 {
             return;
         }
+        // SAFETY: `h` was swapped out of `TRAY_HWND`, so only one caller sees a non-zero value.
+        // `data` is a local NOTIFYICONDATAW with a correct `cbSize`; Shell_NotifyIconW(NIM_DELETE)
+        // only needs the window handle and icon id. If the window is already destroyed, the call
+        // just fails.
         unsafe {
             let data = nid(HWND(h as *mut _));
             let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -497,6 +546,12 @@ mod imp {
         if RUNNING.swap(true, Ordering::SeqCst) {
             return;
         }
+        // SAFETY: this closure is the tray thread: every Win32 object it creates (window class,
+        // window, timer, icons) is used only on this thread, the message loop runs here, and
+        // `remove()` is called after the loop ends. `wc`, `class` and the title strings are valid
+        // for the calls (the class name is a static literal), `wndproc` has the correct signature,
+        // and `hwnd` is stored in `TRAY_HWND` only after CreateWindowExW succeeded. `msg` is a
+        // local MSG for GetMessageW; `ICONS[state]` is a checked index.
         std::thread::spawn(|| unsafe {
             let hinst = match GetModuleHandleW(None) {
                 Ok(h) => HINSTANCE(h.0),
@@ -578,6 +633,8 @@ pub use imp::{claim_single_instance, gui_running, remove, showing, start};
 /// Window handle of the main window - for the title bar colour.
 #[cfg(windows)]
 pub fn main_window() -> Option<windows::Win32::Foundation::HWND> {
+    // SAFETY: `main_hwnd` has no memory-safety preconditions; it is marked unsafe only because it
+    // calls raw Win32 APIs.
     unsafe { imp::main_hwnd() }
 }
 
@@ -588,16 +645,22 @@ pub fn main_window() -> Option<()> {
 
 #[cfg(windows)]
 pub fn show_window() {
+    // SAFETY: `show_main` has no memory-safety preconditions; it is marked unsafe only because it
+    // calls raw Win32 APIs.
     unsafe { imp::show_main() }
 }
 
 #[cfg(windows)]
 pub fn hide_window() {
+    // SAFETY: `hide_main` has no memory-safety preconditions; it is marked unsafe only because it
+    // calls raw Win32 APIs.
     unsafe { imp::hide_main() }
 }
 
 #[cfg(windows)]
 pub fn balloon(title: &str, text: &str) {
+    // SAFETY: `balloon` has no memory-safety preconditions (it checks for a missing tray window
+    // itself); it is marked unsafe only because it calls raw Win32 APIs.
     unsafe { imp::balloon(title, text) }
 }
 

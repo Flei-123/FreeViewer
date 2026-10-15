@@ -156,6 +156,10 @@ mod imp {
     // ------------------------------------------------------------ elevation
 
     pub fn is_elevated() -> bool {
+        // SAFETY: `token` is a local out-slot that OpenProcessToken fills with a handle we own; it
+        // is only used after that call succeeded and is closed exactly once before returning. `el`
+        // and `ret` are locals, and the size passed to GetTokenInformation is exactly
+        // `size_of::<TOKEN_ELEVATION>()`, which is the buffer behind the pointer.
         unsafe {
             let mut token = HANDLE::default();
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
@@ -180,6 +184,10 @@ mod imp {
     pub fn elevate(args: &str) -> Result<()> {
         let exe = wide(&exe_path());
         let params = wide(args);
+        // SAFETY: `exe` and `params` are NUL-terminated UTF-16 buffers that outlive the call, the
+        // verb comes from the `w!` literal and the working directory is null (allowed).
+        // ShellExecuteW keeps no pointer after returning. The result is only compared with 32 and
+        // never used as a real handle.
         let r = unsafe {
             ShellExecuteW(
                 HWND::default(),
@@ -250,11 +258,18 @@ mod imp {
 
     // ---------------------------------------------------------------- SCM
 
+    // SAFETY: caller contract: none beyond the Win32 rules for the access mask. The call takes no
+    // pointers (null machine and database names select the local active database); the returned
+    // handle must be closed by the caller with CloseServiceHandle, which every caller in this
+    // module does.
     unsafe fn scm(access: u32) -> Result<SC_HANDLE> {
         Ok(OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), access)?)
     }
 
     pub fn installed() -> bool {
+        // SAFETY: `m`, `name` and `h` are handles/buffers owned by this function: `name` is
+        // NUL-terminated and outlives OpenServiceW, and each opened handle is closed exactly once
+        // on every path (no early return between opening and closing).
         unsafe {
             let Ok(m) = scm(SC_MANAGER_CONNECT) else {
                 return false;
@@ -271,6 +286,9 @@ mod imp {
     }
 
     pub fn running() -> bool {
+        // SAFETY: `name` is NUL-terminated and outlives OpenServiceW, `st` is a local out value
+        // written by QueryServiceStatus, and both SCM handles are closed exactly once on every path
+        // (no `?` between opening and closing).
         unsafe {
             let Ok(m) = scm(SC_MANAGER_CONNECT) else {
                 return false;
@@ -295,6 +313,13 @@ mod imp {
         }
         prepare_machine_config()?;
         let bin = format!("\"{}\" --service", exe_path());
+        // SAFETY: All UTF-16 buffers (`name`, `disp`, `binw`, `descw`) are NUL-terminated and
+        // outlive the calls, and the structs that point into them (`desc`, `fa`, `actions`) are
+        // locals that outlive the ChangeServiceConfig2W calls, which copy the data and keep no
+        // pointers. `SERVICE_DESCRIPTIONW.lpDescription` points into the mutable `descw`.
+        // `fa.cActions` equals the length of `actions`. Handle `h` is closed once, `m` once, on the
+        // success path; the two `?` returns (scm, CreateServiceW) can leak a handle on failure but
+        // never use one after close.
         unsafe {
             let m = scm(SC_MANAGER_ALL_ACCESS)?;
             let name = wide(SERVICE_NAME);
@@ -395,6 +420,10 @@ mod imp {
         if !is_elevated() {
             return Err(anyhow!("Administrator-Rechte noetig"));
         }
+        // SAFETY: `name` is NUL-terminated and outlives OpenServiceW, `st` and `cur` are local out
+        // values, and `h`/`m` are SCM handles opened here and not used after CloseServiceHandle.
+        // The early `?` returns before the closes can leak a handle on failure (never a use after
+        // close).
         unsafe {
             let m = scm(SC_MANAGER_ALL_ACCESS)?;
             let name = wide(SERVICE_NAME);
@@ -423,6 +452,10 @@ mod imp {
 
     // ------------------------------------------------- where are we running
 
+    // SAFETY: caller contract: `h` must be a valid window-station or desktop handle
+    // (GetUserObjectInformationW only reads it). `buf` is a local array and the byte length passed
+    // (len * 2) is exactly its size, so the API cannot write past it; `need` is a local out value.
+    // The text is converted lossily and cut at the first NUL.
     /// Name of a window station / desktop handle.
     unsafe fn object_name(h: HANDLE) -> String {
         let mut buf = [0u16; 128];
@@ -443,6 +476,9 @@ mod imp {
             .to_string()
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. GetThreadDesktop returns the
+    // desktop of the current thread (a handle owned by the system that must not be closed); it is
+    // only passed to `object_name`, which needs a valid handle, guaranteed by the Ok result.
     /// Name of the desktop this thread is on.
     pub unsafe fn own_desktop_name() -> String {
         match GetThreadDesktop(GetCurrentThreadId()) {
@@ -451,6 +487,9 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. The desktop opened by
+    // OpenInputDesktop is owned by us: its name is read through `object_name` while the handle is
+    // valid and it is closed exactly once afterwards; the handle never escapes.
     /// Name of the desktop that currently receives keyboard and mouse. This
     /// is the only desktop that can be captured - everything else is blind.
     ///
@@ -468,6 +507,8 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: same as `input_desktop`, which this function only wraps (it takes no
+    // arguments and holds no pointers).
     pub unsafe fn input_desktop_name() -> String {
         input_desktop().unwrap_or_default()
     }
@@ -497,12 +538,16 @@ mod imp {
     pub fn watch_desktop() {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(2));
+            // SAFETY: `own_desktop_name` has no preconditions beyond being called from a normal
+            // Win32 thread; it only queries the desktop of the calling (watcher) thread.
             let mine = unsafe { own_desktop_name() };
             if mine.is_empty() {
                 return;
             }
             let secure = "Winlogon";
             loop {
+                // SAFETY: `input_desktop` has no preconditions beyond being called from a normal
+                // Win32 thread; it opens, reads and closes its own desktop handle internally.
                 let target = match unsafe { input_desktop() } {
                     Ok(name) if !name.is_empty() && !name.eq_ignore_ascii_case(&mine) => {
                         Some(name)
@@ -530,6 +575,11 @@ mod imp {
     /// that currently owns the input. Written into the log on agent start -
     /// capture only ever works when our desktop IS the input desktop.
     pub fn desktop_report() -> String {
+        // SAFETY: `sess` is a local out value; the window station handle comes from
+        // GetProcessWindowStation (owned by the process, not closed here) and is only used for
+        // `object_name` while valid (a null handle ends in the error branch of
+        // GetUserObjectInformationW and yields "?"). The desktop handles are valid for the calls
+        // and not closed here (thread desktop) or closed inside `input_desktop`.
         unsafe {
             let mut sess = 0u32;
             let _ = ProcessIdToSessionId(GetCurrentProcessId(), &mut sess);
@@ -582,11 +632,18 @@ mod imp {
             dwCheckPoint: CHECKPOINT.fetch_add(1, Ordering::Relaxed),
             dwWaitHint: wait_hint,
         };
+        // SAFETY: `h` was checked for non-null, and `st` is a local SERVICE_STATUS that outlives
+        // the call (SetServiceStatus copies it). The handle comes from
+        // RegisterServiceCtrlHandlerExW and stays valid for the life of the service process.
         unsafe {
             let _ = SetServiceStatus(h, &st);
         }
     }
 
+    // SAFETY: callback registered with RegisterServiceCtrlHandlerExW; the signature and the
+    // `system` ABI match LPHANDLER_FUNCTION_EX. It dereferences none of its pointer arguments
+    // (`_event_data`, `_context`) and only touches atomics and `set_state`, which is safe to call
+    // from the control-dispatcher thread.
     unsafe extern "system" fn handler(
         control: u32,
         _event_type: u32,
@@ -608,6 +665,10 @@ mod imp {
         0
     }
 
+    // SAFETY: entry point passed to StartServiceCtrlDispatcherW; the signature and the `system` ABI
+    // match LPSERVICE_MAIN_FUNCTIONW. `_argv` is never dereferenced. `name` is NUL-terminated and
+    // outlives the RegisterServiceCtrlHandlerExW call; the status handle is stored in an atomic and
+    // is valid until the service process exits.
     unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
         let name = wide(SERVICE_NAME);
         let h = match RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(handler), None) {
@@ -636,6 +697,9 @@ mod imp {
             },
             SERVICE_TABLE_ENTRYW::default(),
         ];
+        // SAFETY: `table` ends with a zeroed SERVICE_TABLE_ENTRYW (as required) and `name`, which
+        // its first entry points to, outlives the call because the dispatcher only returns when the
+        // service has stopped; `service_main` has the matching signature.
         unsafe { StartServiceCtrlDispatcherW(table.as_ptr())? };
         Ok(())
     }
@@ -645,6 +709,10 @@ mod imp {
 
     /// First process with that name inside the given session.
     fn find_process(name: &str, session: u32) -> Option<u32> {
+        // SAFETY: `snap` is a snapshot handle owned here and closed exactly once on every path
+        // after it was created. `e` is a local PROCESSENTRY32W with `dwSize` set as the API
+        // requires and is only written by Process32FirstW/NextW. `szExeFile` is a fixed array that
+        // the API NUL-terminates; it is read as a slice and trimmed at the NUL.
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
             let mut e = PROCESSENTRY32W {
@@ -675,6 +743,10 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: `session` should be a real session id; the returned token is an
+    // owned handle that the caller must close. The token handles obtained here (`t`, `p`) are local
+    // out values used only after the call succeeded; `p` is closed right after OpenProcessToken,
+    // and `t` is consumed by `duplicate`, which closes it on every path.
     /// A primary token we can start the agent with: the token of the logged in
     /// user, or - on the login screen - winlogon's SYSTEM token.
     unsafe fn session_token(session: u32, secure: bool) -> Result<HANDLE> {
@@ -694,6 +766,10 @@ mod imp {
         duplicate(t)
     }
 
+    // SAFETY: caller contract: `t` must be a valid token handle with TOKEN_DUPLICATE access that
+    // the caller gives up ownership of: it is closed here exactly once, whether or not
+    // DuplicateTokenEx succeeds. `dup` is a local out value; the null security attributes mean
+    // default security.
     unsafe fn duplicate(t: HANDLE) -> Result<HANDLE> {
         let mut dup = HANDLE::default();
         let r = DuplicateTokenEx(
@@ -714,6 +790,11 @@ mod imp {
         if h == 0 {
             return false;
         }
+        // SAFETY: the handle value comes from the `AGENT` atomic, which holds a process handle
+        // returned by CreateProcessAsUserW or 0 (checked above); `code` is a local out value.
+        // `kill_agent` swaps the handle out and closes it, so a concurrent `kill_agent` from
+        // another thread could leave this call with an already closed handle value (the call then
+        // only fails or answers about a recycled handle; no memory is involved, see roadmap).
         unsafe {
             let mut code = 0u32;
             if GetExitCodeProcess(HANDLE(h as *mut c_void), &mut code).is_err() {
@@ -743,6 +824,9 @@ mod imp {
         if h == 0 {
             return;
         }
+        // SAFETY: `AGENT.swap(0)` takes the handle out of the static, so this call is the only
+        // owner and closes it exactly once (a second caller sees 0 and returns early).
+        // TerminateProcess and CloseHandle take no pointers.
         unsafe {
             let handle = HANDLE(h as *mut c_void);
             let _ = TerminateProcess(handle, 0);
@@ -750,6 +834,13 @@ mod imp {
         }
     }
 
+    // SAFETY: caller contract: `session` is a real session id and the caller must be running as
+    // SYSTEM (WTSQueryUserToken and the winlogon token need it). All wide-string buffers (`deskw`,
+    // `cmd`) are NUL-terminated, mutable (CreateProcess may write to the command line) and outlive
+    // CreateProcessAsUserW; `si.lpDesktop` points into `deskw`. The environment block from
+    // CreateEnvironmentBlock is passed together with CREATE_UNICODE_ENVIRONMENT and destroyed once
+    // afterwards; the token is closed once; `pi.hThread` is closed and `pi.hProcess` is handed to
+    // the `AGENT` static, whose owner is `kill_agent`.
     unsafe fn spawn_agent(session: u32, desktop: &str) -> Result<u32> {
         // the secure desktop only accepts SYSTEM
         let secure = desktop.eq_ignore_ascii_case("Winlogon");
@@ -797,6 +888,8 @@ mod imp {
         let mut current: Option<(u32, String)> = None;
         let mut last_try = std::time::Instant::now() - std::time::Duration::from_secs(10);
         while !STOP.load(Ordering::Relaxed) {
+            // SAFETY: WTSGetActiveConsoleSessionId takes no arguments and has no preconditions;
+            // 0xFFFFFFFF means no active console session and is handled.
             let session = unsafe { WTSGetActiveConsoleSessionId() };
             let wanted = if session == 0xFFFF_FFFF {
                 None
@@ -811,6 +904,11 @@ mod imp {
                 if last_try.elapsed() >= std::time::Duration::from_secs(3) {
                     last_try = std::time::Instant::now();
                     kill_agent();
+                    // SAFETY: `spawn_agent` is only called from the supervisor thread of the
+                    // service process, which runs as SYSTEM; `sess` was just returned by
+                    // WTSGetActiveConsoleSessionId and `desktop` was validated by `wanted_desktop`
+                    // (alphanumerics and '-' only), so the strings put into the desktop name and
+                    // command line are safe.
                     match unsafe { spawn_agent(sess, &desktop) } {
                         Ok(pid) => {
                             log(&format!(

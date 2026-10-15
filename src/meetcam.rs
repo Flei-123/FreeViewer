@@ -596,6 +596,9 @@ mod win {
     static MF_INIT: Once = Once::new();
 
     fn mf_startup() {
+        // SAFETY: MFStartup has no pointer arguments and is guarded by `Once`, so it runs at most
+        // once per process; its result is ignored on purpose (later Media Foundation calls then
+        // fail with an error that is propagated).
         MF_INIT.call_once(|| unsafe {
             let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
         });
@@ -605,6 +608,10 @@ mod win {
         ((a as u64) << 32) | b as u64
     }
 
+    // SAFETY: caller contract: `a` is a live IMFActivate and `schluessel` a valid GUID reference.
+    // `p` and `len` are local out-slots. On success GetAllocatedString returns a NUL-terminated
+    // CoTaskMem string that we own: it is copied into a Rust String and freed exactly once with
+    // CoTaskMemFree.
     unsafe fn text(a: &IMFActivate, schluessel: &GUID) -> String {
         let mut p = PWSTR::null();
         let mut len = 0u32;
@@ -616,6 +623,12 @@ mod win {
         s
     }
 
+    // SAFETY: caller contract: COM must be initialised on the calling thread, and `f` must not keep
+    // the borrowed IMFActivate beyond the call (clone it if needed). MFEnumDeviceSources allocates
+    // the array `list` (`count` entries of Option<IMFActivate>) with CoTaskMemAlloc and gives
+    // ownership to us; it is checked for null, every index stays below `count`, entries are only
+    // borrowed while `f` runs, then each entry is released once with drop_in_place and the array is
+    // freed once with CoTaskMemFree; nothing from `list` is used after that.
     /// List cameras. Calls `f` for each one; returns the first
     /// Some result of `f` (so you can search OR list in one go).
     unsafe fn mit_kameras<T>(mut f: impl FnMut(&IMFActivate, &str, &str) -> Option<T>) -> Option<T> {
@@ -658,6 +671,9 @@ mod win {
 
     pub fn liste() -> Vec<Geraet> {
         let mut out: Vec<Geraet> = Vec::new();
+        // SAFETY: `mit_kameras` only needs COM/Media Foundation on this thread, which the callers
+        // of `liste` set up or which are initialised by `mf_startup`; the closure borrows the local
+        // `out` and no raw pointer leaves the block.
         unsafe {
             // Never return Some -> runs through all devices.
             mit_kameras::<()>(|_, name, id| {
@@ -684,6 +700,11 @@ mod win {
         stop: Arc<AtomicBool>,
         fehler: Arc<Mutex<String>>,
     ) {
+        // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
+        // CoUninitialize after `schleife_inner` has returned, so every COM interface created there
+        // (all locals of that function) has already been dropped when COM is torn down. Known nit:
+        // CoUninitialize also runs if CoInitializeEx failed (see roadmap); it cannot fail on a
+        // fresh thread.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let r = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop, &fehler);
@@ -699,6 +720,11 @@ mod win {
         }
     }
 
+    // SAFETY: caller contract: COM is initialised on the current thread until return; the function
+    // owns every interface it creates and drops them before returning. All out-slots (`attrs`,
+    // `flags`, `ts`, `sample`) are locals that outlive the calls. Pixel data only leaves through
+    // `bild_holen`, which copies into `roh` before the sample is released; the later accesses to
+    // `roh`/`fertig` are safe slice code.
     #[allow(clippy::too_many_arguments)]
     unsafe fn schleife_inner(
         id: Option<String>,
@@ -862,6 +888,9 @@ mod win {
     /// that is down to the colour space, the row stride or the cropping can
     /// only be measured on the REAL device - guessing does not help here.
     pub fn diagnose(id: Option<String>, zw: u32, zh: u32, fps: u32, ordner: &str) -> String {
+        // SAFETY: COM is initialised on this thread first and uninitialised after `diagnose_inner`
+        // returned, which has dropped all its interfaces by then (same pattern as `schleife`); the
+        // call has no pointer arguments of its own.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let r = diagnose_inner(id, zw, zh, fps, ordner);
@@ -900,6 +929,8 @@ mod win {
         format!("{:?}", g)
     }
 
+    // SAFETY: caller contract: `t` is a live IMFMediaType. It only reads attributes by value (GUID,
+    // u64, u32) and keeps no pointers.
     unsafe fn typ_text(t: &IMFMediaType) -> String {
         let sub = t.GetGUID(&MF_MT_SUBTYPE).map(|g| fourcc(&g)).unwrap_or_else(|_| "?".into());
         let (w, h) = match t.GetUINT64(&MF_MT_FRAME_SIZE) {
@@ -937,6 +968,11 @@ mod win {
         }
     }
 
+    // SAFETY: caller contract: COM is initialised on the current thread until return; all
+    // interfaces are created and dropped inside. The out-slots (`z0`, `pitch`, `flags`, `ts`,
+    // `sample`) are locals; the 2D buffer is locked only to read its pitch and is unlocked
+    // immediately without reading through the pointer. Pixel data is read only via `bild_holen`,
+    // and later indexing of `roh` is bounds-checked.
     unsafe fn diagnose_inner(
         id: Option<String>,
         zw: u32,
@@ -1130,6 +1166,9 @@ mod win {
         log
     }
 
+    // SAFETY: caller contract: `leser` is a live IMFSourceReader and `strom` a stream index. The
+    // loop is bounded (64 entries) and only reads attributes (GUID/u64) of the returned media
+    // types, which are owned COM objects.
     /// Looks among the formats the camera supports natively for
     /// the best NV12 for the target size.
     ///
@@ -1193,6 +1232,8 @@ mod win {
         bester.map(|(_, t)| t)
     }
 
+    // SAFETY: caller contract: `leser` is a live IMFSourceReader and `strom` a stream index; it
+    // only reads attributes of the owned media type and keeps no pointers.
     unsafe fn groesse(leser: &IMFSourceReader, strom: u32) -> Option<(u32, u32)> {
         let cur = leser.GetCurrentMediaType(strom).ok()?;
         let sz = cur.GetUINT64(&MF_MT_FRAME_SIZE).ok()?;
@@ -1204,6 +1245,14 @@ mod win {
         Some((w & !1, h & !1))
     }
 
+    // SAFETY: caller contract: `s` is a live IMFSample. Path A: after a successful Lock2D, `zeile0`
+    // is valid for the buffer's contiguous length (`len` from GetCurrentLength, or GetMaxLength as
+    // fallback) and `pitch > 0` is checked; the slice length `noetig = stride * rh * 3 / 2` is
+    // verified to be <= `len` before from_raw_parts, and the buffer is unlocked after the closure
+    // ran. Path B: Lock returns the data pointer and `flach` (the current length), and both slices
+    // (`dicht` and `noetig`) are only built after checking `<= flach`; Unlock follows on every path
+    // after a successful Lock and the pointer is not used afterwards. The data is copied into
+    // `out`, so nothing refers to the locked memory after return.
     /// Copies a sample into tightly packed NV12 and returns the size
     /// that REALLY is in it.
     ///

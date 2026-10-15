@@ -82,12 +82,19 @@ struct CMSampleTimingInfo {
 
 #[repr(C)]
 struct VTDecompressionOutputCallbackRecord {
+    // SAFETY: function-pointer type only (no operation happens here). The signature must match
+    // Apple's VTDecompressionOutputCallback exactly; VideoToolbox calls it with the `refcon` stored
+    // next to it, which is a pointer to the decoder's `Mutex<Bild>` kept alive by the `Decoder`
+    // until the session is invalidated.
     callback: Option<
         unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CVImageBufferRef, CMTime, CMTime),
     >,
     refcon: *mut c_void,
 }
 
+// SAFETY: function-pointer type only (no operation happens here). The signature must match Apple's
+// VTCompressionOutputCallback; VideoToolbox passes back the `refcon` given to
+// VTCompressionSessionCreate, a pointer to the encoder's `Mutex<Ausgabe>`.
 type VTCompressionOutputCallback =
     Option<unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CMSampleBufferRef)>;
 
@@ -246,15 +253,26 @@ extern "C" {
 // ----------------------------------------------------------- Hilfsmittel ---
 
 fn zahl_i32(v: i32) -> CFNumberRef {
+    // SAFETY: `&v` points to a live local i32 for the whole call and `kCFNumberSInt32Type` tells
+    // CFNumberCreate to read exactly 4 bytes from it; the returned CFNumber is an owned (+1) object
+    // that the caller must release.
     unsafe { CFNumberCreate(std::ptr::null(), kCFNumberSInt32Type, &v as *const i32 as *const c_void) }
 }
 
 fn zahl_f64(v: f64) -> CFNumberRef {
+    // SAFETY: `&v` points to a live local f64 for the whole call and `kCFNumberFloat64Type` tells
+    // CFNumberCreate to read exactly 8 bytes from it; the returned CFNumber is an owned (+1) object
+    // that the caller must release.
     unsafe { CFNumberCreate(std::ptr::null(), kCFNumberFloat64Type, &v as *const f64 as *const c_void) }
 }
 
 /// A dictionary with exactly one entry - nobody needs more here.
 fn dict1(schluessel: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
+    // SAFETY: `k` and `v` are local one-element arrays that outlive the call and `anzahl` is 1,
+    // matching their length; CFDictionaryCreate copies the entries. The key/value callbacks are the
+    // CoreFoundation statics (only their addresses are taken), so the dictionary retains and
+    // releases its entries correctly; `schluessel` and `wert` must be valid CF objects (the callers
+    // pass Apple's constants). The result is an owned (+1) dictionary.
     unsafe {
         let k = [schluessel as *const c_void];
         let v = [wert];
@@ -325,8 +343,21 @@ pub struct Encoder {
 // The session itself is thread-safe from Apple's side; the rest sits behind
 // a mutex. Without that the encoder could not be put into the meeting's
 // worker thread.
+// SAFETY: the VTCompressionSession is documented as thread-safe, so moving it to another thread is
+// fine. The other raw pointer, `pixel`, is only touched through `&mut self` (encode/drop), and the
+// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Ausgabe>>`. The struct is not
+// `Sync`, so there is never concurrent access from two threads.
 unsafe impl Send for Encoder {}
 
+// SAFETY: callback invoked by VideoToolbox on its own thread. `refcon` is the pointer to the
+// `Mutex<Ausgabe>` inside the Encoder's Arc (null is checked); the session is invalidated in Drop
+// before that Arc is released, so the reference is valid whenever the callback runs. `probe` is a
+// live CMSampleBuffer owned by VideoToolbox for the duration of the call (null checked); `bb`, `fd`
+// and the parameter-set pointers belong to it and are only used inside the call. The slice over
+// `zeiger` uses `gesamt` (total length) and therefore assumes a contiguous block buffer (`hier ==
+// gesamt`), which the encoder delivers in practice but the code does not verify (see roadmap). The
+// AVCC parser bounds-checks every length against the slice. Parameter-set pointers are checked for
+// null and non-zero size before they are turned into slices.
 unsafe extern "C" fn kodier_rueckruf(
     refcon: *mut c_void,
     _quelle: *mut c_void,
@@ -437,6 +468,11 @@ impl Encoder {
         let ausgabe = Arc::new(Mutex::new(Ausgabe::default()));
         let refcon = Arc::as_ptr(&ausgabe) as *mut c_void;
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
+        // SAFETY: all pointer arguments are valid for the call: the null allocator/dictionaries
+        // select the defaults, `refcon` is the address of the `Mutex<Ausgabe>` inside `ausgabe`
+        // (the Arc stored in the Encoder, which outlives the session because Drop invalidates the
+        // session first), and `session` is a local out-slot that is checked for null afterwards.
+        // `kodier_rueckruf` matches the callback signature.
         let st = unsafe {
             VTCompressionSessionCreate(
                 std::ptr::null(),
@@ -454,6 +490,10 @@ impl Encoder {
         if st != 0 || session.is_null() {
             return Err(anyhow!("VideoToolbox-Kodierer nicht verfuegbar ({})", st));
         }
+        // SAFETY: `session` was just created successfully (non-null, checked above) and is
+        // exclusively ours. Property keys/values are Apple constants or CFNumbers created here;
+        // values created here (`freigeben == true`) are released exactly once right after the call
+        // (VTSessionSetProperty retains what it needs). The kCFBoolean statics are only read.
         unsafe {
             let setzen = |k: CFStringRef, v: CFTypeRef, freigeben: bool| {
                 VTSessionSetProperty(session, k, v);
@@ -492,6 +532,9 @@ impl Encoder {
         }
         // A single pixel buffer that is filled again and again.
         let mut pixel: CVPixelBufferRef = std::ptr::null_mut();
+        // SAFETY: `pixel` is a local out-slot that is checked for non-null together with the
+        // status; null attribute/allocator arguments select defaults. The width/height are even and
+        // at least 16 (checked in `new`).
         let st = unsafe {
             CVPixelBufferCreate(
                 std::ptr::null(),
@@ -503,6 +546,9 @@ impl Encoder {
             )
         };
         if st != 0 || pixel.is_null() {
+            // SAFETY: `session` is a valid compression session created above that is not stored
+            // anywhere else yet; it is invalidated and released exactly once on this error path,
+            // and `Encoder` is never constructed, so Drop does not run for it.
             unsafe {
                 VTCompressionSessionInvalidate(session);
                 CFRelease(session as CFTypeRef);
@@ -550,6 +596,16 @@ impl Encoder {
             ));
         }
         let (w, h) = (self.w as usize, self.h as usize);
+        // SAFETY: `self.pixel` and `self.session` are live objects owned by this Encoder (created
+        // in `new`, released only in Drop). Lock/Unlock are paired; between them no early return
+        // exists. Source reads stay inside `nv12`: its length was checked against w*h*3/2 and the Y
+        // rows read w bytes at `zeile * w` (zeile < h) and the UV rows w bytes at `w*h + zeile*w`
+        // (zeile < h/2). Destination writes use the plane base address and the row stride reported
+        // by CoreVideo (>= w for both planes of a 4:2:0 buffer with width w); the planes have h and
+        // h/2 rows, so each row write is inside the plane. Null plane pointers are skipped. `props`
+        // is an owned dictionary that is released once after EncodeFrame (VT retains what it
+        // needs), and CompleteFrames blocks until the callback has run for every frame, so `pixel`
+        // is no longer read by VideoToolbox when it is rewritten next time.
         unsafe {
             if CVPixelBufferLockBaseAddress(self.pixel, 0) != 0 {
                 return Err(anyhow!("Pixelpuffer laesst sich nicht sperren"));
@@ -622,6 +678,10 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
+        // SAFETY: Drop runs exactly once and nothing uses the Encoder afterwards. CompleteFrames
+        // flushes pending frames, then the session is invalidated (no callback can run afterwards,
+        // so the `refcon` into the Arc can no longer dangle) and the session and pixel buffer are
+        // each released once; `pixel` is checked for null.
         unsafe {
             VTCompressionSessionCompleteFrames(self.session, CMTime::ungueltig());
             VTCompressionSessionInvalidate(self.session);
@@ -654,8 +714,20 @@ pub struct Decoder {
     bild: Arc<Mutex<Bild>>,
 }
 
+// SAFETY: the VTDecompressionSession is documented as thread-safe, so moving it to another thread
+// is fine. `format` is an immutable CoreFoundation object, only changed through `&mut self`. The
+// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Bild>>`. The struct is not
+// `Sync`, so there is never concurrent access from two threads.
 unsafe impl Send for Decoder {}
 
+// SAFETY: callback invoked by VideoToolbox, possibly on another thread. `refcon` is the pointer to
+// the `Mutex<Bild>` inside the Decoder's Arc (null is checked); the session is invalidated before
+// the Decoder drops, so the reference is valid whenever the callback runs. `bild` is a live
+// CVPixelBuffer for the call (null and pixel format are checked) and is locked read-only (flag 1)
+// with a matching unlock at the end; there is no early return in between. Plane pointers are
+// checked for null, and the copies stay in bounds: source rows are < h (Y plane) and < ceil(h/2)
+// (UV plane), each at most `ys`/`uvs` bytes, and the destination `nv12` has stride*yh +
+// stride*ceil(h/2) bytes with stride >= ys, uvs, so every destination row fits.
 unsafe extern "C" fn dekodier_rueckruf(
     refcon: *mut c_void,
     _quelle: *mut c_void,
@@ -768,6 +840,12 @@ impl Decoder {
         if !self.session.is_null() || self.sps.is_empty() || self.pps.is_empty() {
             return Ok(());
         }
+        // SAFETY: `zeiger`/`groessen` point into `self.sps`/`self.pps` and local arrays that are
+        // alive for the call (the SPS/PPS are copied by CoreMedia into the format description).
+        // `fd` is a local out-slot that is checked for null. `rueckruf.refcon` is the address of
+        // the `Mutex<Bild>` in `self.bild`, which outlives the session because `sitzung_schliessen`
+        // invalidates the session before the Arc is dropped. On failure `fd` is released once; on
+        // success ownership of `fd` and `s` moves into `self`.
         unsafe {
             let zeiger: [*const u8; 2] = [self.sps.as_ptr(), self.pps.as_ptr()];
             let groessen: [usize; 2] = [self.sps.len(), self.pps.len()];
@@ -838,6 +916,14 @@ impl Decoder {
         if self.session.is_null() || avcc.is_empty() {
             return Ok(None);
         }
+        // SAFETY: the block buffer is created with `avcc.len()` bytes allocated by CoreMedia (null
+        // memory block + AssureMemoryNow flag) and filled with exactly `avcc.len()` bytes from the
+        // live Vec, so the copy is in bounds. `groessen` and `zeit` are locals that outlive
+        // CMSampleBufferCreateReady (arrays of length 1, as the counts say); `self.format` is
+        // non-null because `self.session` is non-null (both are set together). The block buffer is
+        // released once (the sample buffer retains it), the sample buffer once after the
+        // synchronous decode (WaitForAsynchronousFrames), and every error path releases what was
+        // created before it.
         unsafe {
             let mut bb: CMBlockBufferRef = std::ptr::null_mut();
             let st = CMBlockBufferCreateWithMemoryBlock(
@@ -922,6 +1008,10 @@ impl Decoder {
     }
 
     fn sitzung_schliessen(&mut self) {
+        // SAFETY: the session and format description are owned by this struct and each is released
+        // at most once: both are reset to null right after, so a repeated call (or the one from
+        // Drop) is a no-op. Invalidate stops the output callback before the `Arc<Mutex<Bild>>` that
+        // `refcon` points to can be dropped.
         unsafe {
             if !self.session.is_null() {
                 VTDecompressionSessionInvalidate(self.session);

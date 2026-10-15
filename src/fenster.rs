@@ -143,6 +143,10 @@ mod win {
         eigen: u32,
     }
 
+    // SAFETY: window enumeration callback; the signature and `system` ABI match WNDENUMPROC. `lp`
+    // is the address of the `Sammler` that `liste` created on its stack and passed through
+    // EnumWindows, which runs the callback synchronously on the same thread; the pointer is
+    // therefore valid, properly aligned and not aliased by anything else during the call.
     unsafe extern "system" fn sammeln(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
         let s = &mut *(lp.0 as *mut Sammler);
         if let Some(f) = pruefen(hwnd, s.eigen) {
@@ -151,6 +155,11 @@ mod win {
         true.into()
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread (stale or foreign window handles
+    // make the Win32 calls fail, not misbehave). `versteckt` is a local u32 and the size passed to
+    // DwmGetWindowAttribute is 4, matching DWMWA_CLOAKED; `pid` and `puffer` are locals and
+    // GetWindowTextW is limited to the slice length. Only `n` UTF-16 units reported by the API are
+    // read.
     /// Is this window fit for sharing? Everything else would be noise in the
     /// list: invisible helper windows, minimised programs, the empty
     /// shells of UWP applications and - important - our OWN window
@@ -205,6 +214,11 @@ mod win {
     }
 
     fn programmname(pid: u32) -> String {
+        // SAFETY: `h` is a process handle opened by OpenProcess in this block and closed exactly
+        // once on every path after the open. `puffer` is a local array, `len` its length in UTF-16
+        // units as QueryFullProcessImageNameW expects, and the API updates `len` to the number of
+        // characters written (without the NUL), so the slice `puffer[..len]` stays inside the
+        // array.
         unsafe {
             let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
                 return String::new();
@@ -232,6 +246,9 @@ mod win {
         }
     }
 
+    // SAFETY: caller contract: none beyond a normal Win32 thread. `r` is a local RECT and the size
+    // passed to DwmGetWindowAttribute is exactly `size_of::<RECT>()`, matching
+    // DWMWA_EXTENDED_FRAME_BOUNDS; GetWindowRect writes only into `r`.
     /// The VISIBLE bounds of a window.
     ///
     /// Since Windows Vista `GetWindowRect` returns too much: the invisible
@@ -258,6 +275,9 @@ mod win {
     }
 
     pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
+        // SAFETY: the argument is just an integer window handle taken from the window list; IsWindow
+        // validates it first, and a handle reused by another window only changes which rectangle is
+        // returned. No pointers other than the local ones in `rahmen_rect` are involved.
         unsafe {
             let hwnd = HWND(kennung as *mut core::ffi::c_void);
             if !IsWindow(hwnd).as_bool() {
@@ -268,6 +288,10 @@ mod win {
     }
 
     pub fn liste() -> Vec<Fenster> {
+        // SAFETY: `s` is a local `Sammler` that outlives the call; its address is passed as LPARAM
+        // to `sammeln`, which casts it back to `&mut Sammler`. EnumWindows is synchronous, so the
+        // pointer is valid for every callback and nothing else uses `s` meanwhile; the results are
+        // read only after it returned.
         unsafe {
             let mut s = Sammler {
                 raus: Vec::new(),
@@ -301,6 +325,9 @@ mod win {
     impl FensterCap {
         pub fn neu(kennung: isize) -> Result<Self> {
             let hwnd = HWND(kennung as *mut core::ffi::c_void);
+            // SAFETY: the window handle is only validated with IsWindow before use. `c` is fully
+            // initialised with null/default GDI handles before `flaeche_bauen` runs, so `Drop` is
+            // safe on every error path. All pointers used inside the callees are locals.
             unsafe {
                 if !IsWindow(hwnd).as_bool() {
                     return Err(anyhow!("das Fenster gibt es nicht mehr"));
@@ -324,6 +351,13 @@ mod win {
             }
         }
 
+        // SAFETY: caller contract: `&mut self` gives exclusive access, and the capture thread that
+        // owns this backend must be the one calling. The previous bitmap and DC are freed first via
+        // `flaeche_freigeben`, which resets the handles, so nothing is freed twice. The screen DC
+        // from GetDC is released on every path, `info` and `bits` are locals that outlive
+        // CreateDIBSection, and `bits` points to a top-down 32 bpp section of `b * h * 4` bytes
+        // which stays valid until `bmp` is deleted. `self.buf` is allocated with exactly the same
+        // length, which is the invariant `next` relies on for its copy.
         /// Create a memory bitmap in the new size. Called anew on every
         /// size change of the window - otherwise the image would be cut off
         /// after the first drag at the corner.
@@ -368,6 +402,11 @@ mod win {
             Ok(())
         }
 
+        // SAFETY: caller contract: `&mut self` gives exclusive access, and the bitmap/DC are owned
+        // by this struct. Each handle is checked with is_invalid() before use and reset right
+        // after, so a second call is a no-op, and `bits` (which points into the freed section) is
+        // set to null. Known nit: the bitmap is still selected into `mem` when it is deleted, so
+        // DeleteObject can fail and leak the bitmap (see roadmap); no dangling use results.
         unsafe fn flaeche_freigeben(&mut self) {
             if !self.bmp.is_invalid() {
                 let _ = DeleteObject(HGDIOBJ(self.bmp.0));
@@ -383,6 +422,12 @@ mod win {
 
     impl crate::capture::Backend for FensterCap {
         fn next(&mut self, _timeout_ms: u32) -> crate::capture::Next {
+            // SAFETY: all handles used here (`self.hwnd`, `self.mem`) are either validated
+            // (IsWindow) or owned by this backend (created in `flaeche_bauen`). `aussen` is a local
+            // RECT. The DIB section is rebuilt whenever the window size changes, so `self.bits`
+            // always points to `self.w * self.h * 4` readable bytes (checked non-null) and
+            // `self.buf` has exactly that length; the copy is therefore in bounds for both and the
+            // regions cannot overlap (GDI section vs. Vec).
             unsafe {
                 if !IsWindow(self.hwnd).as_bool() {
                     return crate::capture::Next::Lost;
@@ -445,6 +490,8 @@ mod win {
         }
 
         fn cursor(&self) -> (i32, i32, bool) {
+            // SAFETY: `ci` is a local CURSORINFO with `cbSize` set as the API requires;
+            // GetCursorInfo only writes into it and keeps no pointer.
             unsafe {
                 let mut ci = CURSORINFO {
                     cbSize: std::mem::size_of::<CURSORINFO>() as u32,
@@ -465,6 +512,9 @@ mod win {
 
     impl Drop for FensterCap {
         fn drop(&mut self) {
+            // SAFETY: Drop runs once and nothing uses the backend afterwards, so freeing its bitmap
+            // and DC here is the matching cleanup for `flaeche_bauen` (the function resets the
+            // handles, so it is also safe if they were never created).
             unsafe { self.flaeche_freigeben() }
         }
     }
@@ -473,6 +523,9 @@ mod win {
 
     const RAHMEN_DICKE: i32 = 4;
 
+    // SAFETY: window procedure registered in `rahmen_faden`; the signature and `system` ABI match
+    // WNDPROC. It forwards all arguments unchanged to DefWindowProcW and dereferences nothing
+    // itself.
     unsafe extern "system" fn rahmen_proc(
         h: HWND,
         m: u32,
@@ -487,10 +540,19 @@ mod win {
         let z2 = ziel.clone();
         let _ = std::thread::Builder::new()
             .name("rahmen".into())
+            // SAFETY: the closure runs `rahmen_faden` on its own thread; the thread owns the window
+            // it creates and `ziel` is moved into it (an Arc), so no raw pointer or borrowed data
+            // crosses the thread boundary.
             .spawn(move || unsafe { rahmen_faden(z2) });
         Rahmen { ziel }
     }
 
+    // SAFETY: runs on a dedicated thread that creates, pumps and destroys the one window it uses
+    // (all Win32 window calls therefore happen on the owning thread). The class name buffer
+    // `klasse` is NUL-terminated and outlives the calls (RegisterClassW copies the name), `wc` is a
+    // local, `msg` is a local MSG, and `hwnd` is checked from CreateWindowExW before use. The
+    // region handles are created per update: `innen` is deleted by us, `aussen` is handed to the
+    // window with SetWindowRgn, which takes ownership, so it is not freed here.
     unsafe fn rahmen_faden(ziel: Arc<Mutex<Option<(i32, i32, i32, i32)>>>) {
         let klasse: Vec<u16> = "FreeViewerTeilrahmen\0".encode_utf16().collect();
         let rot = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00_00_00_FF));

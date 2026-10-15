@@ -60,6 +60,12 @@ pub const PRAEFIX: &str = "ds:";
 const CLSID_SAMPLE_GRABBER: GUID = GUID::from_u128(0xc1f400a0_3f08_11d3_9f0b_006008039e37);
 const CLSID_NULL_RENDERER: GUID = GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
 
+// SAFETY: declaration of the qedit.dll ISampleGrabber vtable (the methods below are unsafe for the
+// same reason). The IID and the method order/signatures match the documented ISampleGrabber layout
+// (SetOneShot, SetMediaType, GetConnectedMediaType, SetBufferSamples, GetCurrentBuffer,
+// GetCurrentSample, SetCallback); a wrong order would call the wrong COM slot. Callers must pass
+// pointers that are valid for the duration of the call; `puffer` of GetCurrentBuffer is really a
+// BYTE* that must have room for `*groesse` bytes.
 #[windows::core::interface("6b652fff-11fe-4fce-92ad-0266b5d7c78f")]
 unsafe trait ISampleGrabber: windows::core::IUnknown {
     unsafe fn SetOneShot(&self, one_shot: BOOL) -> HRESULT;
@@ -71,6 +77,9 @@ unsafe trait ISampleGrabber: windows::core::IUnknown {
     unsafe fn SetCallback(&self, rueckruf: *mut core::ffi::c_void, welche: i32) -> HRESULT;
 }
 
+// SAFETY: caller contract: COM must be initialised on the calling thread and `bag` must be a live
+// IPropertyBag. `breit` is NUL-terminated and outlives the call, `v` is a local VARIANT that Read
+// fills and that is cleared by its Drop.
 /// Text aus einer Eigenschaft des Geraete-Steckbriefs holen.
 unsafe fn eigenschaft(bag: &IPropertyBag, name: &str) -> String {
     let breit: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -81,6 +90,10 @@ unsafe fn eigenschaft(bag: &IPropertyBag, name: &str) -> String {
     BSTR::try_from(&v).map(|b| b.to_string()).unwrap_or_default()
 }
 
+// SAFETY: caller contract: COM must be initialised (CoInitializeEx) on the calling thread, and the
+// closure must not let the borrowed IMoniker escape (it is only valid inside the iteration). All
+// interface pointers are created and dropped inside this function; `eins`/`geholt` are local
+// out-slots that outlive each `Next` call, and a null entry is treated as end of list.
 /// Iterate over all DirectShow video sources. `f` gets (moniker,
 /// name, path) and may abort with `Some(..)` - so the same loop can
 /// list AND search specifically.
@@ -124,6 +137,9 @@ unsafe fn mit_geraeten<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>)
 /// All DirectShow cameras. The id carries `PRAEFIX`.
 pub fn liste() -> Vec<Geraet> {
     let mut aus: Vec<Geraet> = Vec::new();
+    // SAFETY: CoInitializeEx is called first on this thread, so COM is usable for `mit_geraeten` (a
+    // repeated or failed init is harmless here). The closure only borrows the local `aus` and no
+    // raw pointer leaves the block.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         mit_geraeten::<()>(|_, name, pfad| {
@@ -151,6 +167,10 @@ pub fn schleife(
     stop: Arc<AtomicBool>,
     fehler: Arc<Mutex<String>>,
 ) {
+    // SAFETY: this runs on its own capture thread: CoInitializeEx before any COM call and
+    // CoUninitialize after `schleife_inner` has returned, so every COM interface created there (all
+    // locals of that function) is already dropped when COM is torn down. Known nit: CoUninitialize
+    // is also called when CoInitializeEx failed (see roadmap); it cannot fail on a fresh thread.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Err(e) = schleife_inner(id, zw, zh, fps, &tx, &neu, &zaehler, &stop) {
@@ -166,6 +186,11 @@ pub fn schleife(
     }
 }
 
+// SAFETY: caller contract: COM is initialised (MTA) on the current thread and stays so until
+// return; this function owns all interface pointers it creates and drops them before returning. Raw
+// buffers: `mt` is filled by GetConnectedMediaType and released via `aufraeumen`; `roh` is resized
+// to the reported buffer size before it is handed to GetCurrentBuffer; all later accesses to
+// `roh`/`rgb` are bounds-checked slice indexing.
 #[allow(clippy::too_many_arguments)]
 unsafe fn schleife_inner(
     id: Option<String>,
@@ -347,6 +372,10 @@ unsafe fn schleife_inner(
     Ok(())
 }
 
+// SAFETY: caller contract: `mt` was filled by DirectShow (GetConnectedMediaType), so `pbFormat` was
+// allocated with CoTaskMemAlloc and `pUnk` is an owned reference. Call it at most once per `mt`:
+// `pbFormat` is reset to null, but `pUnk` is dropped via ManuallyDrop::drop and would be released
+// twice on a second call.
 /// The format part of an AM_MEDIA_TYPE belongs to us - otherwise memory leaks on
 /// every open.
 unsafe fn aufraeumen(mt: &mut AM_MEDIA_TYPE) {
