@@ -39,6 +39,7 @@ if [ -f "$RELAY_LOCAL_JS" ]; then
   [ "$(rx relay "sha256sum $RELAY_DIR/relay.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "live relay.js == repo relay.js" || bad "live relay.js differs from the repo file"
 fi
 if [ -f "$RELAY_LOCAL_CLIENTIP" ]; then
+  [ "$(rx relay "sha256sum $RELAY_DIR/buch.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_BUCH")" ] && ok "live buch.js == repo buch.js" || bad "live buch.js differs from the repo file"
   [ "$(rx relay "sha256sum $RELAY_DIR/clientip.js | cut -d' ' -f1" || true)" = "$(sha_of "$RELAY_LOCAL_CLIENTIP")" ] && ok "live clientip.js == repo clientip.js" || bad "live clientip.js missing or different"
 fi
 if [ -f "$RELAY_LOCAL_REQAUTH" ]; then

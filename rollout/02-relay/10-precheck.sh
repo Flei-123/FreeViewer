@@ -44,7 +44,13 @@ if git -C "$REPO_ROOT" cat-file -e "$RELAY_BASE_COMMIT:relay/relay.js" 2>/dev/nu
   else
     bad "missing $RELAY_PATCH5 (r32/r30 not on this branch)"
   fi
-  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001+0002+0003+0004+0005 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
+  if [ -f "$RELAY_PATCH6" ]; then
+    git -C "$REPO_ROOT" show "$RELAY_BASE_COMMIT:relay/buch.js" >"$tmp/relay/buch.js"
+    [ "$(sha_of "$tmp/relay/buch.js")" = "$BUCH_LIVE_SHA" ] && ok "snapshot buch.js == live buch.js sha" || bad "snapshot buch.js differs from the recorded live sha"
+    (cd "$tmp" && patch -s -p1 <"$RELAY_PATCH6") && ok "patch 0006 (English identifiers, relay.js + buch.js) applies on top" || bad "patch 0006 does not apply"
+    [ "$(sha_of "$tmp/relay/buch.js")" = "$(sha_of "$RELAY_LOCAL_BUCH")" ] && ok "repo buch.js == snapshot + patch 0006" || bad "repo buch.js has more changes than patch 0006"
+  fi
+  [ "$(sha_of "$tmp/relay/relay.js")" = "$(sha_of "$RELAY_LOCAL_JS")" ] && ok "repo relay.js == snapshot + patches 0001..0006 (nothing else mixed in)" || bad "repo relay.js has more changes than the patches"
   if [ -f "$tmp/relay/reqauth.js" ] && [ -f "$RELAY_LOCAL_REQAUTH" ]; then
     [ "$(sha_of "$tmp/relay/reqauth.js")" = "$(sha_of "$RELAY_LOCAL_REQAUTH")" ] && ok "repo reqauth.js == what patch 0004 creates" || bad "repo reqauth.js differs from patch 0004"
   else
@@ -59,6 +65,7 @@ else
   warn "commit $RELAY_BASE_COMMIT not in this clone - cannot prove 'snapshot + patch' (fetch full history)"
   bad "base commit missing"
 fi
+node --check "$RELAY_LOCAL_BUCH" && ok "node --check relay/buch.js" || bad "buch.js has a syntax error"
 node --check "$RELAY_LOCAL_CLIENTIP" && ok "node --check relay/clientip.js" || bad "clientip.js has a syntax error"
 node --check "$RELAY_LOCAL_REQAUTH" && ok "node --check relay/reqauth.js" || bad "reqauth.js has a syntax error"
 if [ -f "$REPO_ROOT/relay/test_reqauth.js" ]; then
@@ -82,6 +89,7 @@ fi
 step "live CT110"
 live=$(rx relay "sha256sum $RELAY_DIR/relay.js | cut -d' ' -f1" || true)
 [ "$live" = "$RELAY_LIVE_SHA" ] && ok "live relay.js == snapshot (no drift)" || bad "live relay.js sha is '$live' - the relay changed since 14.10.; diff first (pull it, compare with git)"
+[ "$(rx relay "sha256sum $RELAY_DIR/buch.js | cut -d' ' -f1" || true)" = "$BUCH_LIVE_SHA" ] && ok "live buch.js == snapshot (no drift)" || bad "live buch.js differs from the snapshot"
 rx relay "test -e $RELAY_DIR/clientip.js && echo yes" | grep -q yes && note "clientip.js already on CT110 (re-run)" || ok "no clientip.js on CT110 yet (fresh)"
 note "the reverse proxy in front of CT110 must send X-Forwarded-For (Nginx Proxy Manager does by default); without it hosts see the proxy address (r63 stays inactive, nothing breaks)"
 rx relay "systemctl is-active $RELAY_UNIT" | grep -qx active && ok "$RELAY_UNIT active" || bad "$RELAY_UNIT not active"

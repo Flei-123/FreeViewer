@@ -10,6 +10,9 @@ RELAY_PATCH2="$REPO_ROOT/relay/patches/0002-real-client-ip.patch"   # r63: real 
 RELAY_PATCH3="$REPO_ROOT/relay/patches/0003-mac-publish.patch"       # r28: platform=mac publish (mac_* fields, own signature/version)
 RELAY_PATCH4="$REPO_ROOT/relay/patches/0004-token-header-online-minimal.patch"  # r6 + r7: Bearer token header (?token= deprecated), /fv/online minimal + rate limit
 RELAY_PATCH5="$REPO_ROOT/relay/patches/0005-friend-meeting-invites-setup-filename.patch"  # r32 + r30: friend meeting invitations (mailbox), setup download file name per brand
+RELAY_PATCH6="$REPO_ROOT/relay/patches/0006-english-identifiers.patch"  # cosmetic: English identifiers in relay.js + buch.js (buch.js must be deployed together with relay.js)
+RELAY_LOCAL_BUCH="$REPO_ROOT/relay/buch.js"                        # required by relay.js; patch 0006 renames its exports
+BUCH_LIVE_SHA="ccd9b79a91f4ab66db3ef9047b9b59335bdc9d3c83961b50d1a5769273b715bb"  # /root/fvrelay/buch.js (live 15.10.2026 == snapshot cc41c25)
 RELAY_LOCAL_REQAUTH="$REPO_ROOT/relay/reqauth.js"                  # required by relay.js after patch 0004 (same directory)
 RELAY_LOCAL_CLIENTIP="$REPO_ROOT/relay/clientip.js"                # required by relay.js after patch 0002 (same directory)
 RELAY_BASE_COMMIT="cc41c25"   # commit that holds the imported live snapshot (docs/RELAY-LIVE-IMPORT.md)

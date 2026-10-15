@@ -18,12 +18,13 @@ if rx pve "pct listsnapshot 110" | awk '{print $2}' | grep -qx pre-publish-harde
 gate
 
 step "backup"
-mx relay "relay.js.bak_r2 (only if not present)" "cd $RELAY_DIR && { [ -e relay.js.bak_r2 ] && echo 'relay.js.bak_r2 exists - kept' || cp -p relay.js relay.js.bak_r2; } && mkdir -p backup-r2-$ts && cp -a hosts.json devices.json freunde.json buch-geraete.json upload.token dist/version.json dist/version-xoffi.json backup-r2-$ts/ 2>/dev/null; chmod 700 backup-r2-$ts; ls -l relay.js.bak_r2"
+mx relay "relay.js.bak_r2 (only if not present)" "cd $RELAY_DIR && { [ -e relay.js.bak_r2 ] && echo 'relay.js.bak_r2 exists - kept' || cp -p relay.js relay.js.bak_r2; } && { [ -e buch.js.bak_r2 ] && echo 'buch.js.bak_r2 exists - kept' || cp -p buch.js buch.js.bak_r2; } && mkdir -p backup-r2-$ts && cp -a hosts.json devices.json freunde.json buch-geraete.json upload.token dist/version.json dist/version-xoffi.json backup-r2-$ts/ 2>/dev/null; chmod 700 backup-r2-$ts; ls -l relay.js.bak_r2"
 if ! rx pve "pct listsnapshot 110" | awk '{print $2}' | grep -qx pre-publish-hardening; then
   mx pve "snapshot CT110 as pre-publish-hardening" "pct snapshot 110 pre-publish-hardening --description 'before relay publish hardening (r2)'"
 fi
 if ((APPLY)); then
   rx relay "sha256sum $RELAY_DIR/relay.js.bak_r2" | grep -q "$RELAY_LIVE_SHA" && ok "relay.js.bak_r2 == live snapshot" || bad "backup does not match"
+  rx relay "sha256sum $RELAY_DIR/buch.js.bak_r2" | grep -q "$BUCH_LIVE_SHA" && ok "buch.js.bak_r2 == live snapshot" || bad "buch.js backup does not match"
   rx pve "pct listsnapshot 110" | awk '{print $2}' | grep -qx pre-publish-hardening && ok "LXC snapshot exists" || bad "LXC snapshot missing"
 fi
 finish

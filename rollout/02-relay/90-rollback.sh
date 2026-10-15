@@ -37,6 +37,7 @@ else
 cd $RELAY_DIR
 cp -p relay.js relay.js.failed-r2
 cp -p relay.js.bak_r2 relay.js
+[ ! -e buch.js.bak_r2 ] || { cp -p buch.js buch.js.failed-r2; cp -p buch.js.bak_r2 buch.js; }
 [ ! -e clientip.js ] || mv -f clientip.js clientip.js.failed-r2
 [ ! -e reqauth.js ] || mv -f reqauth.js reqauth.js.failed-r2
 rm -f $RELAY_DROPIN $RELAY_DROPIN.prev

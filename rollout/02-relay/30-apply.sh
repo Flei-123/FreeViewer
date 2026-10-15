@@ -36,6 +36,7 @@ act=$(python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("sessio
 if [ "$act" = 0 ]; then ok "no active session"; elif fv_flag force; then warn "sessions_active=$act, --force given"; else bad "sessions_active=$act - wait for 0 or use --force"; fi
 if ! fv_flag only-dropin; then
   node --check "$RELAY_LOCAL_JS" && ok "node --check (local)" || bad "local relay.js broken"
+  [ -f "$RELAY_LOCAL_BUCH" ] && node --check "$RELAY_LOCAL_BUCH" && ok "node --check buch.js (local)" || bad "local buch.js missing or broken (patch 0006)"
   [ -f "$RELAY_LOCAL_CLIENTIP" ] && node --check "$RELAY_LOCAL_CLIENTIP" && ok "node --check clientip.js (local)" || bad "local clientip.js missing or broken (patch 0002)"
   [ -f "$RELAY_LOCAL_REQAUTH" ] && node --check "$RELAY_LOCAL_REQAUTH" && ok "node --check reqauth.js (local)" || bad "local reqauth.js missing or broken (patch 0004)"
   grep -q "require('./reqauth')" "$RELAY_LOCAL_JS" && ok "relay.js requires ./reqauth" || bad "relay.js does not require ./reqauth - repo not at patch 0004?"
@@ -54,8 +55,9 @@ if ! fv_flag only-dropin; then
   step "copy + syntax-check the new file on CT110 (service untouched so far)"
   put relay "$RELAY_LOCAL_CLIENTIP" "$RELAY_DIR/clientip.js.new"
   put relay "$RELAY_LOCAL_REQAUTH" "$RELAY_DIR/reqauth.js.new"
+  put relay "$RELAY_LOCAL_BUCH" "$RELAY_DIR/buch.js.new"
   put relay "$RELAY_LOCAL_JS" "$RELAY_DIR/relay.js.new"
-  mx relay "node --check all, clientip.js + reqauth.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check reqauth.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f reqauth.js.new reqauth.js && mv -f relay.js.new relay.js && node -e \"require('./clientip');require('./reqauth')\" && sha256sum relay.js clientip.js reqauth.js"
+  mx relay "node --check all, clientip.js + reqauth.js first, then relay.js into place" "cd $RELAY_DIR && node --check clientip.js.new && node --check reqauth.js.new && node --check buch.js.new && node --check relay.js.new && mv -f clientip.js.new clientip.js && mv -f reqauth.js.new reqauth.js && mv -f buch.js.new buch.js && mv -f relay.js.new relay.js && node -e \"require('./clientip');require('./reqauth');require('./buch')\" && sha256sum relay.js buch.js clientip.js reqauth.js"
 fi
 
 step "drop-in + restart (mode $mode)"
