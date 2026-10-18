@@ -220,7 +220,7 @@ impl App {
         // server (it showed it to every stranger) - each machine keeps its
         // own.
         meet::remember(&m);
-        self.meet_win.offen = true;
+        self.meet_win.is_open = true;
         if self.meet_win.name.trim().is_empty() {
             // Suggestion: the machine name - that is how you are called in the browser too.
             self.meet_win.name = presence::device_name();
@@ -239,14 +239,14 @@ impl App {
         }
         // Screens are available immediately (pure system query) - we need them
         // to ASK which one should be shared when there are several.
-        self.meet_win.monitore = meetschirm::liste()
+        self.meet_win.monitore = meetschirm::list_items()
             .into_iter()
             .map(|m| (m.name, m.width_px, m.height_px))
             .collect();
         if std::time::Instant::now() >= self.meet_win.next_window {
             self.meet_win.next_window =
                 std::time::Instant::now() + std::time::Duration::from_millis(1500);
-            self.meet_win.window = window::liste()
+            self.meet_win.window = window::list_items()
                 .into_iter()
                 .map(|f| (f.tag, f.heading, f.program))
                 .collect();
@@ -259,7 +259,7 @@ impl App {
                 // For the selection IN the meeting, the names the camera
                 // opener itself knows count (Media Foundation). The
                 // PnP list is only a fallback if that stays empty.
-                let real = crate::meetcam::liste();
+                let real = crate::meetcam::list_items();
                 if !real.is_empty() {
                     cams = real.into_iter().map(|g| g.name).collect();
                 }
@@ -272,7 +272,7 @@ impl App {
     /// Reload the participant list - every 5 s, in a background thread,
     /// so that a hanging line does not freeze the window.
     pub(crate) fn meet_win_poll(&mut self) {
-        if !self.meet_win.offen
+        if !self.meet_win.is_open
             || self.meet_win.tn_busy.load(Ordering::Relaxed)
             || std::time::Instant::now() < self.meet_win.tn_next
         {
@@ -309,7 +309,7 @@ impl App {
     /// camera and sound card.
     /// Meeting window closed = leave the meeting.
     ///
-    /// WHY not just `offen = false`: the window holds real devices.
+    /// WHY not just `is_open = false`: the window holds real devices.
     /// Previously the camera kept running after closing (light on) and
     /// the server kept considering us present - exactly what Justin
     /// reported. The cross must do the same as "Leave".
@@ -327,7 +327,7 @@ impl App {
         self.meet_kam_start = None;
         // The small window must close too, otherwise it is left standing alone.
         self.meet_z = meetwindow::MeetWindowState::default();
-        self.meet_win.offen = false;
+        self.meet_win.is_open = false;
     }
 
     pub(crate) fn meet_win_ui(&mut self, ctx: &egui::Context) {
@@ -371,7 +371,7 @@ impl App {
         if wants_mic != self.preflight.wish_mic || mic != self.preflight.mic_device {
             self.preflight.mic_name(wants_mic, mic.clone());
         }
-        self.preflight.pumpe();
+        self.preflight.pump();
 
         // Pour the preview image into a texture (only if there is a new one).
         match self.preflight.own.as_ref() {

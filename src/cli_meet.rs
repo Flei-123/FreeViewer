@@ -48,7 +48,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
     let start = std::time::Instant::now();
     let (mut camera_on, mut screen_on, mut free) = (false, false, false);
     while start.elapsed().as_secs() < dur {
-        m.pumpe();
+        m.pump();
         // Switch on one after another so that it is visible in the browser
         // WHAT is being added.
         let s = start.elapsed().as_secs();
@@ -304,7 +304,7 @@ pub(crate) fn cli_meet_screen(i: usize) -> eframe::Result<()> {
         .unwrap_or_else(|| "NativSchirm".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let nr: usize = args.get(i + 5).and_then(|s| s.parse().ok()).unwrap_or(0);
-    for (n, m) in meetschirm::liste().iter().enumerate() {
+    for (n, m) in meetschirm::list_items().iter().enumerate() {
         println!(
             "SCHIRM {} name={} {}x{} primaer={}",
             n, m.name, m.width_px, m.height_px, m.is_primary
@@ -318,7 +318,7 @@ pub(crate) fn cli_meet_screen(i: usize) -> eframe::Result<()> {
         }
     };
     println!("SCHIRM OFFEN {} {}x{}", auf.name, auf.width_px, auf.height_px);
-    let mut koder = match meetvideo::VideoEncoder::neu(auf.width_px, auf.height_px, 15, 3_500_000) {
+    let mut video_encoder = match meetvideo::VideoEncoder::neu(auf.width_px, auf.height_px, 15, 3_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("SCHIRMTEST FEHLER Kodierer: {}", e);
@@ -405,10 +405,10 @@ pub(crate) fn cli_meet_screen(i: usize) -> eframe::Result<()> {
                 model = y.to_vec();
                 if last_keyframe.elapsed() >= std::time::Duration::from_secs(4) {
                     last_keyframe = std::time::Instant::now();
-                    koder.keyframe();
+                    video_encoder.keyframe();
                 }
                 sent += 1;
-                match koder.nv12_frame(&b.nv12) {
+                match video_encoder.nv12_frame(&b.nv12) {
                     Ok(parts) => {
                         for t in parts {
                             packets += 1;
@@ -429,7 +429,7 @@ pub(crate) fn cli_meet_screen(i: usize) -> eframe::Result<()> {
         auf.height_px,
         auf.recorded(),
         sent,
-        koder.images,
+        video_encoder.images,
         packets,
         z.screen_sent,
         z.frame_received,
@@ -460,7 +460,7 @@ pub(crate) fn cli_meet_camera(i: usize) -> eframe::Result<()> {
         .unwrap_or_else(|| "NativKamera".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
     let welche = args.get(i + 5).cloned().filter(|s| !s.is_empty());
-    for (n, k) in meetcam::liste().iter().enumerate() {
+    for (n, k) in meetcam::list_items().iter().enumerate() {
         println!("KAMERA {} name={}", n, k.name);
     }
     let kam = match meetcam::open(welche, meetvideo::WIDTH, meetvideo::HEIGHT, 30) {
@@ -471,7 +471,7 @@ pub(crate) fn cli_meet_camera(i: usize) -> eframe::Result<()> {
         }
     };
     println!("KAMERA OFFEN name={} {}x{}", kam.name, kam.width_px, kam.height_px);
-    let mut koder = match meetvideo::VideoEncoder::neu(kam.width_px, kam.height_px, 15, 1_500_000) {
+    let mut video_encoder = match meetvideo::VideoEncoder::neu(kam.width_px, kam.height_px, 15, 1_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("KAMERATEST FEHLER Kodierer: {}", e);
@@ -548,7 +548,7 @@ pub(crate) fn cli_meet_camera(i: usize) -> eframe::Result<()> {
                 }
                 model = y.to_vec();
                 sent += 1;
-                match koder.nv12_frame(&b.nv12) {
+                match video_encoder.nv12_frame(&b.nv12) {
                     Ok(parts) => {
                         for t in parts {
                             packets += 1;
@@ -567,7 +567,7 @@ pub(crate) fn cli_meet_camera(i: usize) -> eframe::Result<()> {
         kam.name,
         kam.recorded(),
         sent,
-        koder.images,
+        video_encoder.images,
         packets,
         z.image_sent,
         z.frame_received,
@@ -593,7 +593,7 @@ pub(crate) fn cli_meet_image(i: usize) -> eframe::Result<()> {
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativBild".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
-    let mut koder = match meetvideo::VideoEncoder::neu(
+    let mut video_encoder = match meetvideo::VideoEncoder::neu(
         meetvideo::WIDTH,
         meetvideo::HEIGHT,
         15,
@@ -657,7 +657,7 @@ pub(crate) fn cli_meet_image(i: usize) -> eframe::Result<()> {
         while std::time::Instant::now() >= next {
             next += std::time::Duration::from_millis(66);
             let rgb = muster.next();
-            match koder.frame_box(&rgb) {
+            match video_encoder.frame_box(&rgb) {
                 Ok(parts) => {
                     for t in parts {
                         packets += 1;
@@ -672,7 +672,7 @@ pub(crate) fn cli_meet_image(i: usize) -> eframe::Result<()> {
     let z = ton.numbers();
     println!(
         "ZAHLEN verbunden={} bilder_kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={}",
-        z.connected, koder.images, packets, z.image_sent, z.frame_received, z.bytes_out
+        z.connected, video_encoder.images, packets, z.image_sent, z.frame_received, z.bytes_out
     );
     ton.finish();
     sig.leave();
@@ -691,9 +691,9 @@ pub(crate) fn cli_meet_mic(i: usize) -> eframe::Result<()> {
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativMikro".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let (ein_liste, aus_liste) = meetaudio::devices_list();
-    println!("MIKROFONE {:?}", ein_liste);
-    println!("LAUTSPRECHER {:?}", aus_liste);
+    let (into_list, from_list) = meetaudio::devices_list();
+    println!("MIKROFONE {:?}", into_list);
+    println!("LAUTSPRECHER {:?}", from_list);
     let devices = match meetaudio::start_devices(None, None) {
         Ok(g) => g,
         Err(e) => {

@@ -426,15 +426,15 @@ fn next_start_code(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
 pub fn nal_units(daten: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut aus = Vec::new();
     let mut search = 0usize;
-    let mut offen: Option<(usize, usize)> = None;
+    let mut is_open: Option<(usize, usize)> = None;
     while let Some((sc, db)) = next_start_code(daten, search) {
-        if let Some((osc, odb)) = offen {
+        if let Some((osc, odb)) = is_open {
             aus.push((osc, odb, sc));
         }
-        offen = Some((sc, db));
+        is_open = Some((sc, db));
         search = db;
     }
-    if let Some((osc, odb)) = offen {
+    if let Some((osc, odb)) = is_open {
         aus.push((osc, odb, daten.len()));
     }
     aus
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn base64_haelt_beliebige_daten_aus() {
+    fn base64_holds_arbitrary_data() {
         for length in [1usize, 2, 3, 4, 31, 32, 33, 100] {
             let daten: Vec<u8> = (0..length).map(|i| (i * 7 % 256) as u8).collect();
             let t = base64_url(&daten);

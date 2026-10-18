@@ -137,7 +137,7 @@ unsafe fn with_devices<T>(mut f: impl FnMut(&IMoniker, &str, &str) -> Option<T>)
 }
 
 /// All DirectShow cameras. The id carries `PREFIX`.
-pub fn liste() -> Vec<Device> {
+pub fn list_items() -> Vec<Device> {
     let mut aus: Vec<Device> = Vec::new();
     // SAFETY: CoInitializeEx is called first on this thread, so COM is usable for `with_devices`
     // (a repeated init is harmless; a failed one is not paired with CoUninitialize). The closure

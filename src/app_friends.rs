@@ -422,9 +422,9 @@ if let Some(path) = self.shot.clone() {
         }
 
         // ------------------------------------------------ the list
-        let liste = d.liste();
+        let list_items = d.list_items();
         label_small(ui, "Deine Freunde");
-        if liste.is_empty() {
+        if list_items.is_empty() {
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Noch niemand. Schick oben eine Anfrage.")
@@ -433,7 +433,7 @@ if let Some(path) = self.shot.clone() {
             );
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for fr in liste.iter() {
+            for fr in list_items.iter() {
                 egui::Frame::NONE
                     .fill(p.card)
                     .stroke(egui::Stroke::new(1.0, p.line))

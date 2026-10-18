@@ -234,7 +234,7 @@ impl eframe::App for App {
         // Like the remote session, the meeting gets its own window:
         // preparation, invitation and participant list run next to the
         // main window, not as a tab inside it.
-        if self.meet_win.offen {
+        if self.meet_win.is_open {
             let mut closed = false;
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("fv_meet"),

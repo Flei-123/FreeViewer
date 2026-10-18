@@ -54,14 +54,14 @@ impl App {
         if !self.uninstall_ask {
             return;
         }
-        let mut offen = true;
+        let mut is_open = true;
         let mut safe = false;
         let mut weg = false;
         egui::Window::new(i18n::t("set.uninstall_title"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut offen)
+            .open(&mut is_open)
             .frame(
                 egui::Frame::group(&ctx.style())
                     .fill(theme::card())
@@ -92,7 +92,7 @@ impl App {
                 });
             });
         if weg {
-            offen = false;
+            is_open = false;
         }
         if safe {
             self.uninstall_ask = false;
@@ -100,7 +100,7 @@ impl App {
                 Ok(()) => self.hint = i18n::t("set.uninstall_running").to_string(),
                 Err(e) => self.hint = format!("{}", e),
             }
-        } else if !offen {
+        } else if !is_open {
             self.uninstall_ask = false;
         }
     }
@@ -113,13 +113,13 @@ impl App {
         if !self.lic_show {
             return;
         }
-        let mut offen = true;
+        let mut is_open = true;
         let mut spaeter = false;
         egui::Window::new(i18n::t("lic.title"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut offen)
+            .open(&mut is_open)
             .frame(
                 egui::Frame::group(&ctx.style())
                     .fill(theme::card())
@@ -165,7 +165,7 @@ impl App {
                     }
                 });
             });
-        if spaeter || !offen {
+        if spaeter || !is_open {
             self.lic_show = false;
         }
     }
@@ -212,7 +212,7 @@ impl App {
         let Some(id) = self.pw_ask.clone() else {
             return;
         };
-        let mut offen = true;
+        let mut is_open = true;
         let mut connect_now = false;
         let mut request = false;
         let mut weg = false;
@@ -226,7 +226,7 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut offen)
+            .open(&mut is_open)
             .frame(
                 egui::Frame::group(&ctx.style())
                     .fill(theme::card())
@@ -273,7 +273,7 @@ impl App {
         } else if request {
             self.pw_ask = None;
             self.start_ask_session();
-        } else if weg || !offen {
+        } else if weg || !is_open {
             self.pw_ask = None;
         }
     }
@@ -325,7 +325,7 @@ impl App {
                 Err(e) => dlg.err = e,
             }
         }
-        let mut offen = true;
+        let mut is_open = true;
         let mut los = false;
         let mut weg = false;
         // From the browser download: no further click needed.
@@ -336,7 +336,7 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut offen)
+            .open(&mut is_open)
             .frame(
                 egui::Frame::group(&ctx.style())
                     .fill(theme::card())
@@ -444,7 +444,7 @@ impl App {
                 });
             }
         }
-        if weg || !offen {
+        if weg || !is_open {
             self.setup_dlg = None;
         }
     }

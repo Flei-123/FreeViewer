@@ -15,7 +15,7 @@ impl App {
                 Some(n) => n,
                 None => return,
             };
-            n.pumpe();
+            n.pump();
             // Start the camera only now - the preview has just
             // released it and needs a moment for that.
             if let Some(wann) = self.meet_kam_start {
@@ -407,7 +407,7 @@ impl App {
                 meetwindow::Action::FrameBox(v) => n.frame_toggle(v),
                 meetwindow::Action::NoiseGate(an, st) => n.noise_gate_set(an, st),
                 meetwindow::Action::Avatar(v) => n.avatar_toggle(v),
-                meetwindow::Action::AvatarLook(a) => n.avatar_setzen(a),
+                meetwindow::Action::AvatarLook(a) => n.avatar_set(a),
                 meetwindow::Action::Hand(v) => n.hand_heben(v),
                 meetwindow::Action::Control(v) => n.release_control(v),
                 meetwindow::Action::RequestControl => n.request_control(),
@@ -476,7 +476,7 @@ impl App {
                     let slot = self.meet_win.devices.clone();
                     std::thread::spawn(move || {
                         let (mics, mut cams) = meet::devices();
-                        let real = crate::meetcam::liste();
+                        let real = crate::meetcam::list_items();
                         if !real.is_empty() {
                             cams = real.into_iter().map(|g| g.name).collect();
                         }

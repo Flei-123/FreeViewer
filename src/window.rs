@@ -34,10 +34,10 @@ pub struct WindowInfo {
 }
 
 /// All sensibly shareable windows, topmost first.
-pub fn liste() -> Vec<WindowInfo> {
+pub fn list_items() -> Vec<WindowInfo> {
     #[cfg(windows)]
     {
-        win::liste()
+        win::list_items()
     }
     #[cfg(not(windows))]
     {
@@ -80,7 +80,7 @@ impl FrameBox {
     }
 
     /// Move the frame to a new area (window moved).
-    pub fn setzen(&self, x: i32, y: i32, b: i32, h: i32) {
+    pub fn assign(&self, x: i32, y: i32, b: i32, h: i32) {
         #[cfg(windows)]
         if let Ok(mut z) = self.dest.lock() {
             *z = Some((x, y, b, h));
@@ -144,7 +144,7 @@ mod win {
     }
 
     // SAFETY: window enumeration callback; the signature and `system` ABI match WNDENUMPROC. `lp`
-    // is the address of the `Collector` that `liste` created on its stack and passed through
+    // is the address of the `Collector` that `list_items` created on its stack and passed through
     // EnumWindows, which runs the callback synchronously on the same thread; the pointer is
     // therefore valid, properly aligned and not aliased by anything else during the call.
     unsafe extern "system" fn collect_windows(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
@@ -287,7 +287,7 @@ mod win {
         }
     }
 
-    pub fn liste() -> Vec<WindowInfo> {
+    pub fn list_items() -> Vec<WindowInfo> {
         // SAFETY: `s` is a local `Collector` that outlives the call; its address is passed as LPARAM
         // to `collect_windows`, which casts it back to `&mut Collector`. EnumWindows is synchronous, so the
         // pointer is valid for every callback and nothing else uses `s` meanwhile; the results are
@@ -651,12 +651,12 @@ mod tests {
         // may stand here - a made-up window list would be worse
         // than an empty one.
         #[cfg(not(windows))]
-        assert!(liste().is_empty());
+        assert!(list_items().is_empty());
         #[cfg(windows)]
         {
             // Unter Windows darf sie voll sein, aber niemals kaputte
             // Eintraege enthalten.
-            for f in liste() {
+            for f in list_items() {
                 assert!(f.tag != 0, "Fenster ohne Kennung");
                 assert!(f.width_px >= 120 && f.height_px >= 80, "tiny window in the list");
             }

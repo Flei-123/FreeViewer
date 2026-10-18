@@ -263,7 +263,7 @@ impl Drop for WebCam {
 }
 
 /// Alle Kameras des Rechners.
-pub fn liste() -> Vec<Device> {
+pub fn list_items() -> Vec<Device> {
     #[cfg(windows)]
     {
         // Media Foundation is the main path and therefore comes first.
@@ -272,8 +272,8 @@ pub fn liste() -> Vec<Device> {
         // Foundation already knows is not listed twice - otherwise
         // webcams would appear twice, and you would choose the worse
         // of the two paths.
-        let mut aus = win::liste();
-        for g in crate::camdshow::liste() {
+        let mut aus = win::list_items();
+        for g in crate::camdshow::list_items() {
             let double = aus
                 .iter()
                 .any(|x| x.name.eq_ignore_ascii_case(&g.name));
@@ -285,7 +285,7 @@ pub fn liste() -> Vec<Device> {
     }
     #[cfg(target_os = "macos")]
     {
-        mac::liste()
+        mac::list_items()
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -460,7 +460,7 @@ mod mac {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    pub fn liste() -> Vec<Device> {
+    pub fn list_items() -> Vec<Device> {
         match query(ApiBackend::AVFoundation) {
             Ok(v) => v
                 .into_iter()
@@ -669,10 +669,10 @@ mod win {
         found
     }
 
-    pub fn liste() -> Vec<Device> {
+    pub fn list_items() -> Vec<Device> {
         let mut out: Vec<Device> = Vec::new();
         // SAFETY: `with_cameras` only needs COM/Media Foundation on this thread, which the callers
-        // of `liste` set up or which are initialised by `mf_startup`; the closure borrows the local
+        // of `list_items` set up or which are initialised by `mf_startup`; the closure borrows the local
         // `out` and no raw pointer leaves the block.
         unsafe {
             // Never return Some -> runs through all devices.
@@ -1395,7 +1395,7 @@ mod tests_stufe5 {
     /// empty list is correct - it must never crash.
     #[test]
     fn camera_list_and_open_report_honestly() {
-        let l = liste();
+        let l = list_items();
         println!("Kameras: {}", l.len());
         for g in &l {
             println!("  {} [{}]", g.name, g.id);
@@ -1446,7 +1446,7 @@ mod tests {
     #[test]
     fn list_does_not_crash() {
         // On the server without a camera this must give an empty list.
-        let l = liste();
+        let l = list_items();
         println!("Kameras: {}", l.len());
     }
 

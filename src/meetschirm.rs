@@ -41,9 +41,9 @@ pub struct Screen {
 /// the specification from which it opened it in the first place.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
-    /// Index aus `liste()`.
+    /// Index aus `list_items()`.
     Display(usize),
-    /// Window id from `crate::window::liste()`.
+    /// Window id from `crate::window::list_items()`.
     Window(isize),
 }
 
@@ -68,7 +68,7 @@ impl Source {
 }
 
 /// All screens of this machine, the main screen first.
-pub fn liste() -> Vec<Screen> {
+pub fn list_items() -> Vec<Screen> {
     crate::capture::list_monitors(true)
         .into_iter()
         .map(|m| Screen {
@@ -504,7 +504,7 @@ fn event_loop(
             .get(index)
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("Bildschirm {}", index + 1)),
-        Source::Window(k) => crate::window::liste()
+        Source::Window(k) => crate::window::list_items()
             .into_iter()
             .find(|f| f.tag == k)
             .map(|f| f.heading)
@@ -810,7 +810,7 @@ mod tests {
     /// skipped instead of falsely reporting green.
     #[test]
     fn display_through_h264() {
-        let screens = liste();
+        let screens = list_items();
         if screens.is_empty() {
             println!("no screen on this machine - skipped");
             return;
@@ -895,7 +895,7 @@ mod tests {
     fn list_does_not_crash() {
         // On a server without a screen this must give a list (possibly empty)
         // and not blow up.
-        let l = liste();
+        let l = list_items();
         println!("Bildschirme: {}", l.len());
     }
 }

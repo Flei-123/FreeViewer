@@ -229,7 +229,7 @@ pub(crate) fn cli_camtest(i: usize) -> eframe::Result<()> {
 }
 
 pub(crate) fn cli_camera_list() -> eframe::Result<()> {
-    let l = meetcam::liste();
+    let l = meetcam::list_items();
     println!("KAMERAS {}", l.len());
     for (i, k) in l.iter().enumerate() {
         println!("KAMERA {} name={} id={}", i, k.name, k.id);
@@ -403,7 +403,7 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
             ok = false;
         }
     }
-    app.meet_win.offen = false;
+    app.meet_win.is_open = false;
 
     let _ = std::fs::remove_dir_all(&tmp);
     println!("{}", if ok { "UITEST OK" } else { "UITEST FAIL" });

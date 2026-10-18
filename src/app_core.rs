@@ -479,7 +479,7 @@ impl App {
     pub(crate) fn update_ui(&mut self, ui: &mut egui::Ui) {
         let pending = self.shared.update.lock_ok().clone();
         let status = self.shared.update_status.lock_ok().clone();
-        let dienst = service::installed();
+        let service_handle = service::installed();
         ui.horizontal(|ui| {
             if icons::text_button(ui, "refresh", i18n::t("upd.check"), false).clicked() {
                 let sh = self.shared.clone();
@@ -513,7 +513,7 @@ impl App {
         if let Some(rel) = pending {
             ui.add_space(4.0);
             if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
-                if dienst {
+                if service_handle {
                     // the service installs it - as SYSTEM, without a prompt
                     update::please_service();
                     self.shared
@@ -585,13 +585,13 @@ impl App {
             ui.add_space(10.0);
             // The counter on "Friends" matters: a friend
             // request nobody sees is not a request.
-            let offen = self
+            let is_open = self
                 .friends
                 .as_ref()
                 .map(|d| d.incoming_requests().len() + d.invites().len())
                 .unwrap_or(0);
-            let friends_text = if offen > 0 {
-                format!("Freunde ({})", offen)
+            let friends_text = if is_open > 0 {
+                format!("Freunde ({})", is_open)
             } else {
                 "Freunde".to_string()
             };

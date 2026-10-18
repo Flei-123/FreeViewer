@@ -1696,9 +1696,9 @@ fn screen_pick(
     f: &Colors,
     actions: &mut Vec<Action>,
 ) {
-    let mut offen = true;
+    let mut is_open = true;
     egui::Window::new("Was möchtest du teilen?")
-        .open(&mut offen)
+        .open(&mut is_open)
         .collapsible(false)
         .resizable(false)
         .default_width(380.0)
@@ -1769,7 +1769,7 @@ fn screen_pick(
                 z.screen_pick_open = false;
             }
         });
-    if !offen {
+    if !is_open {
         z.screen_pick_open = false;
     }
 }
@@ -1786,9 +1786,9 @@ fn settings(
     f: &Colors,
     actions: &mut Vec<Action>,
 ) {
-    let mut offen = true;
+    let mut is_open = true;
     egui::Window::new("Einstellungen")
-        .open(&mut offen)
+        .open(&mut is_open)
         .collapsible(false)
         .resizable(false)
         .default_width(340.0)
@@ -2002,7 +2002,7 @@ fn settings(
                 .color(f.p.muted),
             );
         });
-    if !offen {
+    if !is_open {
         z.settings_open = false;
     }
 }
@@ -2794,14 +2794,14 @@ fn stage(ui: &mut egui::Ui, s: &MeetView, z: &mut MeetWindowState, b: &Images, f
         return;
     }
     // A shared screen is THE content: large and complete.
-    let haupt = screens
+    let main_part = screens
         .iter()
         .position(|k| !k.ich)
         .unwrap_or(0);
     if z.fullscreen {
-        let t = tex_for(&screens[haupt], b);
+        let t = tex_for(&screens[main_part], b);
         let r = screen_box(area.shrink(6.0), t);
-        screen_tile(ui, r, &screens[haupt], t, s, z, f);
+        screen_tile(ui, r, &screens[main_part], t, s, z, f);
         return;
     }
     let gap = 10.0;
@@ -2851,7 +2851,7 @@ fn stage(ui: &mut egui::Ui, s: &MeetView, z: &mut MeetWindowState, b: &Images, f
             // Only the MAIN share gets the magnifier. With several
             // shares at once a common zoom state would be
             // confusing - you would not know which image it means.
-            if i == haupt {
+            if i == main_part {
                 screen_tile(ui, screen_box(r, t), k, t, s, z, f);
             } else {
                 tile_paint(ui, screen_box(r, t), k, t, f);
@@ -2918,7 +2918,7 @@ pub fn best_layout(area: Vec2, item_count: usize) -> (usize, f32) {
     } else {
         f32::INFINITY
     };
-    let (mut beste_spalten, mut best_width) = (1usize, 0.0f32);
+    let (mut best_columns, mut best_width) = (1usize, 0.0f32);
     for s in 1..=item_count {
         let rows = item_count.div_ceil(s) as f32;
         let from_width = (slot_b - gap * (s as f32 - 1.0)) / s as f32;
@@ -2926,10 +2926,10 @@ pub fn best_layout(area: Vec2, item_count: usize) -> (usize, f32) {
         let width_px = from_width.min(from_height).min(limit);
         if width_px > best_width {
             best_width = width_px;
-            beste_spalten = s;
+            best_columns = s;
         }
     }
-    (beste_spalten, best_width.max(80.0))
+    (best_columns, best_width.max(80.0))
 }
 
 fn raster(ui: &mut egui::Ui, area: Rect, tiles: &[Tile], b: &Images, f: &Colors) {

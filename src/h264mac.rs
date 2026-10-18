@@ -513,36 +513,36 @@ impl Encoder {
         // values created here (`release == true`) are released exactly once right after the call
         // (VTSessionSetProperty retains what it needs). The kCFBoolean statics are only read.
         unsafe {
-            let setzen = |k: CFStringRef, v: CFTypeRef, release: bool| {
+            let assign = |k: CFStringRef, v: CFTypeRef, release: bool| {
                 VTSessionSetProperty(session, k, v);
                 if release && !v.is_null() {
                     CFRelease(v);
                 }
             };
-            setzen(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, false);
-            setzen(
+            assign(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, false);
+            assign(
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 kCFBooleanFalse,
                 false,
             );
-            setzen(
+            assign(
                 kVTCompressionPropertyKey_ProfileLevel,
                 kVTProfileLevel_H264_Baseline_AutoLevel,
                 false,
             );
-            setzen(
+            assign(
                 kVTCompressionPropertyKey_AverageBitRate,
                 number_i32(bitrate.max(200_000) as i32),
                 true,
             );
-            setzen(
+            assign(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 number_f64(fps.max(1) as f64),
                 true,
             );
             // A keyframe every two seconds - in between every
             // newcomer gets one via the request.
-            setzen(
+            assign(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 number_i32((fps.max(1) * 2) as i32),
                 true,
@@ -936,7 +936,7 @@ impl Decoder {
         }
         // SAFETY: the block buffer is created with `avcc.len()` bytes allocated by CoreMedia (null
         // memory block + AssureMemoryNow flag) and filled with exactly `avcc.len()` bytes from the
-        // live Vec, so the copy is in bounds. `sizes` and `zeit` are locals that outlive
+        // live Vec, so the copy is in bounds. `sizes` and `time_value` are locals that outlive
         // CMSampleBufferCreateReady (arrays of length 1, as the counts say); `self.format` is
         // non-null because `self.session` is non-null (both are set together). The block buffer is
         // released once (the sample buffer retains it), the sample buffer once after the
@@ -969,7 +969,7 @@ impl Decoder {
                 return Err(anyhow!("Blockpuffer fuellen: {}", st));
             }
             let sizes = [avcc.len()];
-            let zeit = CMSampleTimingInfo {
+            let time_value = CMSampleTimingInfo {
                 duration: CMTime::invalid(),
                 presentation: CMTime::invalid(),
                 decode: CMTime::invalid(),
@@ -981,7 +981,7 @@ impl Decoder {
                 self.format,
                 1,
                 1,
-                &zeit,
+                &time_value,
                 1,
                 sizes.as_ptr(),
                 &mut sb,

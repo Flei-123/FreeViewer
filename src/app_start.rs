@@ -262,15 +262,15 @@ impl App {
             // click away. The whole page is in the bar on the left -
             // here is only what you really need on the start page.
             {
-                let dienst = self.friends.clone();
-                let liste = dienst.as_ref().map(|d| d.liste()).unwrap_or_default();
-                let offen = dienst.as_ref().map(|d| d.incoming_requests().len()).unwrap_or(0);
+                let service_handle = self.friends.clone();
+                let list_items = service_handle.as_ref().map(|d| d.list_items()).unwrap_or_default();
+                let is_open = service_handle.as_ref().map(|d| d.incoming_requests().len()).unwrap_or(0);
                 ui.add_space(8.0);
                 section(ui, i18n::t("nav.friends"));
                 let mut go_f: Option<String> = None;
                 let mut open = false;
                 card(ui, |ui| {
-                    if offen > 0 {
+                    if is_open > 0 {
                         ui.horizontal(|ui| {
                             ui.painter().circle_filled(
                                 ui.cursor().min + egui::vec2(4.0, 9.0),
@@ -282,7 +282,7 @@ impl App {
                                 .link(
                                     egui::RichText::new(i18n::tf(
                                         "friends.pending",
-                                        &offen.to_string(),
+                                        &is_open.to_string(),
                                     ))
                                     .size(12.5)
                                     .strong(),
@@ -293,14 +293,14 @@ impl App {
                             }
                         });
                     }
-                    if liste.is_empty() {
+                    if list_items.is_empty() {
                         ui.label(
                             egui::RichText::new(i18n::t("friends.none"))
                                 .size(12.0)
                                 .color(p.muted),
                         );
                     }
-                    for f in liste.iter().take(4) {
+                    for f in list_items.iter().take(4) {
                         let on = f.online;
                         ui.horizontal(|ui| {
                             icons::show(ui, "friends", 15.0, row_color(on, false));
@@ -456,7 +456,7 @@ impl App {
                     // friend request nobody sees because the
                     // program never asks for it is not a request.
                     let fd = self.friends_service();
-                    let offen = fd.incoming_requests().len() + fd.invites().len();
+                    let is_open = fd.incoming_requests().len() + fd.invites().len();
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
@@ -503,13 +503,13 @@ impl App {
                         // Open requests as a dot on the icon - visible
                         // without having to open the page.
                         let mut tip = tip.to_string();
-                        if v == View::Friends && offen > 0 {
+                        if v == View::Friends && is_open > 0 {
                             ui.painter().circle_filled(
                                 egui::pos2(rect.right() - 7.0, rect.top() + 7.0),
                                 4.0,
                                 egui::Color32::from_rgb(0xef, 0x44, 0x44),
                             );
-                            tip = format!("{} ({} offen)", tip, offen);
+                            tip = format!("{} ({} offen)", tip, is_open);
                         }
                         let r = index_finger(r).on_hover_text(tip);
                         if r.clicked() {

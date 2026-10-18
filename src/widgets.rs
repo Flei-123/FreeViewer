@@ -83,18 +83,18 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         .get(&egui::FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let liste = fonts
+    let list_items = fonts
         .families
         .entry(egui::FontFamily::Name("head".into()))
         .or_insert_with(|| fallback.clone());
     if let Some(h) = head {
-        liste.insert(0, h.to_owned());
+        list_items.insert(0, h.to_owned());
     }
-    if liste.is_empty() {
+    if list_items.is_empty() {
         // Letzte Rettung - darf eigentlich nie passieren.
-        liste.extend(fallback.iter().cloned());
-        if liste.is_empty() {
-            liste.push("Ubuntu-Light".to_owned());
+        list_items.extend(fallback.iter().cloned());
+        if list_items.is_empty() {
+            list_items.push("Ubuntu-Light".to_owned());
         }
     }
     ctx.set_fonts(fonts);

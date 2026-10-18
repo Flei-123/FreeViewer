@@ -181,17 +181,17 @@ impl Echo {
             self.runde = self.runde.wrapping_add(1);
             let skal2 = 1.0 / FFT_N as f32;
             for t in 0..PARTS {
-                let mut zeit = self.w[t].clone();
-                self.ifft.process(&mut zeit);
-                for (i, v) in zeit.iter_mut().enumerate() {
+                let mut time_value = self.w[t].clone();
+                self.ifft.process(&mut time_value);
+                for (i, v) in time_value.iter_mut().enumerate() {
                     if i < BLOCK {
                         *v = Complex32::new(v.re * skal2, 0.0);
                     } else {
                         *v = Complex32::new(0.0, 0.0);
                     }
                 }
-                self.fft.process(&mut zeit);
-                self.w[t] = zeit;
+                self.fft.process(&mut time_value);
+                self.w[t] = time_value;
             }
             // Leakage: old learning results fade slowly, so that
             // the filter does not cling to an old room.
@@ -296,7 +296,7 @@ pub struct NoiseGate {
     /// The first frames are only for calibration.
     calibrate: u32,
     /// State for the display.
-    offen: bool,
+    is_open: bool,
 }
 
 impl Default for NoiseGate {
@@ -317,7 +317,7 @@ impl NoiseGate {
             gain: 1.0,
             tail: 0,
             calibrate: Self::CALIBRATE,
-            offen: true,
+            is_open: true,
         }
     }
 
@@ -327,7 +327,7 @@ impl NoiseGate {
     /// Returns: whether it is currently passing (for the display).
     pub fn frame_box(&mut self, pcm: &mut [f32], strength: u8) -> bool {
         if pcm.is_empty() {
-            return self.offen;
+            return self.is_open;
         }
         let square: f32 = pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32;
         let level = square.sqrt();
@@ -344,7 +344,7 @@ impl NoiseGate {
         }
         if self.calibrate > 0 {
             self.calibrate -= 1;
-            self.offen = true;
+            self.is_open = true;
             return true;
         }
 
@@ -362,7 +362,7 @@ impl NoiseGate {
             self.tail -= 1;
         }
         let dest = if self.tail > 0 { 1.0 } else { 0.0 };
-        self.offen = dest > 0.5;
+        self.is_open = dest > 0.5;
 
         // Weiche Rampe je Abtastwert: aufblenden schneller als zublenden.
         let step = if dest > self.gain {
@@ -380,7 +380,7 @@ impl NoiseGate {
             }
             *v *= self.gain;
         }
-        self.offen
+        self.is_open
     }
 
     /// Estimated noise floor (0..1) - for the display.
@@ -390,7 +390,7 @@ impl NoiseGate {
 
     /// Is the gate currently letting sound through?
     pub fn passthrough(&self) -> bool {
-        self.offen
+        self.is_open
     }
 }
 
@@ -560,7 +560,7 @@ pub fn start_devices(ein_name: Option<String>, aus_name: Option<String>) -> anyh
     let sp = LockGrips {
         an: lock_on.clone(),
         strength: lock_strength.clone(),
-        offen: lock_open.clone(),
+        is_open: lock_open.clone(),
         reason: lock_reason.clone(),
     };
     std::thread::Builder::new()
@@ -589,7 +589,7 @@ pub fn start_devices(ein_name: Option<String>, aus_name: Option<String>) -> anyh
 struct LockGrips {
     an: Arc<AtomicBool>,
     strength: Arc<std::sync::atomic::AtomicU32>,
-    offen: Arc<AtomicBool>,
+    is_open: Arc<AtomicBool>,
     reason: Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -711,13 +711,13 @@ fn devices_thread(
         // useful signal and hold the gate open pointlessly.
         if gate_on.an.load(Ordering::Relaxed) {
             let strength = gate_on.strength.load(Ordering::Relaxed).min(100) as u8;
-            let durch = sperr.frame_box(&mut cleanly, strength);
-            gate_on.offen.store(durch, Ordering::Relaxed);
+            let through = sperr.frame_box(&mut cleanly, strength);
+            gate_on.is_open.store(through, Ordering::Relaxed);
             gate_on
                 .reason
                 .store((sperr.noise_floor() * 10_000.0) as u32, Ordering::Relaxed);
         } else {
-            gate_on.offen.store(true, Ordering::Relaxed);
+            gate_on.is_open.store(true, Ordering::Relaxed);
         }
         let pcm = if is_muted.load(Ordering::Relaxed) {
             vec![0i16; FRAME]

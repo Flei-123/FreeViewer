@@ -105,7 +105,7 @@ pub struct NativeMeet {
     pub screens: crate::meetvideo::VideoDecoder,
     /// Own camera (stage 2d) - only runs when it is switched on.
     camera: Option<crate::meetcam::WebCam>,
-    koder: Option<crate::meetvideo::VideoEncoder>,
+    video_encoder: Option<crate::meetvideo::VideoEncoder>,
     pub camera_on: bool,
     /// Send a drawn avatar instead of the camera.
     pub avatar_an: bool,
@@ -285,7 +285,7 @@ impl NativeMeet {
             images: crate::meetvideo::VideoDecoder::neu(),
             screens: crate::meetvideo::VideoDecoder::neu(),
             camera: None,
-            koder: None,
+            video_encoder: None,
             camera_on: false,
             avatar_an: false,
             avatar: crate::avatar::Look::default(),
@@ -354,7 +354,7 @@ impl NativeMeet {
     }
 
     /// Must be called every frame: dispatches messages and audio.
-    pub fn pumpe(&mut self) {
+    pub fn pump(&mut self) {
         for e in self.sig.poll_events() {
             match e {
                 meetsig::Event::Welcome { .. } => {
@@ -599,7 +599,7 @@ impl NativeMeet {
                 }
             }
         }
-        self.bitrate_pumpe();
+        self.bitrate_pump();
         self.camera_pump();
         self.screen_pump();
         self.pointer_pump();
@@ -754,7 +754,7 @@ impl NativeMeet {
                     self.frame_position = Some(lage);
                 } else if self.frame_position != Some(lage) {
                     if let Some(r) = self.frame_box.as_ref() {
-                        r.setzen(lage.0, lage.1, lage.2, lage.3);
+                        r.assign(lage.0, lage.1, lage.2, lage.3);
                     }
                     self.frame_position = Some(lage);
                 }
@@ -777,12 +777,12 @@ impl NativeMeet {
 
     /// Which program windows can be shared?
     pub fn window() -> Vec<crate::window::WindowInfo> {
-        crate::window::liste()
+        crate::window::list_items()
     }
 
     /// How many screens are there here?
     pub fn monitore() -> Vec<crate::meetschirm::Screen> {
-        crate::meetschirm::liste()
+        crate::meetschirm::list_items()
     }
 
     /// Screen share on/off. `index` selects the screen.
@@ -900,21 +900,21 @@ impl NativeMeet {
     /// The encoder cannot be reconfigured while running, so it is
     /// rebuilt. That costs a keyframe - hence at most
     /// every three seconds and only from a third difference upwards.
-    fn bitrate_pumpe(&mut self) {
+    fn bitrate_pump(&mut self) {
         if self.bitrate_checked.elapsed() < std::time::Duration::from_secs(3) {
             return;
         }
         self.bitrate_checked = std::time::Instant::now();
         let estimate = self.ton.numbers().bandwidth;
         let (k, s) = bitrates_distribute(estimate, self.camera_on, self.screen_on);
-        if self.koder.is_some() && bitrate_worth_switch(self.encoder_bitrate, k) {
+        if self.video_encoder.is_some() && bitrate_worth_switch(self.encoder_bitrate, k) {
             let (b, h, fps) = match (&self.camera, self.avatar_an) {
                 (Some(kam), _) => (kam.width_px, kam.height_px, 30),
                 (None, true) => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 20),
                 _ => (crate::meetvideo::WIDTH, crate::meetvideo::HEIGHT, 30),
             };
             if let Ok(c) = crate::meetvideo::VideoEncoder::neu(b, h, fps, k) {
-                self.koder = Some(c);
+                self.video_encoder = Some(c);
                 self.encoder_bitrate = k;
                 self.bitrate_switch += 1;
             }
@@ -936,10 +936,10 @@ impl NativeMeet {
             return;
         }
         if self.avatar_an {
-            self.avatar_pumpe(now_ts);
+            self.avatar_pump(now_ts);
             return;
         }
-        let (kam, kod) = match (self.camera.as_ref(), self.koder.as_mut()) {
+        let (kam, kod) = match (self.camera.as_ref(), self.video_encoder.as_mut()) {
             (Some(k), Some(c)) => (k, c),
             _ => return,
         };
@@ -990,8 +990,8 @@ impl NativeMeet {
     /// measures anyway. Blinking comes at irregular intervals, plus a
     /// slight breathing movement - without it a still image looks like an
     /// away sign.
-    fn avatar_pumpe(&mut self, now_ts: std::time::Instant) {
-        let Some(kod) = self.koder.as_mut() else { return };
+    fn avatar_pump(&mut self, now_ts: std::time::Instant) {
+        let Some(kod) = self.video_encoder.as_mut() else { return };
         // 20 frames per second are enough: the avatar has little motion, and
         // it should not eat CPU time.
         self.next_image = now_ts + std::time::Duration::from_millis(50);
@@ -1056,7 +1056,7 @@ impl NativeMeet {
                     k.stop_capture();
                 }
             }
-            if self.koder.is_none() {
+            if self.video_encoder.is_none() {
                 match crate::meetvideo::VideoEncoder::neu(
                     crate::meetvideo::WIDTH,
                     crate::meetvideo::HEIGHT,
@@ -1064,7 +1064,7 @@ impl NativeMeet {
                     AVATAR_BITRATE,
                 ) {
                     Ok(c) => {
-                        self.koder = Some(c);
+                        self.video_encoder = Some(c);
                         self.encoder_bitrate = AVATAR_BITRATE;
                     }
                     Err(e) => {
@@ -1078,7 +1078,7 @@ impl NativeMeet {
             self.camera_notice = "Avatar statt Kamera".into();
         } else {
             self.avatar_an = false;
-            self.koder = None;
+            self.video_encoder = None;
             self.own = None;
             self.own_state += 1;
             self.camera_on = false;
@@ -1090,7 +1090,7 @@ impl NativeMeet {
     }
 
     /// Aussehen des Avatars aendern (wirkt beim naechsten Bild).
-    pub fn avatar_setzen(&mut self, a: crate::avatar::Look) {
+    pub fn avatar_set(&mut self, a: crate::avatar::Look) {
         self.avatar = a;
     }
 
@@ -1115,7 +1115,7 @@ impl NativeMeet {
                         Ok(c) => {
                             self.camera_notice = format!("Kamera: {}", k.name);
                             self.camera = Some(k);
-                            self.koder = Some(c);
+                            self.video_encoder = Some(c);
                             self.encoder_bitrate = CAMERA_BITRATE;
                             self.camera_on = true;
                         }
@@ -1134,7 +1134,7 @@ impl NativeMeet {
             if let Some(k) = self.camera.take() {
                 k.stop_capture();
             }
-            self.koder = None;
+            self.video_encoder = None;
             self.own = None;
             self.own_state += 1;
             self.camera_on = false;
@@ -1612,7 +1612,7 @@ impl Preflight {
     }
 
     /// In jedem Bild aufrufen: Bild abholen, Pegel messen.
-    pub fn pumpe(&mut self) {
+    pub fn pump(&mut self) {
         if let Some(g) = &self.ton {
             let mut spitze = 0.0f32;
             while let Ok(frame_box) = g.mic_name.try_recv() {
@@ -1683,7 +1683,7 @@ mod tests {
         let mut v = Preflight::default();
         v.camera(true);
         v.mic_name(true, None);
-        v.pumpe();
+        v.pump();
         #[cfg(not(windows))]
         assert!(!v.camera_on(), "none may be running without a camera");
         assert!(v.own.is_none() || v.camera_on());
@@ -1799,7 +1799,7 @@ mod tests {
                 // a message must be there, no crash.
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let mut m = m;
-                m.pumpe();
+                m.pump();
                 assert!(!m.state().connected || m.state().last_error.is_empty());
                 m.leave();
             }

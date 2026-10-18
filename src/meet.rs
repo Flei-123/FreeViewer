@@ -114,8 +114,8 @@ fn own_file() -> std::path::PathBuf {
     crate::ident::config_dir().join("meine-meetings.json")
 }
 
-fn write_own(liste: &[Meeting]) {
-    let arr: Vec<serde_json::Value> = liste
+fn write_own(list_items: &[Meeting]) {
+    let arr: Vec<serde_json::Value> = list_items
         .iter()
         .map(|x| {
             serde_json::json!({
@@ -154,18 +154,18 @@ pub fn remember(m: &Meeting) {
     if m.id.trim().is_empty() {
         return;
     }
-    let mut liste = own();
-    liste.retain(|x| x.id != m.id);
-    liste.insert(0, m.clone());
-    let at_most: Vec<Meeting> = liste.into_iter().take(12).collect();
+    let mut list_items = own();
+    list_items.retain(|x| x.id != m.id);
+    list_items.insert(0, m.clone());
+    let at_most: Vec<Meeting> = list_items.into_iter().take(12).collect();
     write_own(&at_most);
 }
 
 /// Remove a meeting from the own list.
 pub fn forget(id: &str) {
-    let mut liste = own();
-    liste.retain(|x| x.id != id);
-    write_own(&liste);
+    let mut list_items = own();
+    list_items.retain(|x| x.id != id);
+    write_own(&list_items);
 }
 
 /// The own meetings that are REALLY still running. The server is asked

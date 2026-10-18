@@ -330,7 +330,7 @@ impl App {
             if pointer_top {
                 self.bar_seen = std::time::Instant::now();
             }
-            let offen = self.bar_pinned
+            let is_open = self.bar_pinned
                 || self.bar_seen.elapsed() < Duration::from_millis(2500);
             let width_px = self.bar_w.max(120.0);
             let links = (screen.width() - width_px).max(0.0) * self.bar_x.clamp(0.0, 1.0);
@@ -340,7 +340,7 @@ impl App {
             // Hidden means hidden: no handle, no shadow,
             // nothing. The top edge of the screen is the switch - just like
             // in the Windows remote connection.
-            if offen {
+            if is_open {
                 let area = egui::Area::new(egui::Id::new("fv_fullbar"))
                     .order(egui::Order::Foreground)
                     .fade_in(false)

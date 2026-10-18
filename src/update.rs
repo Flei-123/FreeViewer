@@ -598,7 +598,7 @@ fn now_text() -> String {
 }
 
 /// Was a visible UI open in the last 90 seconds?
-pub fn gui_war_offen() -> bool {
+pub fn gui_was_open() -> bool {
     let Some(p) = gui_marke() else { return false };
     let Ok(text) = std::fs::read_to_string(&p) else {
         return false;
@@ -668,14 +668,14 @@ pub fn service_watcher() {
         let mut next_round = std::time::Instant::now();
         loop {
             // Quick request from the UI ("Install update")?
-            let mut sofort = false;
+            let mut immediately = false;
             if let Some(p) = trigger_path() {
                 if p.exists() {
                     let _ = std::fs::remove_file(&p);
-                    sofort = true;
+                    immediately = true;
                 }
             }
-            if !sofort && std::time::Instant::now() < next_round {
+            if !immediately && std::time::Instant::now() < next_round {
                 std::thread::sleep(Duration::from_secs(10));
                 continue;
             }
@@ -683,7 +683,7 @@ pub fn service_watcher() {
             let inject = |rel: &Release| -> bool {
                 // The button counts as an explicit request - even if
                 // automatic mode is off.
-                sofort || crate::ident::auto_update_enabled()
+                immediately || crate::ident::auto_update_enabled()
             };
             if let Ok(rel) = check() {
                 if newer(&rel.version, VERSION) && inject(&rel) {
@@ -702,7 +702,7 @@ pub fn service_watcher() {
                             // restart. Without this marker the screen was
                             // simply empty after every update - the service
                             // came back, the WINDOW did not.
-                            if gui_war_offen() {
+                            if gui_was_open() {
                                 if let Some(p) = gui_restart_marker() {
                                     let _ = std::fs::write(&p, b"1");
                                 }

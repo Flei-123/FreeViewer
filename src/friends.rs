@@ -337,7 +337,7 @@ impl std::error::Error for FriendError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notice {
     /// Abgleich done: so viele Friends, so viele offene Anfragen.
-    Synced { friends: usize, offen: usize },
+    Synced { friends: usize, is_open: usize },
     /// Request has arrived at the relay.
     Requested(String),
     /// The other had already asked me - we are friends immediately now.
@@ -790,7 +790,7 @@ impl Book {
 
 // ================================================================ Netzteil
 
-/// The answer of the relay to `/fv/friends/stand` (and `/liste`).
+/// The answer of the relay to `/fv/friends/stand` (and `/list_items`).
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct Stand {
     #[serde(default)]
@@ -1106,7 +1106,7 @@ pub struct Service {
     started: AtomicBool,
     busy: AtomicBool,
     /// "Please sync soon" - every step sets it, the thread reads it.
-    sofort: Arc<AtomicBool>,
+    immediately: Arc<AtomicBool>,
     last: AtomicU64,
     /// Letzter Abgleich hat geklappt?
     connected: AtomicBool,
@@ -1130,7 +1130,7 @@ impl Service {
             mailbox: Arc::new(Mutex::new(Vec::new())),
             started: AtomicBool::new(false),
             busy: AtomicBool::new(false),
-            sofort: Arc::new(AtomicBool::new(false)),
+            immediately: Arc::new(AtomicBool::new(false)),
             last: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             invites: Mutex::new(Vec::new()),
@@ -1152,11 +1152,11 @@ impl Service {
         let mut t = self.token.lock_ok();
         if *t != neu {
             *t = neu;
-            self.sofort.store(true, Ordering::SeqCst);
+            self.immediately.store(true, Ordering::SeqCst);
         }
     }
 
-    pub fn namen_setzen(&self, name: &str) {
+    pub fn names_set(&self, name: &str) {
         *self.name.lock_ok() = crate::presence::clean(name);
     }
 
@@ -1178,7 +1178,7 @@ impl Service {
         std::thread::spawn(move || loop {
             let due = now_ts().saturating_sub(ich.last.load(Ordering::Relaxed))
                 >= SYNC_SECONDS;
-            if ich.sofort.swap(false, Ordering::SeqCst) || due {
+            if ich.immediately.swap(false, Ordering::SeqCst) || due {
                 ich.reconcile();
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -1189,7 +1189,7 @@ impl Service {
 
     /// The friend list - online first. Comes from the cache,
     /// so it never waits for the network.
-    pub fn liste(&self) -> Vec<Friend> {
+    pub fn list_items(&self) -> Vec<Friend> {
         self.book.lock_ok().sortiert()
     }
 
@@ -1281,7 +1281,7 @@ impl Service {
                 Ok(false) => ich.melde(Notice::Requested(target_label(&id))),
                 Err(e) => ich.melde(Notice::Failed(e.to_string())),
             }
-            ich.sofort.store(true, Ordering::SeqCst);
+            ich.immediately.store(true, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -1303,7 +1303,7 @@ impl Service {
                 Ok(()) => ich.melde(Notice::Accepted(wer.clone())),
                 Err(e) => ich.melde(Notice::Failed(e.to_string())),
             }
-            ich.sofort.store(true, Ordering::SeqCst);
+            ich.immediately.store(true, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -1325,7 +1325,7 @@ impl Service {
                 Ok(()) => ich.melde(Notice::Rejected(wer.clone())),
                 Err(e) => ich.melde(Notice::Failed(e.to_string())),
             }
-            ich.sofort.store(true, Ordering::SeqCst);
+            ich.immediately.store(true, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -1347,7 +1347,7 @@ impl Service {
                 Ok(()) => ich.melde(Notice::Removed(wer.clone())),
                 Err(e) => ich.melde(Notice::Failed(e.to_string())),
             }
-            ich.sofort.store(true, Ordering::SeqCst);
+            ich.immediately.store(true, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -1366,7 +1366,7 @@ impl Service {
             if let Err(e) = send_block(&relay, &secret, &token, &name, &id, an) {
                 ich.melde(Notice::Failed(e.to_string()));
             }
-            ich.sofort.store(true, Ordering::SeqCst);
+            ich.immediately.store(true, Ordering::SeqCst);
         });
         Ok(())
     }
@@ -1415,25 +1415,25 @@ impl Service {
 
     /// Take over a new mailbox state; reports every NEW invitation exactly once.
     /// Returns how many were new.
-    pub fn invites_adopt(&self, mut liste: Vec<Invite>) -> usize {
-        liste.retain(|e| !e.id.is_empty() && !e.link.is_empty());
-        if liste.len() > 50 {
-            liste.drain(50..);
+    pub fn invites_adopt(&self, mut list_items: Vec<Invite>) -> usize {
+        list_items.retain(|e| !e.id.is_empty() && !e.link.is_empty());
+        if list_items.len() > 50 {
+            list_items.drain(50..);
         }
         let mut neu = Vec::new();
         {
             let mut reported = self.invite_reported.lock_ok();
-            for e in &liste {
+            for e in &list_items {
                 if reported.insert(e.id.clone()) {
                     neu.push(e.clone());
                 }
             }
             if reported.len() > 500 {
                 reported.clear();
-                reported.extend(liste.iter().map(|e| e.id.clone()));
+                reported.extend(list_items.iter().map(|e| e.id.clone()));
             }
         }
-        *self.invites.lock_ok() = liste;
+        *self.invites.lock_ok() = list_items;
         for e in &neu {
             self.melde(Notice::InviteReceived(e.von(), e.heading.clone()));
         }
@@ -1446,8 +1446,8 @@ impl Service {
         }
         let (relay, secret, token, name) = self.access();
         match fetch_invites(&relay, &secret, &token, &name) {
-            Ok(liste) => {
-                self.invites_adopt(liste);
+            Ok(list_items) => {
+                self.invites_adopt(list_items);
             }
             // Older relay: stop asking for a while (it can be updated, after all).
             Err(FriendError::NoChannel) => self
@@ -1459,7 +1459,7 @@ impl Service {
 
     /// Sofortigen Abgleich anstossen (kehrt sofort go_back).
     pub fn synchronisieren(&self) {
-        self.sofort.store(true, Ordering::SeqCst);
+        self.immediately.store(true, Ordering::SeqCst);
     }
 
     /// Sync NOW and here - blocks. Only for the background thread and
@@ -1489,7 +1489,7 @@ impl Service {
                     let b = self.book.lock_ok();
                     self.melde(Notice::Synced {
                         friends: b.friends.len(),
-                        offen: b.request.len(),
+                        is_open: b.request.len(),
                     });
                 }
                 self.invites_fetch();
@@ -1516,7 +1516,7 @@ impl Service {
     fn clone_mailbox(&self) -> Mailbox {
         Mailbox {
             mailbox: Arc::clone(&self.mailbox),
-            sofort: Arc::clone(&self.sofort),
+            immediately: Arc::clone(&self.immediately),
         }
     }
 }
@@ -1524,7 +1524,7 @@ impl Service {
 /// A small handle for background threads.
 struct Mailbox {
     mailbox: Arc<Mutex<Vec<Notice>>>,
-    sofort: Arc<AtomicBool>,
+    immediately: Arc<AtomicBool>,
 }
 
 impl Mailbox {
@@ -2022,7 +2022,7 @@ mod tests {
         let d = Service::neu("ws://127.0.0.1:9/fv/ws".into(), "00".repeat(32), "Test".into());
         assert_eq!(d.request("@anna"), Err(FriendError::AccountRequired));
         assert_eq!(d.request("k:u_ANNA"), Err(FriendError::AccountRequired));
-        assert!(d.liste().is_empty());
+        assert!(d.list_items().is_empty());
     }
 
     #[test]

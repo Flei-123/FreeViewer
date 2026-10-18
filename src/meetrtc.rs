@@ -232,7 +232,7 @@ pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
     // something, and the other side cannot arrange "screen large,
     // camera small".
     let vid2 = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
-    let (offer, offen) = api
+    let (offer, is_open) = api
         .apply()
         .ok_or_else(|| anyhow!("offer cannot be built"))?;
     let offer_sdp = offer.to_sdp_string();
@@ -255,7 +255,7 @@ pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
         .name("meetrtc".into())
         .spawn(move || {
             let r = run(
-                rtc, offen, socket, mid, vid, vid2, out_rx, image_rx, screen_rx, sdp_rx, &ev_tx,
+                rtc, is_open, socket, mid, vid, vid2, out_rx, image_rx, screen_rx, sdp_rx, &ev_tx,
                 &z2, &s2, &e2, &sp2, e2e,
             );
             let text = match r {
@@ -303,7 +303,7 @@ fn own_addresses() -> Vec<std::net::IpAddr> {
 #[allow(clippy::too_many_arguments)]
 fn run(
     mut rtc: Rtc,
-    offen: str0m::change::SdpPendingOffer,
+    is_open: str0m::change::SdpPendingOffer,
     socket: UdpSocket,
     mid: Mid,
     vid: Mid,
@@ -320,7 +320,7 @@ fn run(
     e2e: Option<crate::meete2e::Key>,
 ) -> Result<()> {
     // Wait for the answer (comes in via the signalling).
-    let mut offen = Some(offen);
+    let mut is_open = Some(is_open);
     let start = Instant::now();
     let mut kodierer = audiopus::coder::Encoder::new(
         audiopus::SampleRate::Hz48000,
@@ -345,7 +345,7 @@ fn run(
     // signalling ("track"), it is passed in from outside.
     let mut mid_zu_peer: HashMap<String, u64> = HashMap::new();
     let mut next_frame = Instant::now();
-    let mut rtp_zeit: u64 = 0;
+    let mut rtp_time: u64 = 0;
     let mut connected_reported = false;
     let mut pt: Option<str0m::media::Pt> = None;
     let mut vpt: Option<str0m::media::Pt> = None;
@@ -380,7 +380,7 @@ fn run(
                 Sdp::Reply(text) => {
                     let reply = SdpAnswer::from_sdp_string(&text)
                         .map_err(|e| anyhow!("Antwort unlesbar: {:?}", e))?;
-                    if let Some(o) = offen.take() {
+                    if let Some(o) = is_open.take() {
                         rtc.sdp_api()
                             .accept_answer(o, reply)
                             .map_err(|e| anyhow!("Antwort abgelehnt: {}", e))?;
@@ -461,10 +461,10 @@ fn run(
                         packet = s.protect(false, &packet);
                     }
                     let wall_clock = start + start.elapsed();
-                    let zeit = MediaTime::new(rtp_zeit, str0m::media::Frequency::FORTY_EIGHT_KHZ);
+                    let time_value = MediaTime::new(rtp_time, str0m::media::Frequency::FORTY_EIGHT_KHZ);
                     if let Some(mut w) = rtc.writer(mid) {
                         if let Some(p) = pt {
-                            if let Err(e) = w.write(p, wall_clock, zeit, packet.clone()) {
+                            if let Err(e) = w.write(p, wall_clock, time_value, packet.clone()) {
                                 let _ = ev.send(ToneEvent::FriendError(format!("senden: {}", e)));
                             } else if let Ok(mut z) = numbers.lock() {
                                 z.sent += 1;
@@ -472,7 +472,7 @@ fn run(
                             }
                         }
                     }
-                    rtp_zeit += FRAME as u64;
+                    rtp_time += FRAME as u64;
                 }
             }
         }
@@ -497,7 +497,7 @@ fn run(
                 }
                 if let (Some(p), Some(mut w)) = (vpt, rtc.writer(vid)) {
                     let wall_clock = start + start.elapsed();
-                    let zeit = MediaTime::new(image_time, str0m::media::Frequency::NINETY_KHZ);
+                    let time_value = MediaTime::new(image_time, str0m::media::Frequency::NINETY_KHZ);
                     // Video: only the CONTENTS of the NAL units become secret,
                     // the structure stays readable - otherwise the server cannot
                     // packetise.
@@ -506,7 +506,7 @@ fn run(
                         None => daten,
                     };
                     let length = daten.len() as u64;
-                    if let Err(e) = w.write(p, wall_clock, zeit, daten) {
+                    if let Err(e) = w.write(p, wall_clock, time_value, daten) {
                         let _ = ev.send(ToneEvent::FriendError(format!("Bild senden: {}", e)));
                     } else if let Ok(mut z) = numbers.lock() {
                         z.image_sent += 1;
@@ -538,13 +538,13 @@ fn run(
                 }
                 if let (Some(p), Some(mut w)) = (spt, rtc.writer(vid2)) {
                     let wall_clock = start + start.elapsed();
-                    let zeit = MediaTime::new(screen_time, str0m::media::Frequency::NINETY_KHZ);
+                    let time_value = MediaTime::new(screen_time, str0m::media::Frequency::NINETY_KHZ);
                     let daten = match e2e_screen.as_mut() {
                         Some(s) => s.protect_h264(&daten),
                         None => daten,
                     };
                     let length = daten.len() as u64;
-                    if let Err(e) = w.write(p, wall_clock, zeit, daten) {
+                    if let Err(e) = w.write(p, wall_clock, time_value, daten) {
                         let _ = ev.send(ToneEvent::FriendError(format!("Bildschirm senden: {}", e)));
                     } else if let Ok(mut z) = numbers.lock() {
                         z.screen_sent += 1;

@@ -130,15 +130,15 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
             // kick back and forth (offline/online every 3 s). So
             // wait long - and if the service now runs the host
             // in the meantime, this UI stops registering altogether.
-            let mut dienst = false;
+            let mut service_handle = false;
             for _ in 0..12 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 if crate::service::running() {
-                    dienst = true;
+                    service_handle = true;
                     break;
                 }
             }
-            if dienst {
+            if service_handle {
                 shared.set_host_status("Der Dienst betreibt den Host - auch am Anmeldebildschirm");
                 return;
             }
@@ -173,7 +173,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
     // connection counts as dead and is rebuilt.
     let mut last_contact = Instant::now();
     let mut last_ping = Instant::now();
-    let ping_alle = Duration::from_secs(seconds("FV_PING_SEK", 15));
+    let ping_all = Duration::from_secs(seconds("FV_PING_SEK", 15));
     let still_max = Duration::from_secs(seconds("FV_STILL_SEK", 40));
 
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
@@ -187,7 +187,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 if last_contact.elapsed() > still_max {
                     return Err(anyhow!("Relay antwortet nicht mehr"));
                 }
-                if last_ping.elapsed() > ping_alle {
+                if last_ping.elapsed() > ping_all {
                     last_ping = Instant::now();
                     if tx.send(WsMsg::Ping(Vec::new().into())).is_err() {
                         return Err(anyhow!("Leitung zum Relay abgerissen"));

@@ -439,15 +439,15 @@ mod tests {
             }
             n
         };
-        let mut offen = Vec::new();
-        draw(&a, 320, 320, 0.0, 0.0, 0.0, &mut offen);
+        let mut is_open = Vec::new();
+        draw(&a, 320, 320, 0.0, 0.0, 0.0, &mut is_open);
         let mut zu = Vec::new();
         draw(&a, 320, 320, 0.0, 1.0, 0.0, &mut zu);
-        assert!(weiss(&offen) > 40, "offene Augen zeigen kein Weiss");
+        assert!(weiss(&is_open) > 40, "offene Augen zeigen kein Weiss");
         assert!(
-            weiss(&zu) * 4 < weiss(&offen),
+            weiss(&zu) * 4 < weiss(&is_open),
             "the lid does not close: open={} closed={}",
-            weiss(&offen),
+            weiss(&is_open),
             weiss(&zu)
         );
     }

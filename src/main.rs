@@ -865,7 +865,7 @@ enum View {
 
 /// State des eigenen Meet-Fensters (separater Viewport, Zoom-Ablauf).
 struct MeetWin {
-    offen: bool,
+    is_open: bool,
     meeting: Option<meet::Meeting>,
     /// The browser with image and sound is already running.
     joined: bool,
@@ -910,7 +910,7 @@ struct MeetWin {
 impl Default for MeetWin {
     fn default() -> Self {
         Self {
-            offen: false,
+            is_open: false,
             meeting: None,
             joined: false,
             native_start: false,

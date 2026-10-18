@@ -79,7 +79,7 @@ pub(crate) fn report_start_error(e: &str) {
         let _ = writeln!(
             f,
             "[{}] Start fehlgeschlagen ({} {}): {}",
-            chrono_zeit(),
+            chrono_time(),
             crate::brand::NAME,
             update::VERSION,
             e
@@ -90,7 +90,7 @@ pub(crate) fn report_start_error(e: &str) {
 }
 
 /// Date and time without an extra crate - enough for a log line.
-pub(crate) fn chrono_zeit() -> String {
+pub(crate) fn chrono_time() -> String {
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
