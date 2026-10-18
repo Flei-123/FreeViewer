@@ -19,7 +19,7 @@ können sich es im am an zum zur über ueber vor beim ohne durch dass diese dies
 alle schon immer hier gibt eigene eigenen neue neuen alte alten gleich""".split())
 # words that are German and unlikely in English identifiers
 IDWORDS = set("""
-verbindung passwort fenster schirm konto freunde freund gesehen anzeige zustand einstellungen einstellung nachricht nachrichten teilnehmer kamera_an stumm lautstaerke datei ordner fehler fertig starten beenden trennen senden empfangen verbinden schliessen oeffnen dauer breite hoehe lesen schreiben suche suchen rechner nutzer benutzer kennwort sitzung steuerung zugriff erlauben verweigern anfrage bildschirm taste tastatur zwischenablage aktualisieren aktualisierung gruppe eintrag eintraege schluessel pruefen pruefung zaehler laenge anzahl sperren entsperren abbrechen zurueck wahr falsch meldung vorschau hintergrund vordergrund farbe linie kreis flaeche ausgabe eingabe
+quelle sicht rahmen liste aufnahme aktion verbindung passwort fenster schirm konto freunde freund gesehen anzeige zustand einstellungen einstellung nachricht nachrichten teilnehmer kamera_an stumm lautstaerke datei ordner fehler fertig starten beenden trennen senden empfangen verbinden schliessen oeffnen dauer breite hoehe lesen schreiben suche suchen rechner nutzer benutzer kennwort sitzung steuerung zugriff erlauben verweigern anfrage bildschirm taste tastatur zwischenablage aktualisieren aktualisierung gruppe eintrag eintraege schluessel pruefen pruefung zaehler laenge anzahl sperren entsperren abbrechen zurueck wahr falsch meldung vorschau hintergrund vordergrund farbe linie kreis flaeche ausgabe eingabe
 """.split())
 UML = re.compile('[äöüÄÖÜß]')
 WORD = re.compile(r"[a-zäöüß]+")

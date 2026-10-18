@@ -23,8 +23,8 @@
    "src/meetwindow.rs": 1
   },
   "identifiers": {
-   "relay/buch.js": 31,
-   "relay/relay.js": 47,
+   "relay/buch.js": 36,
+   "relay/relay.js": 49,
    "relay/test_einladung.js": 7,
    "src/friends.rs": 8,
    "src/meet.rs": 1,
@@ -62,7 +62,7 @@
  "total": {
   "comments": 24,
   "eol_comments": 1,
-  "identifiers": 103,
+  "identifiers": 110,
   "strings": 274
  }
 }
