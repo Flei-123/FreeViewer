@@ -170,14 +170,14 @@ pub(crate) fn logo(ui: &mut egui::Ui) {
         .ctx()
         .data_mut(|d| d.get_temp::<egui::TextureHandle>(id))
         .unwrap_or_else(|| {
-            let bild = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            let picture = image::load_from_memory(include_bytes!("../assets/icon.png"))
                 .map(|i| i.to_rgba8())
                 .unwrap_or_else(|_| {
                     image::RgbaImage::from_pixel(1, 1, image::Rgba([0x38, 0xbd, 0xf8, 0xff]))
                 });
-            let (w, h) = bild.dimensions();
+            let (w, h) = picture.dimensions();
             let ci =
-                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &bild.into_raw());
+                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &picture.into_raw());
             let t = ui
                 .ctx()
                 .load_texture("fv_logo", ci, egui::TextureOptions::LINEAR);
@@ -270,7 +270,7 @@ pub(crate) fn ghost(size: egui::Vec2, text: &str) -> egui::Button<'static> {
 
 /// Kleiner zweitrangiger Knopf.
 pub(crate) fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    zeigefinger(ui.add(
+    index_finger(ui.add(
         egui::Button::new(egui::RichText::new(text).size(12.5).color(theme::muted()))
             .fill(theme::card_hi())
             .stroke(egui::Stroke::new(1.0, theme::line()))
@@ -372,7 +372,7 @@ pub(crate) fn save_shot(img: &egui::ColorImage, path: &std::path::Path) {
 // ------------------------------------------------------------ kleine Helfer
 
 /// Icon button without a frame - hover and press come from the palette.
-pub(crate) fn zeigefinger(r: egui::Response) -> egui::Response {
+pub(crate) fn index_finger(r: egui::Response) -> egui::Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -391,7 +391,7 @@ pub(crate) fn icon_ghost(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Resp
             )
         })
         .inner;
-    zeigefinger(r).on_hover_text(tip)
+    index_finger(r).on_hover_text(tip)
 }
 
 /// Icon button that can be toggled (microphone, audio).
@@ -415,7 +415,7 @@ pub(crate) fn icon_toggle(ui: &mut egui::Ui, icon: &str, on: bool, size: f32, ti
             )
         })
         .inner;
-    zeigefinger(r).on_hover_text(tip)
+    index_finger(r).on_hover_text(tip)
 }
 
 /// Two small level bars: out and in.
@@ -525,7 +525,7 @@ pub(crate) fn check(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Respo
     }
     let ty = rect.center().y - galley.size().y / 2.0;
     pt.galley(egui::pos2(br.max.x + gap, ty), galley, p.text);
-    zeigefinger(resp)
+    index_finger(resp)
 }
 
 /// Slider with label on the left and value on the right - nothing slips

@@ -63,8 +63,8 @@ pub(crate) fn cli_install() -> eframe::Result<()> {
 
 pub(crate) fn cli_uninstall() -> eframe::Result<()> {
     // --all also takes the configuration and identity backup along
-    let alles = std::env::args().any(|a| a == "--all");
-    let r = if alles {
+    let all = std::env::args().any(|a| a == "--all");
+    let r = if all {
         setup::uninstall_all()
     } else {
         setup::uninstall()
@@ -129,18 +129,18 @@ pub(crate) fn cli_e2evektor() -> eframe::Result<()> {
         let g = k.seal_h264_at(&salt, 42, &f);
         println!("H264 42 {} {}", hex::encode(&f), hex::encode(&g));
     }
-    for (spur, name, ctr, key, klar) in [
+    for (spur, name, ctr, key, cleartext) in [
         (meete2e::Spur::Ton, "ton", 0u32, false, "Hallo Ton"),
-        (meete2e::Spur::Bild, "bild", 1, true, "Ein Schluesselbild"),
-        (meete2e::Spur::Bild, "bild", 4294967295, false, "Zaehler am Anschlag"),
+        (meete2e::Spur::Image, "bild", 1, true, "Ein Schluesselbild"),
+        (meete2e::Spur::Image, "bild", 4294967295, false, "Zaehler am Anschlag"),
     ] {
-        let g = k.seal_audio_at(spur, &salt, ctr, key, klar.as_bytes());
+        let g = k.seal_audio_at(spur, &salt, ctr, key, cleartext.as_bytes());
         println!(
             "VEKTOR {} {} {} {} {}",
             name,
             ctr,
             key,
-            hex::encode(klar.as_bytes()),
+            hex::encode(cleartext.as_bytes()),
             hex::encode(&g)
         );
     }
@@ -152,7 +152,7 @@ pub(crate) fn cli_e2evektor() -> eframe::Result<()> {
 // Only that proves whether menus and pointer really make it
 // through - in a running meeting you only see it, you don't measure it.
 //   freeviewer --schirmshot <file.png> [screen-nr] [wartesekunden] [x y b h]
-pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_screen_shot(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let file = args
         .get(i + 1)
@@ -160,14 +160,14 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
         .unwrap_or_else(|| "schirm.png".to_string());
     let nr = args.get(i + 2).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
     let warte = args.get(i + 3).and_then(|v| v.parse::<u64>().ok()).unwrap_or(3);
-    let zahl = |n: usize, vor: f32| -> f32 {
+    let number = |n: usize, vor: f32| -> f32 {
         args.get(n).and_then(|v| v.parse::<f32>().ok()).unwrap_or(vor)
     };
-    let teil = (
-        zahl(i + 4, 0.0),
-        zahl(i + 5, 0.0),
-        zahl(i + 6, 1.0),
-        zahl(i + 7, 1.0),
+    let part = (
+        number(i + 4, 0.0),
+        number(i + 5, 0.0),
+        number(i + 6, 1.0),
+        number(i + 7, 1.0),
     );
     let auf = match meetschirm::open(nr, 1920, 1080, 15) {
         Ok(a) => a,
@@ -176,19 +176,19 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    println!("SCHIRMSHOT quelle={} ausschnitt={:?}", auf.name, teil);
-    auf.bereich_setzen(teil);
+    println!("SCHIRMSHOT quelle={} ausschnitt={:?}", auf.name, part);
+    auf.region_set(part);
     // Run for a few seconds - that gives time to open a menu,
     // and the capturer has settled.
-    let ende = std::time::Instant::now() + std::time::Duration::from_secs(warte);
-    let mut letztes = None;
-    while std::time::Instant::now() < ende {
-        if let Some(b) = auf.neuestes() {
-            letztes = Some(b);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(warte);
+    let mut last = None;
+    while std::time::Instant::now() < end {
+        if let Some(b) = auf.newest() {
+            last = Some(b);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    match letztes {
+    match last {
         Some(b) => {
             let mut rgba = Vec::new();
             if h264::nv12_to_rgba(&b.nv12, b.width_px, b.height_px, b.width_px as usize, b.height_px, &mut rgba)
@@ -206,7 +206,7 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
         }
         None => println!("SCHIRMSHOT KEIN BILD ({})", auf.error()),
     }
-    auf.stoppen();
+    auf.stop_capture();
     return Ok(());
 }
 
@@ -216,10 +216,10 @@ pub(crate) fn cli_schirmshot(i: usize) -> eframe::Result<()> {
 //   freeviewer --camtest [width_px height_px fps] [dir]
 pub(crate) fn cli_camtest(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let zahl = |n: usize, vor: u32| -> u32 {
+    let number = |n: usize, vor: u32| -> u32 {
         args.get(n).and_then(|v| v.parse::<u32>().ok()).unwrap_or(vor)
     };
-    let (w, h, fps) = (zahl(i + 1, 640), zahl(i + 2, 360), zahl(i + 3, 15));
+    let (w, h, fps) = (number(i + 1, 640), number(i + 2, 360), number(i + 3, 15));
     let dir = args
         .get(i + 4)
         .cloned()
@@ -228,7 +228,7 @@ pub(crate) fn cli_camtest(i: usize) -> eframe::Result<()> {
     return Ok(());
 }
 
-pub(crate) fn cli_kameraliste() -> eframe::Result<()> {
+pub(crate) fn cli_camera_list() -> eframe::Result<()> {
     let l = meetcam::liste();
     println!("KAMERAS {}", l.len());
     for (i, k) in l.iter().enumerate() {
@@ -310,12 +310,12 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
 
     // ---- The meeting window. Join screen once via the real
     // path (with device query), the running meeting via an assembled
-    // `Sicht` - this shows full stage, chat,
+    // `MeetView` - this shows full stage, chat,
     // waiting room and screen share without server and camera.
     app.headless = true;
     app.meet_win_open(meet::Meeting {
         id: "482-913-770".to_string(),
-        titel: "Wochenbesprechung".to_string(),
+        heading: "Wochenbesprechung".to_string(),
         passphrase: "test1234".to_string(),
         termin_text: String::new(),
         e2e: String::new(),
@@ -340,10 +340,10 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     // Waiting room and join screen also belong in the test.
     {
         let _ = ctx.run(meetschirm(920.0, 640.0), |ctx| {
-            meetwindow::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            meetwindow::waiting_screen_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
         });
         let out = ctx.run(meetschirm(920.0, 640.0), |ctx| {
-            meetwindow::warteschirm_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
+            meetwindow::waiting_screen_ui(ctx, "Wochenbesprechung", "Gleich gehts los.");
         });
         println!("Meet Warteschirm: {} Formen gezeichnet", out.shapes.len());
         if out.shapes.len() < 12 {
@@ -352,16 +352,16 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     }
     // Render all example states - the same ones --meetdemo
     // later shows as a real image.
-    let bilder = meetwindow::pruefbilder(&ctx);
-    for i in 0..meetwindow::BEISPIELE {
-        let (name, sicht, mut z) = meetwindow::beispiel(i);
+    let images = meetwindow::test_images(&ctx);
+    for i in 0..meetwindow::EXAMPLES {
+        let (name, view_state, mut z) = meetwindow::example(i);
         let (b, h) = if name.starts_with("Info") { (560.0, 430.0) } else { (1100.0, 720.0) };
         // Twice: the first frame creates ids and textures.
         let _ = ctx.run(meetschirm(b, h), |ctx| {
-            meetwindow::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            meetwindow::meeting_ui(ctx, &view_state, &mut z, &images);
         });
         let out = ctx.run(meetschirm(b, h), |ctx| {
-            meetwindow::meeting_ui(ctx, &sicht, &mut z, &bilder);
+            meetwindow::meeting_ui(ctx, &view_state, &mut z, &images);
         });
         let shapes = out.shapes.len();
         println!("Meet {}: {} Formen gezeichnet", name, shapes);
@@ -373,12 +373,12 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
     // has to draw them too, otherwise an error in there is only noticed by
     // the user, because it never appears in the main window.
     let mut pipzahl = std::collections::HashMap::new();
-    for (nr, selbst) in [(2usize, true), (2, false), (0, true), (0, false)] {
-        let (_, sicht, _) = meetwindow::beispiel(nr);
-        let mut mich = selbst;
+    for (nr, myself) in [(2usize, true), (2, false), (0, true), (0, false)] {
+        let (_, view_state, _) = meetwindow::example(nr);
+        let mut mich = myself;
         let mal = |ctx: &egui::Context, mich: &mut bool| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                meetwindow::pip_inhalt(ui, &sicht, &bilder, mich);
+                meetwindow::pip_content(ui, &view_state, &images, mich);
             });
         };
         let _ = ctx.run(meetschirm(260.0, 330.0), |ctx| mal(ctx, &mut mich));
@@ -386,13 +386,13 @@ pub(crate) fn cli_uitest(shared: Arc<Shared>) -> eframe::Result<()> {
         let n = out.shapes.len();
         println!(
             "Meet Bild-im-Bild (Beispiel {}, eigen {}): {} Formen gezeichnet",
-            nr, selbst, n
+            nr, myself, n
         );
         // Four round buttons and a background - something is missing underneath.
         if n < 12 {
             ok = false;
         }
-        pipzahl.insert((nr, selbst), n);
+        pipzahl.insert((nr, myself), n);
     }
     // The own tile MUST make a difference - otherwise the
     // switch would have no effect and nobody would notice.

@@ -60,7 +60,7 @@ fn own_windows() -> Vec<windows::Win32::Foundation::HWND> {
     };
     /// # Safety
     /// Only valid as the EnumWindows callback: `l` must be the `*mut Vec<HWND>` passed by `own_windows`.
-    unsafe extern "system" fn sammeln(h: HWND, l: LPARAM) -> BOOL {
+    unsafe extern "system" fn collect_windows(h: HWND, l: LPARAM) -> BOOL {
         let liste = &mut *(l.0 as *mut Vec<HWND>);
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
@@ -70,9 +70,9 @@ fn own_windows() -> Vec<windows::Win32::Foundation::HWND> {
         BOOL::from(true)
     }
     let mut liste: Vec<HWND> = Vec::new();
-    // SAFETY: EnumWindows is synchronous; the Vec behind LPARAM outlives it and only `sammeln` touches it.
+    // SAFETY: EnumWindows is synchronous; the Vec behind LPARAM outlives it and only `collect_windows` touches it.
     unsafe {
-        let _ = EnumWindows(Some(sammeln), LPARAM(&mut liste as *mut _ as isize));
+        let _ = EnumWindows(Some(collect_windows), LPARAM(&mut liste as *mut _ as isize));
     }
     liste
 }

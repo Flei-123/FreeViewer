@@ -22,7 +22,7 @@ use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use crate::meetcam::Bild;
+pub use crate::meetcam::Image;
 
 /// Ein teilbarer Display.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,7 +30,7 @@ pub struct Screen {
     pub name: String,
     pub width_px: u32,
     pub height_px: u32,
-    pub primaer: bool,
+    pub is_primary: bool,
 }
 
 /// WHAT is shared: a whole screen or exactly one window.
@@ -40,18 +40,18 @@ pub struct Screen {
 /// breaks off (resolution changed, session switched). For that it needs
 /// the specification from which it opened it in the first place.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Quelle {
+pub enum Source {
     /// Index aus `liste()`.
     Display(usize),
     /// Window id from `crate::window::liste()`.
     Window(isize),
 }
 
-impl Quelle {
+impl Source {
     fn open(&self) -> Option<Box<dyn crate::capture::Backend>> {
         match self {
-            Quelle::Display(i) => crate::capture::open_index(true, *i),
-            Quelle::Window(k) => crate::window::aufnahme(*k),
+            Source::Display(i) => crate::capture::open_index(true, *i),
+            Source::Window(k) => crate::window::recording(*k),
         }
     }
 
@@ -59,10 +59,10 @@ impl Quelle {
     /// Needed for the red frame.
     pub fn lage(&self) -> Option<(i32, i32, i32, i32)> {
         match self {
-            Quelle::Display(i) => crate::capture::list_monitors(true)
+            Source::Display(i) => crate::capture::list_monitors(true)
                 .get(*i)
                 .map(|m| (m.x, m.y, m.w as i32, m.h as i32)),
-            Quelle::Window(k) => crate::window::lage(*k),
+            Source::Window(k) => crate::window::lage(*k),
         }
     }
 }
@@ -75,14 +75,14 @@ pub fn liste() -> Vec<Screen> {
             name: m.name,
             width_px: m.w,
             height_px: m.h,
-            primaer: m.primary,
+            is_primary: m.primary,
         })
         .collect()
 }
 
 /// Target size: keep the aspect ratio, fit into `max_b` x `max_h`,
 /// even edge lengths (NV12 needs that).
-pub fn zielgroesse(sb: u32, sh: u32, max_b: u32, max_h: u32) -> (u32, u32) {
+pub fn target_size(sb: u32, sh: u32, max_b: u32, max_h: u32) -> (u32, u32) {
     if sb < 2 || sh < 2 {
         return (2, 2);
     }
@@ -98,9 +98,9 @@ pub fn zielgroesse(sb: u32, sh: u32, max_b: u32, max_h: u32) -> (u32, u32) {
 
 /// The area that is sent from - as a fraction of the screen.
 /// (0,0,1,1) = the whole screen.
-pub type Bereich = (f32, f32, f32, f32);
+pub type Region = (f32, f32, f32, f32);
 
-pub const GANZ: Bereich = (0.0, 0.0, 1.0, 1.0);
+pub const WHOLE: Region = (0.0, 0.0, 1.0, 1.0);
 
 /// Turn the wishes of ALL viewers into one area that is sent.
 ///
@@ -118,19 +118,19 @@ pub const GANZ: Bereich = (0.0, 0.0, 1.0, 1.0);
 /// the same aspect ratio) - otherwise the sent image would be distorted - and
 /// gets some margin so that small mouse movements do not constantly trigger a new
 /// crop.
-pub fn bereich_vereinen(wuensche: &[Bereich]) -> Bereich {
-    let echte: Vec<&Bereich> = wuensche
+pub fn region_merge(wishes: &[Region]) -> Region {
+    let real: Vec<&Region> = wishes
         .iter()
         .filter(|(_, _, w, h)| *w > 0.001 && *h > 0.001)
         .collect();
-    if echte.is_empty() {
-        return GANZ;
+    if real.is_empty() {
+        return WHOLE;
     }
     let mut x0 = 1.0f32;
     let mut y0 = 1.0f32;
     let mut x1 = 0.0f32;
     let mut y1 = 0.0f32;
-    for (x, y, w, h) in echte {
+    for (x, y, w, h) in real {
         x0 = x0.min(x.clamp(0.0, 1.0));
         y0 = y0.min(y.clamp(0.0, 1.0));
         x1 = x1.max((x + w).clamp(0.0, 1.0));
@@ -148,7 +148,7 @@ pub fn bereich_vereinen(wuensche: &[Bereich]) -> Bereich {
     // Not worth it: almost the whole screen -> better without a crop, then
     // the fast path via the graphics card applies.
     if k > 0.92 {
-        return GANZ;
+        return WHOLE;
     }
     let x = (mx - k * 0.5).clamp(0.0, 1.0 - k);
     let y = (my - k * 0.5).clamp(0.0, 1.0 - k);
@@ -157,7 +157,7 @@ pub fn bereich_vereinen(wuensche: &[Bereich]) -> Bereich {
 
 /// Is a change of the sent area worthwhile? Tiny shifts are not
 /// worth it - every change costs a keyframe.
-pub fn bereich_lohnt_wechsel(alt: Bereich, neu: Bereich) -> bool {
+pub fn region_worth_switch(alt: Region, neu: Region) -> bool {
     let d = (alt.0 - neu.0).abs().max((alt.1 - neu.1).abs());
     let s = (alt.2 - neu.2).abs();
     // 4 % Verschiebung oder 6 % Groessenaenderung.
@@ -167,7 +167,7 @@ pub fn bereich_lohnt_wechsel(alt: Bereich, neu: Bereich) -> bool {
 /// Scale a captured image (BGRA or RGBA) down to `zb` x `zh` and
 /// convert to NV12. Area average instead of nearest neighbour - otherwise
 /// text flickers unreadably when scaled down.
-pub fn bild_nach_nv12(
+pub fn image_to_nv12(
     px: &[u8],
     sb: u32,
     sh: u32,
@@ -176,20 +176,20 @@ pub fn bild_nach_nv12(
     zh: u32,
     out: &mut Vec<u8>,
 ) -> bool {
-    bild_nach_nv12_teil(px, sb, sh, bgra, GANZ, zb, zh, out)
+    image_to_nv12_part(px, sb, sh, bgra, WHOLE, zb, zh, out)
 }
 
-/// Like `bild_nach_nv12`, but only a SECTION of the capture (fractions
+/// Like `image_to_nv12`, but only a SECTION of the capture (fractions
 /// 0..1). This way, when zooming in, not the whole screen is
 /// scaled down, but the interesting part is sent in full sharpness -
 /// at the same encode size and thus the same bandwidth.
 #[allow(clippy::too_many_arguments)]
-pub fn bild_nach_nv12_teil(
+pub fn image_to_nv12_part(
     px: &[u8],
     sb: u32,
     sh: u32,
     bgra: bool,
-    teil: Bereich,
+    part: Region,
     zb: u32,
     zh: u32,
     out: &mut Vec<u8>,
@@ -202,7 +202,7 @@ pub fn bild_nach_nv12_teil(
     }
     // Convert the section to pixels. Everything stays within the image - a
     // section that sticks out would show garbage at the edge.
-    let (ax, ay, aw, ah) = teil;
+    let (ax, ay, aw, ah) = part;
     let ox = ((ax.clamp(0.0, 1.0) * sbu as f32) as usize).min(sbu.saturating_sub(2));
     let oy = ((ay.clamp(0.0, 1.0) * shu as f32) as usize).min(shu.saturating_sub(2));
     let aw = ((aw.clamp(0.0, 1.0) * sbu as f32) as usize).max(2).min(sbu - ox);
@@ -219,9 +219,9 @@ pub fn bild_nach_nv12_teil(
             let x1 = (ox + (tx + 1) * aw / zbu).max(x0 + 1).min(ox + aw);
             let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in y0..y1 {
-                let zeile = y * sbu * 4;
+                let text_row = y * sbu * 4;
                 for x in x0..x1 {
-                    let i = zeile + x * 4;
+                    let i = text_row + x * 4;
                     r += px[i + ri] as u32;
                     g += px[i + gi] as u32;
                     b += px[i + bi] as u32;
@@ -253,10 +253,10 @@ pub fn bild_nach_nv12_teil(
 /// moves, so the position has to be fetched fresh on every call.
 /// If the pointer is outside, None comes - an invented position would be
 /// worse than none at all.
-pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
+pub fn pointer_share_source(q: Source) -> Option<(f32, f32)> {
     match q {
-        Quelle::Display(i) => zeiger_anteil(i),
-        Quelle::Window(_) => {
+        Source::Display(i) => pointer_share(i),
+        Source::Window(_) => {
             #[cfg(windows)]
             {
                 use windows::Win32::Foundation::POINT;
@@ -284,7 +284,7 @@ pub fn zeiger_anteil_quelle(q: Quelle) -> Option<(f32, f32)> {
     }
 }
 
-pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
+pub fn pointer_share(index: usize) -> Option<(f32, f32)> {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::POINT;
@@ -319,7 +319,7 @@ pub fn zeiger_anteil(index: usize) -> Option<(f32, f32)> {
 /// on top. Whoever does nothing sees no pointer when watching; only
 /// when dragging a window one flashes up, because Windows then
 /// really paints the drag into the image. That is exactly what Justin observed.
-const PFEIL: &[(f32, f32)] = &[
+const ARROW: &[(f32, f32)] = &[
     (0.0, 0.0),
     (0.0, 16.0),
     (3.6, 12.4),
@@ -333,27 +333,27 @@ const PFEIL: &[(f32, f32)] = &[
 ///
 /// `x`/`y` is the tip in pixels. White with a dark border - so it stays
 /// visible on light AS WELL AS dark ground.
-pub fn zeiger_malen(nv12: &mut [u8], w: u32, h: u32, x: i32, y: i32, groesse: f32) {
+pub fn pointer_paint(nv12: &mut [u8], w: u32, h: u32, x: i32, y: i32, dimension: f32) {
     let (wu, hu) = (w as usize, h as usize);
-    if nv12.len() < wu * hu * 3 / 2 || groesse <= 0.0 {
+    if nv12.len() < wu * hu * 3 / 2 || dimension <= 0.0 {
         return;
     }
-    let s = groesse / 19.0;
-    let punkte: Vec<(f32, f32)> = PFEIL
+    let s = dimension / 19.0;
+    let points: Vec<(f32, f32)> = ARROW
         .iter()
         .map(|(px, py)| (x as f32 + px * s, y as f32 + py * s))
         .collect();
-    let oben = punkte.iter().fold(f32::MAX, |a, p| a.min(p.1)).floor() as i32;
-    let unten = punkte.iter().fold(f32::MIN, |a, p| a.max(p.1)).ceil() as i32;
+    let top_y = points.iter().fold(f32::MAX, |a, p| a.min(p.1)).floor() as i32;
+    let bottom = points.iter().fold(f32::MIN, |a, p| a.max(p.1)).ceil() as i32;
     // Two passes: first the dark border (somewhat thicker), then white.
     for (dick, hell) in [(1.6 * s.max(1.0), 16u8), (0.0, 235u8)] {
-        for zy in oben.max(0)..=unten.min(hu as i32 - 1) {
+        for zy in top_y.max(0)..=bottom.min(hu as i32 - 1) {
             // Collect the intersections of the scanline with the outline.
             let mut xs: Vec<f32> = Vec::new();
             let mitte = zy as f32 + 0.5;
-            for i in 0..punkte.len() {
-                let (x1, y1) = punkte[i];
-                let (x2, y2) = punkte[(i + 1) % punkte.len()];
+            for i in 0..points.len() {
+                let (x1, y1) = points[i];
+                let (x2, y2) = points[(i + 1) % points.len()];
                 if (y1 <= mitte && y2 > mitte) || (y2 <= mitte && y1 > mitte) {
                     xs.push(x1 + (mitte - y1) / (y2 - y1) * (x2 - x1));
                 }
@@ -383,51 +383,51 @@ pub fn zeiger_malen(nv12: &mut [u8], w: u32, h: u32, x: i32, y: i32, groesse: f3
 }
 
 /// Running screen capture. Only ever holds the NEWEST frame ready.
-pub struct Aufnahme {
+pub struct Recording {
     pub name: String,
     pub width_px: u32,
     pub height_px: u32,
     /// Where the image comes from (screen or window).
-    pub quelle: Quelle,
-    neu: Arc<Mutex<Option<Bild>>>,
+    pub origin: Source,
+    neu: Arc<Mutex<Option<Image>>>,
     ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<String>>,
     /// Which part of the screen is sent (fractions). The
     /// capture thread reads this on EVERY frame - so a change takes effect immediately,
     /// without reopening the capture.
-    bereich: Arc<Mutex<Bereich>>,
+    region: Arc<Mutex<Region>>,
 }
 
-impl Aufnahme {
+impl Recording {
     /// Send only this section (fractions 0..1). GANZ = everything again.
-    pub fn bereich_setzen(&self, b: Bereich) {
-        if let Ok(mut g) = self.bereich.lock() {
+    pub fn region_set(&self, b: Region) {
+        if let Ok(mut g) = self.region.lock() {
             *g = b;
         }
     }
-    pub fn bereich(&self) -> Bereich {
-        self.bereich.lock().map(|g| *g).unwrap_or(GANZ)
+    pub fn region(&self) -> Region {
+        self.region.lock().map(|g| *g).unwrap_or(WHOLE)
     }
 
     /// Pick up the newest frame (and take it out of the buffer).
-    pub fn neuestes(&self) -> Option<Bild> {
+    pub fn newest(&self) -> Option<Image> {
         self.neu.lock().ok().and_then(|mut b| b.take())
     }
-    pub fn aufgenommen(&self) -> u64 {
+    pub fn recorded(&self) -> u64 {
         self.ctr.load(Ordering::Relaxed)
     }
     pub fn error(&self) -> String {
         self.error.lock().map(|f| f.clone()).unwrap_or_default()
     }
-    pub fn stoppen(&self) {
+    pub fn stop_capture(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 }
 
-impl Drop for Aufnahme {
+impl Drop for Recording {
     fn drop(&mut self) {
-        self.stoppen();
+        self.stop_capture();
     }
 }
 
@@ -435,36 +435,36 @@ impl Drop for Aufnahme {
 ///
 /// `max_b`/`max_h` limit the transmission size (aspect ratio
 /// is preserved), `fps` is the upper limit of the frame rate.
-pub fn open(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
-    open_source(Quelle::Display(index), max_b, max_h, fps)
+pub fn open(index: usize, max_b: u32, max_h: u32, fps: u32) -> Result<Recording> {
+    open_source(Source::Display(index), max_b, max_h, fps)
 }
 
 /// Like `open`, but the source may also be a single window.
-pub fn open_source(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<Aufnahme> {
+pub fn open_source(origin: Source, max_b: u32, max_h: u32, fps: u32) -> Result<Recording> {
     let fps = fps.clamp(1, 60);
-    let neu: Arc<Mutex<Option<Bild>>> = Arc::new(Mutex::new(None));
+    let neu: Arc<Mutex<Option<Image>>> = Arc::new(Mutex::new(None));
     let ctr = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let error = Arc::new(Mutex::new(String::new()));
-    let bereich = Arc::new(Mutex::new(GANZ));
+    let region = Arc::new(Mutex::new(WHOLE));
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(String, u32, u32), String>>();
     let (n2, z2, s2, f2) = (neu.clone(), ctr.clone(), stop.clone(), error.clone());
-    let b2 = bereich.clone();
+    let b2 = region.clone();
     std::thread::Builder::new()
         .name("meetschirm".into())
-        .spawn(move || schleife(quelle, max_b, max_h, fps, tx, n2, z2, s2, f2, b2))
+        .spawn(move || event_loop(origin, max_b, max_h, fps, tx, n2, z2, s2, f2, b2))
         .map_err(|e| anyhow!("Bildschirmfaden: {}", e))?;
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(Ok((name, b, h))) => Ok(Aufnahme {
+        Ok(Ok((name, b, h))) => Ok(Recording {
             name,
             width_px: b,
             height_px: h,
-            quelle,
+            origin,
             neu,
             ctr,
             stop,
             error,
-            bereich,
+            region,
         }),
         Ok(Err(e)) => Err(anyhow!(e)),
         Err(_) => {
@@ -475,39 +475,39 @@ pub fn open_source(quelle: Quelle, max_b: u32, max_h: u32, fps: u32) -> Result<A
 }
 
 #[allow(clippy::too_many_arguments)]
-fn schleife(
-    quelle: Quelle,
+fn event_loop(
+    origin: Source,
     max_b: u32,
     max_h: u32,
     fps: u32,
     tx: std::sync::mpsc::Sender<std::result::Result<(String, u32, u32), String>>,
-    neu: Arc<Mutex<Option<Bild>>>,
+    neu: Arc<Mutex<Option<Image>>>,
     ctr: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<String>>,
-    bereich: Arc<Mutex<Bereich>>,
+    region: Arc<Mutex<Region>>,
 ) {
-    let mut backend = match quelle.open() {
+    let mut backend = match origin.open() {
         Some(b) => b,
         None => {
-            let _ = tx.send(Err(match quelle {
-                Quelle::Display(_) => "kein Bildschirm aufnehmbar".to_string(),
-                Quelle::Window(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
+            let _ = tx.send(Err(match origin {
+                Source::Display(_) => "kein Bildschirm aufnehmbar".to_string(),
+                Source::Window(_) => "dieses Fenster laesst sich nicht aufnehmen".to_string(),
             }));
             return;
         }
     };
     let (sb, sh) = backend.size();
-    let (zb, zh) = zielgroesse(sb, sh, max_b, max_h);
-    let display_name = match quelle {
-        Quelle::Display(index) => crate::capture::list_monitors(true)
+    let (zb, zh) = target_size(sb, sh, max_b, max_h);
+    let display_name = match origin {
+        Source::Display(index) => crate::capture::list_monitors(true)
             .get(index)
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("Bildschirm {}", index + 1)),
-        Quelle::Window(k) => crate::window::liste()
+        Source::Window(k) => crate::window::liste()
             .into_iter()
-            .find(|f| f.kennung == k)
-            .map(|f| f.titel)
+            .find(|f| f.tag == k)
+            .map(|f| f.heading)
             .unwrap_or_else(|| "Fenster".to_string()),
     };
     let name = format!("{} ({}x{} -> {}x{}, {})", display_name, sb, sh, zb, zh, backend.name());
@@ -515,28 +515,28 @@ fn schleife(
         return;
     }
 
-    let takt = (1000 / fps).max(8);
+    let beat = (1000 / fps).max(8);
     let mut nv12: Vec<u8> = Vec::new();
     // Refresh: even without change an image every 400 ms, otherwise
     // a late joiner sees nothing.
-    let mut letzte_lieferung = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    let mut verluste = 0u32;
+    let mut last_delivery = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let mut losses = 0u32;
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let was = backend.next(takt);
+        let was = backend.next(beat);
         let liefern = match was {
             crate::capture::Next::Frame => true,
             crate::capture::Next::Unchanged => {
-                letzte_lieferung.elapsed() >= std::time::Duration::from_millis(400)
+                last_delivery.elapsed() >= std::time::Duration::from_millis(400)
             }
             crate::capture::Next::Lost => {
-                verluste += 1;
+                losses += 1;
                 if let Ok(mut f) = error.lock() {
-                    *f = format!("Aufnahme abgerissen ({}. Mal) - neu geoeffnet", verluste);
+                    *f = format!("Aufnahme abgerissen ({}. Mal) - neu geoeffnet", losses);
                 }
-                match quelle.open() {
+                match origin.open() {
                     Some(b) => {
                         backend = b;
                         std::thread::sleep(std::time::Duration::from_millis(120));
@@ -544,11 +544,11 @@ fn schleife(
                     }
                     None => {
                         if let Ok(mut f) = error.lock() {
-                            *f = match quelle {
-                                Quelle::Display(_) => "Bildschirm nicht mehr aufnehmbar".into(),
+                            *f = match origin {
+                                Source::Display(_) => "Bildschirm nicht mehr aufnehmbar".into(),
                                 // For a window the most common reason
                                 // is simply: it was closed.
-                                Quelle::Window(_) => "Das geteilte Fenster ist weg".to_string(),
+                                Source::Window(_) => "Das geteilte Fenster ist weg".to_string(),
                             };
                         }
                         return;
@@ -559,7 +559,7 @@ fn schleife(
         if !liefern {
             continue;
         }
-        let teil = bereich.lock().map(|g| *g).unwrap_or(GANZ);
+        let part = region.lock().map(|g| *g).unwrap_or(WHOLE);
         // Fast path: the graphics card crops, scales and converts
         // in one go.
         //
@@ -568,7 +568,7 @@ fn schleife(
         // reads the full image back into RAM (saves PCIe) -
         // frame() then returns an old or empty buffer. That is exactly why
         // the sharp zoom turned black from about 140 %.
-        let done = match backend.scaled_teil(zb, zh, true, teil) {
+        let done = match backend.scaled_part(zb, zh, true, part) {
             Some(daten) if daten.len() >= (zb as usize * zh as usize * 3 / 2) => {
                 nv12.clear();
                 nv12.extend_from_slice(&daten[..(zb as usize * zh as usize * 3 / 2)]);
@@ -578,7 +578,7 @@ fn schleife(
                 // Without the graphics card path (older device, xcap fallback)
                 // the full image really lies in main memory.
                 let (px, sb2, sh2, bgra) = backend.frame();
-                bild_nach_nv12_teil(px, sb2, sh2, bgra, teil, zb, zh, &mut nv12)
+                image_to_nv12_part(px, sb2, sh2, bgra, part, zb, zh, &mut nv12)
             }
         };
         if !done {
@@ -587,21 +587,21 @@ fn schleife(
         // Paint the mouse pointer into the image. Windows does NOT put it in
         // during capture - without this step the viewer never sees where
         // is being pointed.
-        if let Some((fx, fy)) = zeiger_anteil_quelle(quelle) {
-            let (tx, ty, tw, th) = teil;
+        if let Some((fx, fy)) = pointer_share_source(origin) {
+            let (tx, ty, tw, th) = part;
             if fx >= tx && fy >= ty && fx <= tx + tw && fy <= ty + th {
                 let px = ((fx - tx) / tw.max(0.0001) * zb as f32) as i32;
                 let py = ((fy - ty) / th.max(0.0001) * zh as f32) as i32;
                 // When zooming in the pointer is enlarged along with it - otherwise
                 // it would be tiny in the section.
                 let gr = (22.0 / tw.max(0.05)).clamp(18.0, 60.0);
-                zeiger_malen(&mut nv12, zb, zh, px, py, gr);
+                pointer_paint(&mut nv12, zb, zh, px, py, gr);
             }
         }
-        letzte_lieferung = std::time::Instant::now();
+        last_delivery = std::time::Instant::now();
         ctr.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut b) = neu.lock() {
-            *b = Some(Bild {
+            *b = Some(Image {
                 width_px: zb,
                 height_px: zh,
                 nv12: nv12.clone(),
@@ -615,12 +615,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zielgroesse_behaelt_das_verhaeltnis_und_wird_gerade() {
-        let (b, h) = zielgroesse(3840, 2160, 1920, 1080);
+    fn target_size_keeps_ratio_and_becomes_even() {
+        let (b, h) = target_size(3840, 2160, 1920, 1080);
         assert_eq!((b, h), (1920, 1080));
-        let (b, h) = zielgroesse(1366, 768, 1920, 1080);
+        let (b, h) = target_size(1366, 768, 1920, 1080);
         assert_eq!((b, h), (1366, 768), "small screen is not scaled up");
-        let (b, h) = zielgroesse(2560, 1080, 1920, 1080);
+        let (b, h) = target_size(2560, 1080, 1920, 1080);
         assert!(b <= 1920 && h <= 1080, "{}x{}", b, h);
         assert!(b % 2 == 0 && h % 2 == 0, "ungerade Kante {}x{}", b, h);
         // 21:9 bleibt 21:9 (auf 1 % genau)
@@ -632,18 +632,18 @@ mod tests {
     /// The pointer must REALLY get into the image - and only where it
     /// belongs. Without this test it is only noticed by the viewer.
     #[test]
-    fn zeiger_landet_im_bild() {
+    fn pointer_lands_in_image() {
         let (w, h) = (64u32, 48u32);
         let mut nv12 = vec![100u8; (w * h * 3 / 2) as usize];
-        zeiger_malen(&mut nv12, w, h, 20, 10, 19.0);
+        pointer_paint(&mut nv12, w, h, 20, 10, 19.0);
         let y = &nv12[..(w * h) as usize];
         // At the tip there must be something light or dark, no longer 100.
-        let umgebung: Vec<u8> = (10..14)
+        let environment: Vec<u8> = (10..14)
             .flat_map(|zy| (20..24).map(move |zx| (zy, zx)))
             .map(|(zy, zx)| y[zy * w as usize + zx])
             .collect();
         assert!(
-            umgebung.iter().any(|v| *v != 100),
+            environment.iter().any(|v| *v != 100),
             "nothing was drawn at the pointer tip"
         );
         // Weit weg darf nichts angefasst worden sein.
@@ -654,36 +654,36 @@ mod tests {
     }
 
     #[test]
-    fn zeiger_malt_nie_ueber_den_rand_hinaus() {
+    fn pointer_never_paints_beyond_the_edge() {
         let (w, h) = (32u32, 24u32);
         let length = (w * h * 3 / 2) as usize;
         for (x, y) in [(-5i32, -5i32), (31, 23), (0, 0), (100, 100)] {
             let mut nv12 = vec![50u8; length];
-            zeiger_malen(&mut nv12, w, h, x, y, 19.0);
+            pointer_paint(&mut nv12, w, h, x, y, 19.0);
             assert_eq!(nv12.len(), length, "Puffer veraendert");
         }
     }
 
     #[test]
-    fn zeiger_laesst_zu_kleine_puffer_in_ruhe() {
+    fn pointer_leaves_too_small_buffers_alone() {
         let mut klein = vec![7u8; 10];
-        zeiger_malen(&mut klein, 64, 48, 5, 5, 19.0);
+        pointer_paint(&mut klein, 64, 48, 5, 5, 19.0);
         assert!(klein.iter().all(|v| *v == 7));
     }
 
     #[test]
     fn without_wish_the_whole_screen_goes_out() {
-        assert_eq!(bereich_vereinen(&[]), GANZ);
-        assert_eq!(bereich_vereinen(&[(0.0, 0.0, 1.0, 1.0)]), GANZ);
+        assert_eq!(region_merge(&[]), WHOLE);
+        assert_eq!(region_merge(&[(0.0, 0.0, 1.0, 1.0)]), WHOLE);
         // Almost everything is also everything - otherwise the fast path via the
         // graphics card is dropped for nothing.
-        assert_eq!(bereich_vereinen(&[(0.02, 0.02, 0.9, 0.9)]), GANZ);
+        assert_eq!(region_merge(&[(0.02, 0.02, 0.9, 0.9)]), WHOLE);
     }
 
     #[test]
-    fn ein_zuschauer_bekommt_seinen_ausschnitt_mit_rand() {
+    fn viewer_gets_his_crop_with_border() {
         // Centre, a quarter of the edge.
-        let (x, y, w, h) = bereich_vereinen(&[(0.375, 0.375, 0.25, 0.25)]);
+        let (x, y, w, h) = region_merge(&[(0.375, 0.375, 0.25, 0.25)]);
         assert!((w - h).abs() < 1e-6, "muss quadratisch bleiben");
         assert!(w > 0.25 && w < 0.4, "border missing or too big: {}", w);
         // still centred
@@ -692,10 +692,10 @@ mod tests {
     }
 
     #[test]
-    fn zwei_zuschauer_bekommen_die_huelle_um_beide() {
+    fn two_viewers_get_the_hull_around_both() {
         let a = (0.05, 0.05, 0.1, 0.1);
         let b = (0.55, 0.55, 0.1, 0.1);
-        let (x, y, w, h) = bereich_vereinen(&[a, b]);
+        let (x, y, w, h) = region_merge(&[a, b]);
         assert!((w - h).abs() < 1e-6);
         // Both wishes must really lie inside - otherwise one
         // of the two would see the wrong section.
@@ -707,30 +707,30 @@ mod tests {
     }
 
     #[test]
-    fn bereich_bleibt_immer_im_bild() {
-        for wunsch in [
+    fn region_always_stays_in_frame() {
+        for wish in [
             (0.0, 0.0, 0.2, 0.2),
             (0.9, 0.9, 0.2, 0.2),
             (-0.5, 0.8, 0.3, 0.3),
         ] {
-            let (x, y, w, h) = bereich_vereinen(&[wunsch]);
+            let (x, y, w, h) = region_merge(&[wish]);
             assert!(x >= -1e-6 && y >= -1e-6, "links/oben raus: {:?}", (x, y));
             assert!(x + w <= 1.0 + 1e-6 && y + h <= 1.0 + 1e-6, "rechts/unten raus");
         }
     }
 
     #[test]
-    fn kleine_zuckungen_loesen_keinen_wechsel_aus() {
+    fn small_twitches_trigger_no_switch() {
         let a = (0.30, 0.30, 0.30, 0.30);
-        assert!(!bereich_lohnt_wechsel(a, (0.31, 0.31, 0.30, 0.30)));
-        assert!(bereich_lohnt_wechsel(a, (0.40, 0.30, 0.30, 0.30)));
-        assert!(bereich_lohnt_wechsel(a, (0.30, 0.30, 0.20, 0.20)));
+        assert!(!region_worth_switch(a, (0.31, 0.31, 0.30, 0.30)));
+        assert!(region_worth_switch(a, (0.40, 0.30, 0.30, 0.30)));
+        assert!(region_worth_switch(a, (0.30, 0.30, 0.20, 0.20)));
     }
 
     /// The core of the matter: from a section REALLY only this
     /// section comes out - and in full target size, i.e. with real pixels.
     #[test]
-    fn ausschnitt_sendet_nur_den_ausschnitt() {
+    fn crop_sends_only_the_crop() {
         // 40x40, linke Haelfte schwarz, rechte Haelfte weiss.
         let (sb, sh) = (40u32, 40u32);
         let mut px = vec![0u8; (sb * sh * 4) as usize];
@@ -744,14 +744,14 @@ mod tests {
         }
         let mut nv12 = Vec::new();
         // Send only the RIGHT half -> everything must be light.
-        assert!(bild_nach_nv12_teil(&px, sb, sh, true, (0.5, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
+        assert!(image_to_nv12_part(&px, sb, sh, true, (0.5, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
         let y = &nv12[..16 * 16];
         assert!(
             y.iter().all(|v| *v > 200),
             "the crop does not show the right half"
         );
         // And the LEFT half -> everything dark.
-        assert!(bild_nach_nv12_teil(&px, sb, sh, true, (0.0, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
+        assert!(image_to_nv12_part(&px, sb, sh, true, (0.0, 0.0, 0.5, 0.5), 16, 16, &mut nv12));
         let y = &nv12[..16 * 16];
         assert!(y.iter().all(|v| *v < 60), "left crop is not dark");
     }
@@ -768,7 +768,7 @@ mod tests {
             p[3] = 255;
         }
         let mut nv12 = Vec::new();
-        assert!(bild_nach_nv12(&px, sb, sh, true, 32, 16, &mut nv12));
+        assert!(image_to_nv12(&px, sb, sh, true, 32, 16, &mut nv12));
         assert_eq!(nv12.len(), 32 * 16 * 3 / 2);
         // Y of red is around 82 (BT.601) - clearly away from 0 and 255.
         let y0 = nv12[0];
@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn bild_nach_nv12_mittelt_beim_verkleinern() {
+    fn image_to_nv12_averages_when_shrinking() {
         // Black on the left, white on the right: after scaling down the left must stay
         // dark and the right light (no offset, no uniform grey).
         let (sb, sh) = (64u32, 32u32);
@@ -790,18 +790,18 @@ mod tests {
             }
         }
         let mut nv12 = Vec::new();
-        assert!(bild_nach_nv12(&px, sb, sh, false, 16, 8, &mut nv12));
+        assert!(image_to_nv12(&px, sb, sh, false, 16, 8, &mut nv12));
         let links = nv12[0];
-        let rechts = nv12[15];
+        let right_side = nv12[15];
         assert!(links < 40, "links sollte dunkel sein: {}", links);
-        assert!(rechts > 200, "rechts sollte hell sein: {}", rechts);
+        assert!(right_side > 200, "rechts sollte hell sein: {}", right_side);
     }
 
     #[test]
-    fn zu_kleine_eingaben_werden_abgelehnt_statt_zu_stuerzen() {
+    fn too_small_inputs_are_rejected_instead_of_crashing() {
         let mut out = Vec::new();
-        assert!(!bild_nach_nv12(&[0u8; 4], 1, 1, true, 32, 16, &mut out));
-        assert!(!bild_nach_nv12(&[], 0, 0, false, 32, 16, &mut out));
+        assert!(!image_to_nv12(&[0u8; 4], 1, 1, true, 32, 16, &mut out));
+        assert!(!image_to_nv12(&[], 0, 0, false, 32, 16, &mut out));
     }
 
     /// Stage 5b: the WHOLE chain on this machine - capture the screen,
@@ -810,12 +810,12 @@ mod tests {
     /// skipped instead of falsely reporting green.
     #[test]
     fn display_through_h264() {
-        let schirme = liste();
-        if schirme.is_empty() {
+        let screens = liste();
+        if screens.is_empty() {
             println!("no screen on this machine - skipped");
             return;
         }
-        println!("Bildschirm 0: {:?}", schirme[0]);
+        println!("Bildschirm 0: {:?}", screens[0]);
         let auf = match open(0, 1280, 720, 10) {
             Ok(a) => a,
             Err(e) => {
@@ -827,14 +827,14 @@ mod tests {
         assert!(zb % 2 == 0 && zh % 2 == 0, "ungerade Kante {}x{}", zb, zh);
         assert!(zb <= 1280 && zh <= 720, "zu gross: {}x{}", zb, zh);
         let start = std::time::Instant::now();
-        let mut bild = None;
-        while start.elapsed() < std::time::Duration::from_secs(5) && bild.is_none() {
-            bild = auf.neuestes();
-            if bild.is_none() {
+        let mut picture = None;
+        while start.elapsed() < std::time::Duration::from_secs(5) && picture.is_none() {
+            picture = auf.newest();
+            if picture.is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
-        let Some(b) = bild else {
+        let Some(b) = picture else {
             println!(
                 "kein Bild binnen 5 s (Fehler: {}) - uebersprungen",
                 auf.error()
@@ -859,7 +859,7 @@ mod tests {
             "aufgenommen {}x{}, {} Bilder, mittlere Helligkeit {:.1}",
             zb,
             zh,
-            auf.aufgenommen(),
+            auf.recorded(),
             hell
         );
         // And now through the encoder - that is the part that is
@@ -888,11 +888,11 @@ mod tests {
         println!("H.264: {} Bytes, {} Schluesselbilder", bytes, key_frames);
         assert!(bytes > 0, "screen frame could not be encoded");
         assert!(key_frames > 0, "no keyframe at the start");
-        auf.stoppen();
+        auf.stop_capture();
     }
 
     #[test]
-    fn liste_stuerzt_nicht_ab() {
+    fn list_does_not_crash() {
         // On a server without a screen this must give a list (possibly empty)
         // and not blow up.
         let l = liste();

@@ -69,7 +69,7 @@ pub(crate) fn map_key(k: egui::Key) -> Option<(u32, bool)> {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Sign of life for the watchdog: the UI is drawing.
-        BILD_GEZEICHNET.store(true, Ordering::Relaxed);
+        IMAGE_DRAWN.store(true, Ordering::Relaxed);
         if let Some(n) = self.meet_demo {
             self.meet_demo_ui(ctx, n);
             self.shot_ui(ctx);
@@ -93,8 +93,8 @@ impl eframe::App for App {
         // Setup job from the browser download: as soon as the host
         // has its ID from the relay, everything happens by itself (no pairing).
         if let Some((code, name)) = self.auto_setup.clone() {
-            let fertige_id = !self.shared.my_id.lock_ok().is_empty();
-            if fertige_id {
+            let ready_id = !self.shared.my_id.lock_ok().is_empty();
+            if ready_id {
                 self.auto_setup = None;
                 self.setup_dlg = Some(SetupDlg {
                     code,
@@ -243,7 +243,7 @@ impl eframe::App for App {
                     .with_inner_size([920.0, 600.0])
                     .with_min_inner_size([560.0, 430.0]),
                 |vctx, _class| {
-                    let im_gespraech = self.nativ_meet.is_some();
+                    let in_conversation = self.native_meet.is_some();
                     self.meet_win_ui(vctx);
                     if vctx.input(|i| i.viewport().close_requested()) {
                         closed = true;
@@ -254,7 +254,7 @@ impl eframe::App for App {
                     // Justin saw exactly that as "bad frame rate".
                     // So draw smoothly in a conversation; on the
                     // join screen little is enough, hardly anything moves there.
-                    vctx.request_repaint_after(Duration::from_millis(if im_gespraech {
+                    vctx.request_repaint_after(Duration::from_millis(if in_conversation {
                         16
                     } else {
                         60

@@ -590,7 +590,7 @@ pub fn setup_inbox_async(
 #[cfg(test)]
 mod url_tests {
     #[test]
-    fn setup_urls_liegen_nicht_unter_account() {
+    fn setup_urls_are_not_under_account() {
         assert_eq!(
             super::plain_url("wss://freeviewer.fleitec.com/fv/ws", "setup/create"),
             "https://freeviewer.fleitec.com/fv/setup/create"
@@ -607,7 +607,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn die_adresse_kommt_vom_relay() {
+    fn address_comes_from_relay() {
         assert_eq!(
             url("wss://freeviewer.fleitec.com/fv/ws", "login"),
             "https://freeviewer.fleitec.com/fv/account/login"
@@ -619,13 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn zeichen_werden_sauber_verpackt() {
+    fn chars_are_packed_cleanly() {
         assert_eq!(urlenc("abc-1_2.3~x"), "abc-1_2.3~x");
         assert_eq!(urlenc("a b/c"), "a%20b%2Fc");
     }
 
     #[test]
-    fn ohne_zeichen_gilt_niemand_als_angemeldet() {
+    fn without_char_nobody_counts_as_signed_in() {
         let s = Session {
             user: "Justin".into(),
             token: String::new(),

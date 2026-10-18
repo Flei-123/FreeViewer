@@ -329,7 +329,7 @@ mod tests {
     /// the right side of the gear was simply missing. Justin saw it,
     /// no test had noticed. A CLOSED outline ends with "Z".
     #[test]
-    fn geschlossene_umrisse_sind_wirklich_geschlossen() {
+    fn closed_outlines_are_really_closed() {
         // These icons are outlines (not open strokes) and must
         // therefore run back to the start.
         for name in ["settings"] {
@@ -340,12 +340,12 @@ mod tests {
                 .and_then(|r| r.split('"').next())
                 .unwrap_or("");
             assert!(!d.is_empty(), "{} hat keinen Pfad", name);
-            let letzte = d.trim().chars().last().unwrap_or(' ');
+            let previous = d.trim().chars().last().unwrap_or(' ');
             assert!(
-                letzte == 'Z' || letzte == 'z',
+                previous == 'Z' || previous == 'z',
                 "{} ends with '{}' instead of being closed: ...{}",
                 name,
-                letzte,
+                previous,
                 &d[d.len().saturating_sub(40)..]
             );
         }
@@ -354,25 +354,25 @@ mod tests {
     /// A gear is round - so it must reach equally far to the left as to the
     /// right. If a side is missing, this catches it.
     #[test]
-    fn das_zahnrad_ist_symmetrisch() {
+    fn the_gear_is_symmetric() {
         let s = source("settings");
         let d = s.split("d=\"").nth(1).unwrap().split('"').next().unwrap();
-        let zahlen: Vec<f32> = d
+        let numbers: Vec<f32> = d
             .replace('M', " ")
             .replace('L', " ")
             .replace('Z', " ")
             .split_whitespace()
             .filter_map(|t| t.parse::<f32>().ok())
             .collect();
-        assert!(zahlen.len() >= 16, "zu wenige Punkte: {}", zahlen.len());
-        let xs: Vec<f32> = zahlen.iter().step_by(2).copied().collect();
+        assert!(numbers.len() >= 16, "zu wenige Punkte: {}", numbers.len());
+        let xs: Vec<f32> = numbers.iter().step_by(2).copied().collect();
         let links = 12.0 - xs.iter().cloned().fold(f32::MAX, f32::min);
-        let rechts = xs.iter().cloned().fold(f32::MIN, f32::max) - 12.0;
+        let right_side = xs.iter().cloned().fold(f32::MIN, f32::max) - 12.0;
         assert!(
-            (links - rechts).abs() < 0.2,
+            (links - right_side).abs() < 0.2,
             "Zahnrad haengt schief: links {:.2}, rechts {:.2}",
             links,
-            rechts
+            right_side
         );
     }
 

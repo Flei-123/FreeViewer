@@ -62,7 +62,7 @@ impl CMTime {
             epoch: 0,
         }
     }
-    fn ungueltig() -> CMTime {
+    fn invalid() -> CMTime {
         CMTime {
             value: 0,
             timescale: 0,
@@ -84,7 +84,7 @@ struct CMSampleTimingInfo {
 struct VTDecompressionOutputCallbackRecord {
     // SAFETY: function-pointer type only (no operation happens here). The signature must match
     // Apple's VTDecompressionOutputCallback exactly; VideoToolbox calls it with the `refcon` stored
-    // next to it, which is a pointer to the decoder's `Mutex<Bild>` kept alive by the `Decoder`
+    // next to it, which is a pointer to the decoder's `Mutex<Image>` kept alive by the `Decoder`
     // until the session is invalidated.
     callback: Option<
         unsafe extern "C" fn(*mut c_void, *mut c_void, OSStatus, u32, CVImageBufferRef, CMTime, CMTime),
@@ -126,7 +126,7 @@ extern "C" {
         height_px: usize,
         format: OSType,
         attrs: CFDictionaryRef,
-        raus: *mut CVPixelBufferRef,
+        out: *mut CVPixelBufferRef,
     ) -> i32;
     fn CVPixelBufferLockBaseAddress(pb: CVPixelBufferRef, flags: u64) -> i32;
     fn CVPixelBufferUnlockBaseAddress(pb: CVPixelBufferRef, flags: u64) -> i32;
@@ -159,32 +159,32 @@ extern "C" {
     fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
         fd: CMFormatDescriptionRef,
         index: usize,
-        zeiger: *mut *const u8,
-        groesse: *mut usize,
+        pointer: *mut *const u8,
+        dimension: *mut usize,
         item_count: *mut usize,
-        nal_kopf: *mut c_int,
+        nal_head: *mut c_int,
     ) -> OSStatus;
     fn CMVideoFormatDescriptionCreateFromH264ParameterSets(
         alloc: CFAllocatorRef,
         item_count: usize,
-        zeiger: *const *const u8,
-        groessen: *const usize,
-        nal_kopf: c_int,
-        raus: *mut CMFormatDescriptionRef,
+        pointer: *const *const u8,
+        sizes: *const usize,
+        nal_head: c_int,
+        out: *mut CMFormatDescriptionRef,
     ) -> OSStatus;
     fn CMBlockBufferCreateWithMemoryBlock(
         struct_alloc: CFAllocatorRef,
         speicher: *mut c_void,
         block_length: usize,
         block_alloc: CFAllocatorRef,
-        quelle: *const c_void,
+        origin: *const c_void,
         offset: usize,
         length: usize,
         flags: u32,
-        raus: *mut CMBlockBufferRef,
+        out: *mut CMBlockBufferRef,
     ) -> OSStatus;
     fn CMBlockBufferReplaceDataBytes(
-        quelle: *const c_void,
+        origin: *const c_void,
         bb: CMBlockBufferRef,
         offset: usize,
         length: usize,
@@ -195,10 +195,10 @@ extern "C" {
         format: CMFormatDescriptionRef,
         sample_count: isize,
         row_count: isize,
-        zeiten: *const CMSampleTimingInfo,
+        times: *const CMSampleTimingInfo,
         size_count: isize,
-        groessen: *const usize,
-        raus: *mut CMSampleBufferRef,
+        sizes: *const usize,
+        out: *mut CMSampleBufferRef,
     ) -> OSStatus;
 }
 
@@ -212,16 +212,16 @@ extern "C" {
         enc_spec: CFDictionaryRef,
         quell_attrs: CFDictionaryRef,
         daten_alloc: CFAllocatorRef,
-        rueckruf: VTCompressionOutputCallback,
+        callback_fn: VTCompressionOutputCallback,
         refcon: *mut c_void,
-        raus: *mut VTCompressionSessionRef,
+        out: *mut VTCompressionSessionRef,
     ) -> OSStatus;
     fn VTCompressionSessionEncodeFrame(
         s: VTCompressionSessionRef,
-        bild: CVImageBufferRef,
+        picture: CVImageBufferRef,
         pts: CMTime,
         dur: CMTime,
-        rahmen_eigenschaften: CFDictionaryRef,
+        frame_properties: CFDictionaryRef,
         quell_refcon: *mut c_void,
         info: *mut u32,
     ) -> OSStatus;
@@ -231,9 +231,9 @@ extern "C" {
         alloc: CFAllocatorRef,
         format: CMFormatDescriptionRef,
         dec_spec: CFDictionaryRef,
-        ziel_attrs: CFDictionaryRef,
-        rueckruf: *const VTDecompressionOutputCallbackRecord,
-        raus: *mut VTDecompressionSessionRef,
+        target_attrs: CFDictionaryRef,
+        callback_fn: *const VTDecompressionOutputCallbackRecord,
+        out: *mut VTDecompressionSessionRef,
     ) -> OSStatus;
     fn VTDecompressionSessionDecodeFrame(
         s: VTDecompressionSessionRef,
@@ -258,14 +258,14 @@ extern "C" {
 
 // ----------------------------------------------------------- Hilfsmittel ---
 
-fn zahl_i32(v: i32) -> CFNumberRef {
+fn number_i32(v: i32) -> CFNumberRef {
     // SAFETY: `&v` points to a live local i32 for the whole call and `kCFNumberSInt32Type` tells
     // CFNumberCreate to read exactly 4 bytes from it; the returned CFNumber is an owned (+1) object
     // that the caller must release.
     unsafe { CFNumberCreate(std::ptr::null(), kCFNumberSInt32Type, &v as *const i32 as *const c_void) }
 }
 
-fn zahl_f64(v: f64) -> CFNumberRef {
+fn number_f64(v: f64) -> CFNumberRef {
     // SAFETY: `&v` points to a live local f64 for the whole call and `kCFNumberFloat64Type` tells
     // CFNumberCreate to read exactly 8 bytes from it; the returned CFNumber is an owned (+1) object
     // that the caller must release.
@@ -294,8 +294,8 @@ fn dict1(prop_key: CFStringRef, wert: CFTypeRef) -> CFDictionaryRef {
 }
 
 /// Splits an Annex-B stream into its NAL units (without start codes).
-fn nal_zerlegen(au: &[u8]) -> Vec<(usize, usize)> {
-    let mut teile = Vec::new();
+fn nal_split(au: &[u8]) -> Vec<(usize, usize)> {
+    let mut parts = Vec::new();
     let mut i = 0usize;
     let mut start: Option<usize> = None;
     while i + 2 < au.len() {
@@ -305,7 +305,7 @@ fn nal_zerlegen(au: &[u8]) -> Vec<(usize, usize)> {
             let marke = if vier { 4 } else { 3 };
             if let Some(s) = start.take() {
                 if i > s {
-                    teile.push((s, i - s));
+                    parts.push((s, i - s));
                 }
             }
             i += marke;
@@ -316,10 +316,10 @@ fn nal_zerlegen(au: &[u8]) -> Vec<(usize, usize)> {
     }
     if let Some(s) = start {
         if au.len() > s {
-            teile.push((s, au.len() - s));
+            parts.push((s, au.len() - s));
         }
     }
-    teile
+    parts
 }
 
 fn nal_typ(b: u8) -> u8 {
@@ -365,9 +365,9 @@ unsafe impl Send for Encoder {}
 // with CMBlockBufferCopyDataBytes instead of slicing `total_len` bytes from the pointer. The AVCC
 // parser bounds-checks every length against the slice. Parameter-set pointers are checked for
 // null and non-zero size before they are turned into slices.
-unsafe extern "C" fn kodier_rueckruf(
+unsafe extern "C" fn encode_callback(
     refcon: *mut c_void,
-    _quelle: *mut c_void,
+    _source: *mut c_void,
     status: OSStatus,
     _info: u32,
     probe: CMSampleBufferRef,
@@ -432,14 +432,14 @@ unsafe extern "C" fn kodier_rueckruf(
     if idr {
         let fd = CMSampleBufferGetFormatDescription(probe);
         if !fd.is_null() {
-            let mut kopf: Vec<u8> = Vec::new();
+            let mut head: Vec<u8> = Vec::new();
             let mut item_count = 0usize;
-            let (mut p, mut groesse, mut nal_len) = (std::ptr::null::<u8>(), 0usize, 0 as c_int);
+            let (mut p, mut dimension, mut nal_len) = (std::ptr::null::<u8>(), 0usize, 0 as c_int);
             if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                 fd,
                 0,
                 &mut p,
-                &mut groesse,
+                &mut dimension,
                 &mut item_count,
                 &mut nal_len,
             ) == 0
@@ -457,14 +457,14 @@ unsafe extern "C" fn kodier_rueckruf(
                         && !pp.is_null()
                         && gg > 0
                     {
-                        kopf.extend_from_slice(&[0, 0, 0, 1]);
-                        kopf.extend_from_slice(std::slice::from_raw_parts(pp, gg));
+                        head.extend_from_slice(&[0, 0, 0, 1]);
+                        head.extend_from_slice(std::slice::from_raw_parts(pp, gg));
                     }
                 }
             }
-            if !kopf.is_empty() {
-                kopf.extend_from_slice(&annexb);
-                annexb = kopf;
+            if !head.is_empty() {
+                head.extend_from_slice(&annexb);
+                annexb = head;
             }
         }
     }
@@ -490,7 +490,7 @@ impl Encoder {
         // select the defaults, `refcon` is the address of the `Mutex<Output>` inside `output`
         // (the Arc stored in the Encoder, which outlives the session because Drop invalidates the
         // session first), and `session` is a local out-slot that is checked for null afterwards.
-        // `kodier_rueckruf` matches the callback signature.
+        // `encode_callback` matches the callback signature.
         let st = unsafe {
             VTCompressionSessionCreate(
                 std::ptr::null(),
@@ -500,7 +500,7 @@ impl Encoder {
                 std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null(),
-                Some(kodier_rueckruf),
+                Some(encode_callback),
                 refcon,
                 &mut session,
             )
@@ -510,12 +510,12 @@ impl Encoder {
         }
         // SAFETY: `session` was just created successfully (non-null, checked above) and is
         // exclusively ours. Property keys/values are Apple constants or CFNumbers created here;
-        // values created here (`freigeben == true`) are released exactly once right after the call
+        // values created here (`release == true`) are released exactly once right after the call
         // (VTSessionSetProperty retains what it needs). The kCFBoolean statics are only read.
         unsafe {
-            let setzen = |k: CFStringRef, v: CFTypeRef, freigeben: bool| {
+            let setzen = |k: CFStringRef, v: CFTypeRef, release: bool| {
                 VTSessionSetProperty(session, k, v);
-                if freigeben && !v.is_null() {
+                if release && !v.is_null() {
                     CFRelease(v);
                 }
             };
@@ -532,19 +532,19 @@ impl Encoder {
             );
             setzen(
                 kVTCompressionPropertyKey_AverageBitRate,
-                zahl_i32(bitrate.max(200_000) as i32),
+                number_i32(bitrate.max(200_000) as i32),
                 true,
             );
             setzen(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
-                zahl_f64(fps.max(1) as f64),
+                number_f64(fps.max(1) as f64),
                 true,
             );
             // A keyframe every two seconds - in between every
             // newcomer gets one via the request.
             setzen(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                zahl_i32((fps.max(1) * 2) as i32),
+                number_i32((fps.max(1) * 2) as i32),
                 true,
             );
         }
@@ -617,7 +617,7 @@ impl Encoder {
         // SAFETY: `self.pixel` and `self.session` are live objects owned by this Encoder (created
         // in `new`, released only in Drop). Lock/Unlock are paired; between them no early return
         // exists. Source reads stay inside `nv12`: its length was checked against w*h*3/2 and the Y
-        // rows read w bytes at `zeile * w` (zeile < h) and the UV rows w bytes at `w*h + zeile*w`
+        // rows read w bytes at `text_row * w` (zeile < h) and the UV rows w bytes at `w*h + text_row*w`
         // (zeile < h/2). Destination writes use the plane base address and the row stride reported
         // by CoreVideo (>= w for both planes of a 4:2:0 buffer with width w); the planes have h and
         // h/2 rows, so each row write is inside the plane. Null plane pointers are skipped. `props`
@@ -632,10 +632,10 @@ impl Encoder {
             let y = CVPixelBufferGetBaseAddressOfPlane(self.pixel, 0) as *mut u8;
             let ys = CVPixelBufferGetBytesPerRowOfPlane(self.pixel, 0);
             if !y.is_null() {
-                for zeile in 0..h {
+                for text_row in 0..h {
                     std::ptr::copy_nonoverlapping(
-                        nv12.as_ptr().add(zeile * w),
-                        y.add(zeile * ys),
+                        nv12.as_ptr().add(text_row * w),
+                        y.add(text_row * ys),
                         w,
                     );
                 }
@@ -644,10 +644,10 @@ impl Encoder {
             let uv = CVPixelBufferGetBaseAddressOfPlane(self.pixel, 1) as *mut u8;
             let uvs = CVPixelBufferGetBytesPerRowOfPlane(self.pixel, 1);
             if !uv.is_null() {
-                for zeile in 0..h / 2 {
+                for text_row in 0..h / 2 {
                     std::ptr::copy_nonoverlapping(
-                        nv12.as_ptr().add(w * h + zeile * w),
-                        uv.add(zeile * uvs),
+                        nv12.as_ptr().add(w * h + text_row * w),
+                        uv.add(text_row * uvs),
                         w,
                     );
                 }
@@ -681,7 +681,7 @@ impl Encoder {
             }
             // Wait for the result: otherwise the callback runs at some point
             // later, and we want to send the frame NOW.
-            VTCompressionSessionCompleteFrames(self.session, CMTime::ungueltig());
+            VTCompressionSessionCompleteFrames(self.session, CMTime::invalid());
         }
         let mut a = self
             .output
@@ -701,7 +701,7 @@ impl Drop for Encoder {
         // so the `refcon` into the Arc can no longer dangle) and the session and pixel buffer are
         // each released once; `pixel` is checked for null.
         unsafe {
-            VTCompressionSessionCompleteFrames(self.session, CMTime::ungueltig());
+            VTCompressionSessionCompleteFrames(self.session, CMTime::invalid());
             VTCompressionSessionInvalidate(self.session);
             CFRelease(self.session as CFTypeRef);
             if !self.pixel.is_null() {
@@ -714,7 +714,7 @@ impl Drop for Encoder {
 // ------------------------------------------------------------ Dekodierer ---
 
 #[derive(Default)]
-struct Bild {
+struct Image {
     width_px: u32,
     height_px: u32,
     rgba: Vec<u8>,
@@ -729,96 +729,96 @@ pub struct Decoder {
     pps: Vec<u8>,
     w: u32,
     h: u32,
-    bild: Arc<Mutex<Bild>>,
+    picture: Arc<Mutex<Image>>,
 }
 
 // SAFETY: the VTDecompressionSession is documented as thread-safe, so moving it to another thread
 // is fine. `format` is an immutable CoreFoundation object, only changed through `&mut self`. The
-// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Bild>>`. The struct is not
+// data shared with the VideoToolbox callback thread is the `Arc<Mutex<Image>>`. The struct is not
 // `Sync`, so there is never concurrent access from two threads.
 unsafe impl Send for Decoder {}
 
 // SAFETY: callback invoked by VideoToolbox, possibly on another thread. `refcon` is the pointer to
-// the `Mutex<Bild>` inside the Decoder's Arc (null is checked); the session is invalidated before
-// the Decoder drops, so the reference is valid whenever the callback runs. `bild` is a live
+// the `Mutex<Image>` inside the Decoder's Arc (null is checked); the session is invalidated before
+// the Decoder drops, so the reference is valid whenever the callback runs. `picture` is a live
 // CVPixelBuffer for the call (null and pixel format are checked) and is locked read-only (flag 1)
 // with a matching unlock at the end; there is no early return in between. Plane pointers are
 // checked for null, and the copies stay in bounds: source rows are < h (Y plane) and < ceil(h/2)
 // (UV plane), each at most `ys`/`uvs` bytes, and the destination `nv12` has stride*yh +
 // stride*ceil(h/2) bytes with stride >= ys, uvs, so every destination row fits.
-unsafe extern "C" fn dekodier_rueckruf(
+unsafe extern "C" fn decode_callback(
     refcon: *mut c_void,
-    _quelle: *mut c_void,
+    _source: *mut c_void,
     status: OSStatus,
     _info: u32,
-    bild: CVImageBufferRef,
+    picture: CVImageBufferRef,
     _pts: CMTime,
     _duration: CMTime,
 ) {
     if refcon.is_null() {
         return;
     }
-    let ziel = &*(refcon as *const Mutex<Bild>);
-    if status != 0 || bild.is_null() {
-        if let Ok(mut z) = ziel.lock() {
+    let dest = &*(refcon as *const Mutex<Image>);
+    if status != 0 || picture.is_null() {
+        if let Ok(mut z) = dest.lock() {
             if status != 0 {
                 z.error = Some(format!("Dekodierer meldet {}", status));
             }
         }
         return;
     }
-    let fmt = CVPixelBufferGetPixelFormatType(bild);
+    let fmt = CVPixelBufferGetPixelFormatType(picture);
     if fmt != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         && fmt != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
     {
-        if let Ok(mut z) = ziel.lock() {
+        if let Ok(mut z) = dest.lock() {
             z.error = Some(format!("unerwartetes Pixelformat {:x}", fmt));
         }
         return;
     }
-    if CVPixelBufferLockBaseAddress(bild, 1) != 0 {
+    if CVPixelBufferLockBaseAddress(picture, 1) != 0 {
         return;
     }
-    let w = CVPixelBufferGetWidth(bild) as u32;
-    let h = CVPixelBufferGetHeight(bild) as u32;
-    let yp = CVPixelBufferGetBaseAddressOfPlane(bild, 0) as *const u8;
-    let ys = CVPixelBufferGetBytesPerRowOfPlane(bild, 0);
-    let uvp = CVPixelBufferGetBaseAddressOfPlane(bild, 1) as *const u8;
-    let uvs = CVPixelBufferGetBytesPerRowOfPlane(bild, 1);
-    let yh = CVPixelBufferGetHeightOfPlane(bild, 0);
-    let _uvw = CVPixelBufferGetWidthOfPlane(bild, 1);
+    let w = CVPixelBufferGetWidth(picture) as u32;
+    let h = CVPixelBufferGetHeight(picture) as u32;
+    let yp = CVPixelBufferGetBaseAddressOfPlane(picture, 0) as *const u8;
+    let ys = CVPixelBufferGetBytesPerRowOfPlane(picture, 0);
+    let uvp = CVPixelBufferGetBaseAddressOfPlane(picture, 1) as *const u8;
+    let uvs = CVPixelBufferGetBytesPerRowOfPlane(picture, 1);
+    let yh = CVPixelBufferGetHeightOfPlane(picture, 0);
+    let _uvw = CVPixelBufferGetWidthOfPlane(picture, 1);
     if !yp.is_null() && !uvp.is_null() && w > 0 && h > 0 {
         // The two planes do NOT necessarily lie one after the other - hence
         // first copy into a contiguous NV12 block and use the
         // shared converter.
         let stride = ys.max(uvs);
         let mut nv12 = vec![0u8; stride * yh + stride * (h as usize).div_ceil(2)];
-        for zeile in 0..h as usize {
+        for text_row in 0..h as usize {
             std::ptr::copy_nonoverlapping(
-                yp.add(zeile * ys),
-                nv12.as_mut_ptr().add(zeile * stride),
+                yp.add(text_row * ys),
+                nv12.as_mut_ptr().add(text_row * stride),
                 ys.min(stride),
             );
         }
         let basis = stride * yh;
-        for zeile in 0..(h as usize).div_ceil(2) {
+        for text_row in 0..(h as usize).div_ceil(2) {
             std::ptr::copy_nonoverlapping(
-                uvp.add(zeile * uvs),
-                nv12.as_mut_ptr().add(basis + zeile * stride),
+                uvp.add(text_row * uvs),
+                nv12.as_mut_ptr().add(basis + text_row * stride),
                 uvs.min(stride),
             );
         }
-        if let Ok(mut z) = ziel.lock() {
-            let mut raus = std::mem::take(&mut z.rgba);
-            if nv12_to_rgba(&nv12, w, h, stride, yh as u32, &mut raus) {
+        if let Ok(mut z) = dest.lock() {
+            let mut out = std::mem::take(&mut z.rgba);
+            if nv12_to_rgba(&nv12, w, h, stride, yh as u32, &mut out) {
                 z.width_px = w;
                 z.height_px = h;
                 z.da = true;
             }
-            z.rgba = raus;
+            z.rgba = out;
         }
     }
-    CVPixelBufferUnlockBaseAddress(bild, 1);
+    CVPixelBufferUnlockBaseAddress(picture, 1);
 }
 
 impl Decoder {
@@ -830,7 +830,7 @@ impl Decoder {
             pps: Vec::new(),
             w,
             h,
-            bild: Arc::new(Mutex::new(Bild::default())),
+            picture: Arc::new(Mutex::new(Image::default())),
         })
     }
 
@@ -858,30 +858,30 @@ impl Decoder {
         if !self.session.is_null() || self.sps.is_empty() || self.pps.is_empty() {
             return Ok(());
         }
-        // SAFETY: `zeiger`/`groessen` point into `self.sps`/`self.pps` and local arrays that are
+        // SAFETY: `pointer`/`sizes` point into `self.sps`/`self.pps` and local arrays that are
         // alive for the call (the SPS/PPS are copied by CoreMedia into the format description).
-        // `fd` is a local out-slot that is checked for null. `rueckruf.refcon` is the address of
-        // the `Mutex<Bild>` in `self.bild`, which outlives the session because `close_session`
+        // `fd` is a local out-slot that is checked for null. `callback_fn.refcon` is the address of
+        // the `Mutex<Image>` in `self.picture`, which outlives the session because `close_session`
         // invalidates the session before the Arc is dropped. On failure `fd` is released once; on
         // success ownership of `fd` and `s` moves into `self`.
         unsafe {
-            let zeiger: [*const u8; 2] = [self.sps.as_ptr(), self.pps.as_ptr()];
-            let groessen: [usize; 2] = [self.sps.len(), self.pps.len()];
+            let pointer: [*const u8; 2] = [self.sps.as_ptr(), self.pps.as_ptr()];
+            let sizes: [usize; 2] = [self.sps.len(), self.pps.len()];
             let mut fd: CMFormatDescriptionRef = std::ptr::null();
             let st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
                 std::ptr::null(),
                 2,
-                zeiger.as_ptr(),
-                groessen.as_ptr(),
+                pointer.as_ptr(),
+                sizes.as_ptr(),
                 4,
                 &mut fd,
             );
             if st != 0 || fd.is_null() {
                 return Err(anyhow!("Formatbeschreibung: {}", st));
             }
-            let rueckruf = VTDecompressionOutputCallbackRecord {
-                callback: Some(dekodier_rueckruf),
-                refcon: Arc::as_ptr(&self.bild) as *mut c_void,
+            let callback_fn = VTDecompressionOutputCallbackRecord {
+                callback: Some(decode_callback),
+                refcon: Arc::as_ptr(&self.picture) as *mut c_void,
             };
             let mut s: VTDecompressionSessionRef = std::ptr::null_mut();
             let st = VTDecompressionSessionCreate(
@@ -889,7 +889,7 @@ impl Decoder {
                 fd,
                 std::ptr::null(),
                 std::ptr::null(),
-                &rueckruf,
+                &callback_fn,
                 &mut s,
             );
             if st != 0 || s.is_null() {
@@ -907,7 +907,7 @@ impl Decoder {
     pub fn decode(&mut self, au: &[u8], rgba: &mut Vec<u8>) -> Result<Option<(u32, u32)>> {
         // 1) NALs sortieren: Parametersaetze merken, Bilddaten sammeln.
         let mut avcc: Vec<u8> = Vec::with_capacity(au.len() + 16);
-        for (off, len) in nal_zerlegen(au) {
+        for (off, len) in nal_split(au) {
             let nal = &au[off..off + len];
             match nal_typ(nal[0]) {
                 7 => {
@@ -936,7 +936,7 @@ impl Decoder {
         }
         // SAFETY: the block buffer is created with `avcc.len()` bytes allocated by CoreMedia (null
         // memory block + AssureMemoryNow flag) and filled with exactly `avcc.len()` bytes from the
-        // live Vec, so the copy is in bounds. `groessen` and `zeit` are locals that outlive
+        // live Vec, so the copy is in bounds. `sizes` and `zeit` are locals that outlive
         // CMSampleBufferCreateReady (arrays of length 1, as the counts say); `self.format` is
         // non-null because `self.session` is non-null (both are set together). The block buffer is
         // released once (the sample buffer retains it), the sample buffer once after the
@@ -968,11 +968,11 @@ impl Decoder {
                 CFRelease(bb as CFTypeRef);
                 return Err(anyhow!("Blockpuffer fuellen: {}", st));
             }
-            let groessen = [avcc.len()];
+            let sizes = [avcc.len()];
             let zeit = CMSampleTimingInfo {
-                duration: CMTime::ungueltig(),
-                presentation: CMTime::ungueltig(),
-                decode: CMTime::ungueltig(),
+                duration: CMTime::invalid(),
+                presentation: CMTime::invalid(),
+                decode: CMTime::invalid(),
             };
             let mut sb: CMSampleBufferRef = std::ptr::null_mut();
             let st = CMSampleBufferCreateReady(
@@ -983,7 +983,7 @@ impl Decoder {
                 1,
                 &zeit,
                 1,
-                groessen.as_ptr(),
+                sizes.as_ptr(),
                 &mut sb,
             );
             CFRelease(bb as CFTypeRef);
@@ -1008,7 +1008,7 @@ impl Decoder {
             }
         }
         let mut b = self
-            .bild
+            .picture
             .lock()
             .map_err(|_| anyhow!("Dekodierer-Ausgabe blockiert"))?;
         if let Some(f) = b.error.take() {
@@ -1028,7 +1028,7 @@ impl Decoder {
     fn close_session(&mut self) {
         // SAFETY: the session and format description are owned by this struct and each is released
         // at most once: both are reset to null right after, so a repeated call (or the one from
-        // Drop) is a no-op. Invalidate stops the output callback before the `Arc<Mutex<Bild>>` that
+        // Drop) is a no-op. Invalidate stops the output callback before the `Arc<Mutex<Image>>` that
         // `refcon` points to can be dropped.
         unsafe {
             if !self.session.is_null() {

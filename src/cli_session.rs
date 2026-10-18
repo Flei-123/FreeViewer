@@ -269,17 +269,17 @@ pub(crate) fn cli_shot(i: usize, shared: Arc<Shared>) -> eframe::Result<()> {
                 // Usage:  --shot bild.jpg --meetshot [RAUM PASS]
                 let a2 = std::env::args().nth(mi + 1).unwrap_or_default();
                 let a3 = std::env::args().nth(mi + 2).unwrap_or_default();
-                let echt = a2.contains('-') && !a3.is_empty();
+                let real = a2.contains('-') && !a3.is_empty();
                 app.meet_win_open(meet::Meeting {
-                    id: if echt { a2.clone() } else { "482-913-770".to_string() },
-                    titel: "Fenster-Test".to_string(),
-                    passphrase: if echt { a3.clone() } else { "test1234".to_string() },
+                    id: if real { a2.clone() } else { "482-913-770".to_string() },
+                    heading: "Fenster-Test".to_string(),
+                    passphrase: if real { a3.clone() } else { "test1234".to_string() },
                     termin_text: String::new(),
                     e2e: String::new(),
                 });
-                app.meet_shot_join = echt;
+                app.meet_shot_join = real;
                 // With a real join the connection has to be up first.
-                app.shot_warte = if echt { 900 } else { 60 };
+                app.shot_warte = if real { 900 } else { 60 };
                 // shot MUST be set as well - the image maker depends on it.
                 app.shot = Some(std::path::PathBuf::from(path.clone()));
                 app.meet_shot = Some(std::path::PathBuf::from(path));

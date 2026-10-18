@@ -30,70 +30,70 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 
 /// Sample rate and frame length as in the browser: 48 kHz, 20 ms, mono.
 pub const RATE: u32 = 48_000;
-pub const RAHMEN: usize = 960; // 20 ms bei 48 kHz
+pub const FRAME: usize = 960; // 20 ms bei 48 kHz
 
 /// What the audio part reports upwards.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TonEreignis {
+pub enum ToneEvent {
     /// ICE and DTLS are up - audio flows from now on.
-    Verbunden,
+    PeerConnected,
     /// Ein entschluesselter, dekodierter Tonrahmen eines anderen Teilnehmers.
-    Rahmen { quelle: u64, pcm: Vec<i16> },
+    FrameBox { origin: u64, pcm: Vec<i16> },
     /// An encoded video frame (H.264) of another participant. Decoding
     /// is done by the platform (Media Foundation / VideoToolbox),
     /// not by this module.
-    Bild {
-        quelle: u64,
+    Image {
+        origin: u64,
         /// true = shared screen, false = camera. Without it camera
         /// and screen of the same participant would land in the same bucket.
         display: bool,
         daten: Vec<u8>,
-        schluesselbild: bool,
+        keyframe: bool,
         /// Which video format the server sends ("H264", "VP8", ...).
         /// Decides which decoder is used.
         codec: String,
     },
     FriendError(String),
-    Ende(String),
+    End(String),
 }
 
 /// Running numbers - so that claims can be checked by calculation.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Zahlen {
-    pub gesendet: u64,
+pub struct Numbers {
+    pub sent: u64,
     pub receive: u64,
-    pub bild_gesendet: u64,
+    pub image_sent: u64,
     pub frame_received: u64,
     /// Frames of the own SCREEN track (stage 3).
     pub screen_sent: u64,
-    pub bytes_raus: u64,
+    pub bytes_out: u64,
     pub bytes_rein: u64,
     /// Lautstaerke des zuletzt empfangenen Rahmens (0..1).
-    pub pegel_rein: f32,
+    pub level_pure: f32,
     /// Audio frames that were dropped because of backlog. Previously this did not
     /// exist - the backlog stayed forever as delay.
-    pub ton_verworfen: u64,
+    pub tone_dropped: u64,
     /// Wie viele 20-ms-Rahmen gerade auf ihren Sendeschlitz warten.
-    pub ton_stau: u32,
+    pub tone_backlog: u32,
     /// Geschaetzte Sendebandbreite in bit/s (0 = keine Schaetzung).
-    pub bandbreite: u64,
-    pub verbunden: bool,
+    pub bandwidth: u64,
+    pub connected: bool,
 }
 
 /// Control des Ton-Teils von aussen.
 pub struct Ton {
     /// PCM frames that should go out (20 ms, mono, 48 kHz).
-    raus: std::sync::mpsc::Sender<Vec<i16>>,
+    out: std::sync::mpsc::Sender<Vec<i16>>,
     /// Encoded video frames that should go out.
-    bild_raus: std::sync::mpsc::Sender<Vec<u8>>,
+    image_out: std::sync::mpsc::Sender<Vec<u8>>,
     /// Kodierte Bildschirmrahmen (eigene Spur, Stufe 3).
     screen_out: std::sync::mpsc::Sender<Vec<u8>>,
-    ereignisse: std::sync::mpsc::Receiver<TonEreignis>,
-    zahlen: Arc<Mutex<Zahlen>>,
+    events: std::sync::mpsc::Receiver<ToneEvent>,
+    numbers: Arc<Mutex<Numbers>>,
     is_muted: Arc<AtomicBool>,
-    ende: Arc<AtomicBool>,
+    end: Arc<AtomicBool>,
     /// The SDP offer that has to be sent to the server.
-    pub angebot: String,
+    pub offer: String,
     /// m-line of our own audio (the server wants to know it in "publish").
     pub mid: String,
     /// m-line unseres eigenen Bildes.
@@ -102,56 +102,56 @@ pub struct Ton {
     pub vid2: String,
     /// Which m-line belongs to whom - and whether it is a screen
     /// (from the "track" messages of the signalling).
-    spuren: Arc<Mutex<HashMap<String, (u64, bool)>>>,
-    antwort: std::sync::mpsc::Sender<Sdp>,
+    tracks: Arc<Mutex<HashMap<String, (u64, bool)>>>,
+    reply: std::sync::mpsc::Sender<Sdp>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Sdp {
     /// Antwort auf UNSER Angebot.
-    Antwort(String),
+    Reply(String),
     /// The server offers something itself (new participants) - we answer.
-    Angebot(String),
+    Offer(String),
 }
 
 impl Ton {
     pub fn send_out(&self, pcm: Vec<i16>) {
-        let _ = self.raus.send(pcm);
+        let _ = self.out.send(pcm);
     }
     /// Send a fully encoded H.264 frame (Annex-B or AVCC
     /// without start code - str0m packs it into RTP itself).
     pub fn send_frame(&self, daten: Vec<u8>) {
-        let _ = self.bild_raus.send(daten);
+        let _ = self.image_out.send(daten);
     }
     /// Send an H.264 frame of the SCREEN track. Own track,
     /// so that the other side can separate camera and screen.
     pub fn screen_send(&self, daten: Vec<u8>) {
         let _ = self.screen_out.send(daten);
     }
-    pub fn abholen(&self) -> Vec<TonEreignis> {
+    pub fn poll_events(&self) -> Vec<ToneEvent> {
         let mut v = Vec::new();
-        while let Ok(e) = self.ereignisse.try_recv() {
+        while let Ok(e) = self.events.try_recv() {
             v.push(e);
         }
         v
     }
-    pub fn zahlen(&self) -> Zahlen {
-        self.zahlen.lock().map(|z| *z).unwrap_or_default()
+    pub fn numbers(&self) -> Numbers {
+        self.numbers.lock().map(|z| *z).unwrap_or_default()
     }
     pub fn is_muted(&self, an: bool) {
         self.is_muted.store(an, Ordering::Relaxed);
     }
     /// Antwort des Servers auf unser Angebot einspielen.
-    pub fn antwort(&self, sdp: &str) {
-        let _ = self.antwort.send(Sdp::Antwort(sdp.to_string()));
+    pub fn reply(&self, sdp: &str) {
+        let _ = self.reply.send(Sdp::Reply(sdp.to_string()));
     }
     /// An offer from the server - the answer comes back as an event.
-    pub fn server_angebot(&self, sdp: &str) {
-        let _ = self.antwort.send(Sdp::Angebot(sdp.to_string()));
+    pub fn server_offer(&self, sdp: &str) {
+        let _ = self.reply.send(Sdp::Offer(sdp.to_string()));
     }
     /// Fetch the answer SDP that arose in response to a server offer.
-    pub fn offene_antwort(&self) -> Option<String> {
-        ANTWORT_RAUS.lock().ok().and_then(|mut a| a.pop())
+    pub fn open_reply(&self) -> Option<String> {
+        REPLY_OUT.lock().ok().and_then(|mut a| a.pop())
     }
     /// Add the mapping from the signalling afterwards (camera).
     pub fn spur(&self, mid: &str, peer: u64) {
@@ -159,12 +159,12 @@ impl Ton {
     }
     /// Zuordnung samt Streamart nachtragen.
     pub fn spur_art(&self, mid: &str, peer: u64, display: bool) {
-        if let Ok(mut m) = self.spuren.lock() {
+        if let Ok(mut m) = self.tracks.lock() {
             m.insert(mid.to_string(), (peer, display));
         }
     }
     pub fn finish(&self) {
-        self.ende.store(true, Ordering::Relaxed);
+        self.end.store(true, Ordering::Relaxed);
     }
 }
 
@@ -175,7 +175,7 @@ impl Drop for Ton {
 }
 
 /// Answers that the audio thread leaves for the signalling.
-static ANTWORT_RAUS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static REPLY_OUT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Starts the audio part: builds the offer and then runs in the background.
 pub fn launch() -> Result<Ton> {
@@ -192,14 +192,14 @@ pub fn launch() -> Result<Ton> {
 /// the whole Opus frame is encrypted.
 pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
     // Krypto-Anbieter einmalig setzen (reines Rust, s. Cargo.toml).
-    static EINMAL: std::sync::Once = std::sync::Once::new();
-    EINMAL.call_once(|| {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
         str0m::crypto::from_feature_flags().install_process_default();
     });
 
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_nonblocking(true)?;
-    let lokal = socket.local_addr()?;
+    let local = socket.local_addr()?;
 
     // bandwidth estimation on. Without it the client keeps sending stubbornly with a
     // fixed bitrate, even when the line has long been full -
@@ -213,8 +213,8 @@ pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
     // Candidates: every own address that is not loopback. The server is
     // publicly reachable - so we only need to be able to
     // call out, a STUN server is not necessary for that.
-    for ip in eigene_adressen() {
-        let addr = SocketAddr::new(ip, lokal.port());
+    for ip in own_addresses() {
+        let addr = SocketAddr::new(ip, local.port());
         if let Ok(k) = Candidate::host(addr, "udp") {
             let _ = rtc.add_local_candidate(k);
         }
@@ -232,61 +232,61 @@ pub fn start_with(e2e: Option<crate::meete2e::Key>) -> Result<Ton> {
     // something, and the other side cannot arrange "screen large,
     // camera small".
     let vid2 = api.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
-    let (angebot, offen) = api
+    let (offer, offen) = api
         .apply()
         .ok_or_else(|| anyhow!("offer cannot be built"))?;
-    let angebot_sdp = angebot.to_sdp_string();
+    let offer_sdp = offer.to_sdp_string();
 
-    let (raus_tx, raus_rx) = std::sync::mpsc::channel::<Vec<i16>>();
-    let (bild_tx, bild_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+    let (image_tx, image_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (screen_tx, screen_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (ev_tx, ev_rx) = std::sync::mpsc::channel::<TonEreignis>();
+    let (ev_tx, ev_rx) = std::sync::mpsc::channel::<ToneEvent>();
     let (sdp_tx, sdp_rx) = std::sync::mpsc::channel::<Sdp>();
-    let zahlen = Arc::new(Mutex::new(Zahlen::default()));
-    let spuren: Arc<Mutex<HashMap<String, (u64, bool)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let numbers = Arc::new(Mutex::new(Numbers::default()));
+    let tracks: Arc<Mutex<HashMap<String, (u64, bool)>>> = Arc::new(Mutex::new(HashMap::new()));
     let is_muted = Arc::new(AtomicBool::new(false));
-    let ende = Arc::new(AtomicBool::new(false));
+    let end = Arc::new(AtomicBool::new(false));
 
-    let z2 = zahlen.clone();
-    let sp2 = spuren.clone();
+    let z2 = numbers.clone();
+    let sp2 = tracks.clone();
     let s2 = is_muted.clone();
-    let e2 = ende.clone();
+    let e2 = end.clone();
     std::thread::Builder::new()
         .name("meetrtc".into())
         .spawn(move || {
-            let r = lauf(
-                rtc, offen, socket, mid, vid, vid2, raus_rx, bild_rx, screen_rx, sdp_rx, &ev_tx,
+            let r = run(
+                rtc, offen, socket, mid, vid, vid2, out_rx, image_rx, screen_rx, sdp_rx, &ev_tx,
                 &z2, &s2, &e2, &sp2, e2e,
             );
             let text = match r {
                 Ok(()) => String::new(),
                 Err(e) => e.to_string(),
             };
-            let _ = ev_tx.send(TonEreignis::Ende(text));
+            let _ = ev_tx.send(ToneEvent::End(text));
         })
         .map_err(|e| anyhow!("Ton-Faden: {}", e))?;
 
     Ok(Ton {
-        raus: raus_tx,
-        bild_raus: bild_tx,
+        out: out_tx,
+        image_out: image_tx,
         screen_out: screen_tx,
-        ereignisse: ev_rx,
-        zahlen,
+        events: ev_rx,
+        numbers,
         is_muted,
-        ende,
-        angebot: angebot_sdp,
+        end,
+        offer: offer_sdp,
         mid: mid.to_string(),
         vid: vid.to_string(),
         vid2: vid2.to_string(),
-        spuren,
-        antwort: sdp_tx,
+        tracks,
+        reply: sdp_tx,
     })
 }
 
 /// All own IP addresses except loopback. Without third-party code: we ask the
 /// operating system by opening a connection "into the blue" (no packet
 /// flows) and looking at which address it chooses for it.
-fn eigene_adressen() -> Vec<std::net::IpAddr> {
+fn own_addresses() -> Vec<std::net::IpAddr> {
     let mut aus = Vec::new();
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
         if s.connect("8.8.8.8:53").is_ok() {
@@ -301,22 +301,22 @@ fn eigene_adressen() -> Vec<std::net::IpAddr> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lauf(
+fn run(
     mut rtc: Rtc,
     offen: str0m::change::SdpPendingOffer,
     socket: UdpSocket,
     mid: Mid,
     vid: Mid,
     vid2: Mid,
-    raus: std::sync::mpsc::Receiver<Vec<i16>>,
-    bild_raus: std::sync::mpsc::Receiver<Vec<u8>>,
+    out: std::sync::mpsc::Receiver<Vec<i16>>,
+    image_out: std::sync::mpsc::Receiver<Vec<u8>>,
     screen_out: std::sync::mpsc::Receiver<Vec<u8>>,
     sdp: std::sync::mpsc::Receiver<Sdp>,
-    ev: &std::sync::mpsc::Sender<TonEreignis>,
-    zahlen: &Arc<Mutex<Zahlen>>,
+    ev: &std::sync::mpsc::Sender<ToneEvent>,
+    numbers: &Arc<Mutex<Numbers>>,
     is_muted: &Arc<AtomicBool>,
-    ende: &Arc<AtomicBool>,
-    spuren: &Arc<Mutex<HashMap<String, (u64, bool)>>>,
+    end: &Arc<AtomicBool>,
+    tracks: &Arc<Mutex<HashMap<String, (u64, bool)>>>,
     e2e: Option<crate::meete2e::Key>,
 ) -> Result<()> {
     // Wait for the answer (comes in via the signalling).
@@ -328,28 +328,28 @@ fn lauf(
         audiopus::Application::Voip,
     )
     .map_err(|e| anyhow!("Opus-Kodierer: {:?}", e))?;
-    let mut dekodierer: HashMap<u64, audiopus::coder::Decoder> = HashMap::new();
+    let mut decoder: HashMap<u64, audiopus::coder::Decoder> = HashMap::new();
     // End-to-end: one `Sender` per outgoing stream (microphone, camera,
     // screen share). Each draws its own random salt, so no two streams -
     // nor a later rejoin - can ever repeat a (key, nonce) pair (roadmap r1).
     let mut e2e_ton = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Ton));
-    let mut e2e_video = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Bild));
-    let mut e2e_screen = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Bild));
+    let mut e2e_video = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Image));
+    let mut e2e_screen = e2e.as_ref().map(|k| k.sender(crate::meete2e::Spur::Image));
     // Audio mids from which we already saw old-format (v1) frames.
     let mut e2e_old_format_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // And per incoming track a guard against replay.
-    let mut e2e_wachen: HashMap<String, crate::meete2e::Wache> = HashMap::new();
+    let mut e2e_watch: HashMap<String, crate::meete2e::Guard> = HashMap::new();
     let mut puffer = vec![0u8; 4000];
     let mut aus_puffer = vec![0u8; 2000];
     // Which m-line belongs to whom? The server tells us via the
     // signalling ("track"), it is passed in from outside.
     let mut mid_zu_peer: HashMap<String, u64> = HashMap::new();
-    let mut naechster_rahmen = Instant::now();
+    let mut next_frame = Instant::now();
     let mut rtp_zeit: u64 = 0;
-    let mut verbunden_gemeldet = false;
+    let mut connected_reported = false;
     let mut pt: Option<str0m::media::Pt> = None;
     let mut vpt: Option<str0m::media::Pt> = None;
-    let mut bild_zeit: u64 = 0;
+    let mut image_time: u64 = 0;
     let mut spt: Option<str0m::media::Pt> = None;
     let mut screen_time: u64 = 0;
     // Whoever joins in the middle of a running stream only gets P frames -
@@ -357,46 +357,46 @@ fn lauf(
     // request one (the browser does the same) until one arrives.
     let mut has_key: HashMap<String, bool> = HashMap::new();
     // Audio frames waiting for their 20 ms slot. Bounded - see
-    // stau_abbauen().
+    // backlog_drain().
     let mut ton_warte: std::collections::VecDeque<Vec<i16>> =
         std::collections::VecDeque::new();
     // Only for the control experiment: with FV_TON_STAU=999999 the
     // client behaves like the old version (no draining). This way one can measure
     // that the draining really hits the cause and the test is not lying.
-    let ton_stau_max: usize = std::env::var("FV_TON_STAU")
+    let tone_backlog_max: usize = std::env::var("FV_TON_STAU")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(TON_STAU_MAX);
-    let mut zuletzt_gefragt: HashMap<String, Instant> = HashMap::new();
+        .unwrap_or(TONE_BACKLOG_MAX);
+    let mut lately_asked: HashMap<String, Instant> = HashMap::new();
 
     loop {
-        if ende.load(Ordering::Relaxed) {
+        if end.load(Ordering::Relaxed) {
             return Ok(());
         }
 
         // ---- SDP from the signalling --------------------------------------
         while let Ok(s) = sdp.try_recv() {
             match s {
-                Sdp::Antwort(text) => {
-                    let antwort = SdpAnswer::from_sdp_string(&text)
+                Sdp::Reply(text) => {
+                    let reply = SdpAnswer::from_sdp_string(&text)
                         .map_err(|e| anyhow!("Antwort unlesbar: {:?}", e))?;
                     if let Some(o) = offen.take() {
                         rtc.sdp_api()
-                            .accept_answer(o, antwort)
+                            .accept_answer(o, reply)
                             .map_err(|e| anyhow!("Antwort abgelehnt: {}", e))?;
                     }
                 }
-                Sdp::Angebot(text) => {
-                    let angebot = SdpOffer::from_sdp_string(&text)
+                Sdp::Offer(text) => {
+                    let offer = SdpOffer::from_sdp_string(&text)
                         .map_err(|e| anyhow!("Angebot unlesbar: {:?}", e))?;
-                    match rtc.sdp_api().accept_offer(angebot) {
+                    match rtc.sdp_api().accept_offer(offer) {
                         Ok(a) => {
-                            if let Ok(mut v) = ANTWORT_RAUS.lock() {
+                            if let Ok(mut v) = REPLY_OUT.lock() {
                                 v.push(a.to_sdp_string());
                             }
                         }
                         Err(e) => {
-                            let _ = ev.send(TonEreignis::FriendError(format!("Angebot: {}", e)));
+                            let _ = ev.send(ToneEvent::FriendError(format!("Angebot: {}", e)));
                         }
                     }
                 }
@@ -414,72 +414,72 @@ fn lauf(
                 .map(|m| m.remote_pts().to_vec())
                 .unwrap_or_default();
             if !pts.is_empty() {
-                let gefunden = rtc
+                let found = rtc
                     .codec_config()
                     .iter()
                     .find(|c| pts.contains(&c.pt()) && c.spec().codec == str0m::format::Codec::Opus)
                     .map(|c| c.pt());
-                if let Some(p) = gefunden {
+                if let Some(p) = found {
                     pt = Some(p);
                 }
             }
         }
 
         // ---- eigenen Ton verschicken ---------------------------------------
-        if rtc.is_alive() && Instant::now() >= naechster_rahmen {
-            naechster_rahmen += Duration::from_millis(20);
+        if rtc.is_alive() && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(20);
             // If the thread stalled for longer, the slot lies far in the
             // past - then do not rush to catch up, but
             // start anew. Otherwise a flood comes instead of a stream.
-            let jetzt_t = Instant::now();
-            if naechster_rahmen + Duration::from_millis(100) < jetzt_t {
-                naechster_rahmen = jetzt_t;
+            let now_t = Instant::now();
+            if next_frame + Duration::from_millis(100) < now_t {
+                next_frame = now_t;
             }
             // Collect everything the UI has delivered since the last time,
             // and cap the backlog.
-            while let Ok(p) = raus.try_recv() {
+            while let Ok(p) = out.try_recv() {
                 ton_warte.push_back(p);
             }
-            let weg = stau_abbauen(&mut ton_warte, ton_stau_max);
+            let weg = backlog_drain(&mut ton_warte, tone_backlog_max);
             if weg > 0 {
-                if let Ok(mut z) = zahlen.lock() {
-                    z.ton_verworfen += weg as u64;
+                if let Ok(mut z) = numbers.lock() {
+                    z.tone_dropped += weg as u64;
                 }
             }
-            if let Ok(mut z) = zahlen.lock() {
-                z.ton_stau = ton_warte.len() as u32;
+            if let Ok(mut z) = numbers.lock() {
+                z.tone_backlog = ton_warte.len() as u32;
             }
             if let Some(pcm) = ton_warte.pop_front() {
                 if !is_muted.load(Ordering::Relaxed) && pt.is_some() {
                     let n = kodierer
                         .encode(&pcm, &mut aus_puffer)
                         .map_err(|e| anyhow!("Opus: {:?}", e))?;
-                    let mut paket = aus_puffer[..n].to_vec();
+                    let mut packet = aus_puffer[..n].to_vec();
                     if let Some(s) = e2e_ton.as_mut() {
                         // Encrypt audio completely - the server does not
                         // touch Opus content.
-                        paket = s.schuetzen(false, &paket);
+                        packet = s.protect(false, &packet);
                     }
-                    let wanduhr = start + start.elapsed();
+                    let wall_clock = start + start.elapsed();
                     let zeit = MediaTime::new(rtp_zeit, str0m::media::Frequency::FORTY_EIGHT_KHZ);
                     if let Some(mut w) = rtc.writer(mid) {
                         if let Some(p) = pt {
-                            if let Err(e) = w.write(p, wanduhr, zeit, paket.clone()) {
-                                let _ = ev.send(TonEreignis::FriendError(format!("senden: {}", e)));
-                            } else if let Ok(mut z) = zahlen.lock() {
-                                z.gesendet += 1;
-                                z.bytes_raus += paket.len() as u64;
+                            if let Err(e) = w.write(p, wall_clock, zeit, packet.clone()) {
+                                let _ = ev.send(ToneEvent::FriendError(format!("senden: {}", e)));
+                            } else if let Ok(mut z) = numbers.lock() {
+                                z.sent += 1;
+                                z.bytes_out += packet.len() as u64;
                             }
                         }
                     }
-                    rtp_zeit += RAHMEN as u64;
+                    rtp_zeit += FRAME as u64;
                 }
             }
         }
 
         // ---- eigenes Bild verschicken --------------------------------------
         if rtc.is_alive() {
-            if let Ok(daten) = bild_raus.try_recv() {
+            if let Ok(daten) = image_out.try_recv() {
                 if vpt.is_none() {
                     let pts: Vec<str0m::media::Pt> = rtc
                         .media(vid)
@@ -496,24 +496,24 @@ fn lauf(
                     }
                 }
                 if let (Some(p), Some(mut w)) = (vpt, rtc.writer(vid)) {
-                    let wanduhr = start + start.elapsed();
-                    let zeit = MediaTime::new(bild_zeit, str0m::media::Frequency::NINETY_KHZ);
+                    let wall_clock = start + start.elapsed();
+                    let zeit = MediaTime::new(image_time, str0m::media::Frequency::NINETY_KHZ);
                     // Video: only the CONTENTS of the NAL units become secret,
                     // the structure stays readable - otherwise the server cannot
                     // packetise.
                     let daten = match e2e_video.as_mut() {
-                        Some(s) => s.schuetzen_h264(&daten),
+                        Some(s) => s.protect_h264(&daten),
                         None => daten,
                     };
                     let length = daten.len() as u64;
-                    if let Err(e) = w.write(p, wanduhr, zeit, daten) {
-                        let _ = ev.send(TonEreignis::FriendError(format!("Bild senden: {}", e)));
-                    } else if let Ok(mut z) = zahlen.lock() {
-                        z.bild_gesendet += 1;
-                        z.bytes_raus += length;
+                    if let Err(e) = w.write(p, wall_clock, zeit, daten) {
+                        let _ = ev.send(ToneEvent::FriendError(format!("Bild senden: {}", e)));
+                    } else if let Ok(mut z) = numbers.lock() {
+                        z.image_sent += 1;
+                        z.bytes_out += length;
                     }
                     // 90 kHz: one frame at 30 frames/s is 3000 steps.
-                    bild_zeit += 3000;
+                    image_time += 3000;
                 }
             }
         }
@@ -537,18 +537,18 @@ fn lauf(
                     }
                 }
                 if let (Some(p), Some(mut w)) = (spt, rtc.writer(vid2)) {
-                    let wanduhr = start + start.elapsed();
+                    let wall_clock = start + start.elapsed();
                     let zeit = MediaTime::new(screen_time, str0m::media::Frequency::NINETY_KHZ);
                     let daten = match e2e_screen.as_mut() {
-                        Some(s) => s.schuetzen_h264(&daten),
+                        Some(s) => s.protect_h264(&daten),
                         None => daten,
                     };
                     let length = daten.len() as u64;
-                    if let Err(e) = w.write(p, wanduhr, zeit, daten) {
-                        let _ = ev.send(TonEreignis::FriendError(format!("Bildschirm senden: {}", e)));
-                    } else if let Ok(mut z) = zahlen.lock() {
+                    if let Err(e) = w.write(p, wall_clock, zeit, daten) {
+                        let _ = ev.send(ToneEvent::FriendError(format!("Bildschirm senden: {}", e)));
+                    } else if let Ok(mut z) = numbers.lock() {
                         z.screen_sent += 1;
-                        z.bytes_raus += length;
+                        z.bytes_out += length;
                     }
                     screen_time += 3000;
                 }
@@ -565,12 +565,12 @@ fn lauf(
             Ok(Output::Event(e)) => {
                 match e {
                     Event::Connected => {
-                        if let Ok(mut z) = zahlen.lock() {
-                            z.verbunden = true;
+                        if let Ok(mut z) = numbers.lock() {
+                            z.connected = true;
                         }
-                        if !verbunden_gemeldet {
-                            verbunden_gemeldet = true;
-                            let _ = ev.send(TonEreignis::Verbunden);
+                        if !connected_reported {
+                            connected_reported = true;
+                            let _ = ev.send(ToneEvent::PeerConnected);
                         }
                     }
                     Event::MediaAdded(_) => {}
@@ -585,17 +585,17 @@ fn lauf(
                             // str0m darf spaeter weitere Arten kennen.
                             _ => 0,
                         };
-                        if let Ok(mut z) = zahlen.lock() {
-                            z.bandbreite = bps;
+                        if let Ok(mut z) = numbers.lock() {
+                            z.bandwidth = bps;
                         }
                     }
                     Event::MediaData(d) if d.pt.to_string() != "0" && ist_video(&rtc, d.mid) => {
-                        let (peer, display) = spuren
+                        let (peer, display) = tracks
                             .lock()
                             .ok()
                             .and_then(|m| m.get(&d.mid.to_string()).copied())
                             .unwrap_or((0, false));
-                        if let Ok(mut z) = zahlen.lock() {
+                        if let Ok(mut z) = numbers.lock() {
                             z.frame_received += 1;
                             z.bytes_rein += d.data.len() as u64;
                         }
@@ -604,13 +604,13 @@ fn lauf(
                         // on the encrypted frame (NAL type 5
                         // stays readable) - so the key
                         // is not needed for that.
-                        let is_keyframe = ist_schluesselbild(&d.data);
-                        let inhalt: Vec<u8> = match &e2e {
+                        let is_keyframe = is_keyframe_data(&d.data);
+                        let content: Vec<u8> = match &e2e {
                             Some(k) => match k.open_h264_guard(
-                                e2e_wachen.entry(d.mid.to_string()).or_default(),
+                                e2e_watch.entry(d.mid.to_string()).or_default(),
                                 &d.data,
                             ) {
-                                Some(klar) => klar,
+                                Some(cleartext) => cleartext,
                                 None => {
                                     // Wrong key, forged, or a replayed frame
                                     // (r60): do NOT show it. Better no picture
@@ -627,16 +627,16 @@ fn lauf(
                         if is_keyframe {
                             has_key.insert(mid_txt.clone(), true);
                         } else if !seen {
-                            let faellig = zuletzt_gefragt
+                            let due = lately_asked
                                 .get(&mid_txt)
                                 .map(|t| t.elapsed() >= Duration::from_millis(1000))
                                 .unwrap_or(true);
-                            if faellig {
-                                zuletzt_gefragt.insert(mid_txt.clone(), Instant::now());
-                                if let Some(strom) =
+                            if due {
+                                lately_asked.insert(mid_txt.clone(), Instant::now());
+                                if let Some(stream) =
                                     rtc.direct_api().stream_rx_by_mid(d.mid, d.rid)
                                 {
-                                    strom.request_keyframe(KeyframeRequestKind::Pli);
+                                    stream.request_keyframe(KeyframeRequestKind::Pli);
                                 }
                             }
                         }
@@ -646,22 +646,22 @@ fn lauf(
                             .find(|c| c.pt() == d.pt)
                             .map(|c| format!("{:?}", c.spec().codec))
                             .unwrap_or_else(|| "?".into());
-                        let _ = ev.send(TonEreignis::Bild {
-                            quelle: peer,
+                        let _ = ev.send(ToneEvent::Image {
+                            origin: peer,
                             display,
-                            daten: inhalt,
-                            schluesselbild: is_keyframe,
+                            daten: content,
+                            keyframe: is_keyframe,
                             codec,
                         });
                     }
                     Event::MediaData(d) => {
-                        let peer = spuren
+                        let peer = tracks
                             .lock()
                             .ok()
                             .and_then(|m| m.get(&d.mid.to_string()).map(|(p, _)| *p))
                             .or_else(|| mid_zu_peer.get(&d.mid.to_string()).copied())
                             .unwrap_or(0);
-                        let dek = dekodierer.entry(peer).or_insert_with(|| {
+                        let dek = decoder.entry(peer).or_insert_with(|| {
                             audiopus::coder::Decoder::new(
                                 audiopus::SampleRate::Hz48000,
                                 audiopus::Channels::Mono,
@@ -671,20 +671,20 @@ fn lauf(
                         // End-to-end: first open up, then decode.
                         // Replay is fended off per track - otherwise
                         // someone could feed old audio snippets in again.
-                        let ton_inhalt: Vec<u8> = match &e2e {
+                        let tone_content: Vec<u8> = match &e2e {
                             Some(k) => {
-                                let kopf = crate::meete2e::salz_von(&d.data)
+                                let head = crate::meete2e::salt_from(&d.data)
                                     .zip(crate::meete2e::counter_from(&d.data));
-                                let wache = e2e_wachen.entry(d.mid.to_string()).or_default();
-                                match (kopf, k.open(crate::meete2e::Spur::Ton, &d.data)) {
-                                    (Some((salz, zz)), Some(klar)) if wache.check(&salz, zz) => klar,
+                                let guard = e2e_watch.entry(d.mid.to_string()).or_default();
+                                match (head, k.open(crate::meete2e::Spur::Ton, &d.data)) {
+                                    (Some((nonce_salt, zz)), Some(cleartext)) if guard.check(&nonce_salt, zz) => cleartext,
                                     _ => {
                                         // A participant on the old, nonce-reusing
                                         // format: tell the user once per stream.
-                                        if crate::meete2e::ist_altes_format(&d.data)
+                                        if crate::meete2e::is_old_format(&d.data)
                                             && e2e_old_format_seen.insert(d.mid.to_string())
                                         {
-                                            let _ = ev.send(TonEreignis::FriendError(
+                                            let _ = ev.send(ToneEvent::FriendError(
                                                 "A participant uses an outdated end-to-end format - they must update."
                                                     .to_string(),
                                             ));
@@ -695,20 +695,20 @@ fn lauf(
                             }
                             None => d.data.to_vec(),
                         };
-                        let mut pcm = vec![0i16; RAHMEN];
+                        let mut pcm = vec![0i16; FRAME];
                         {
-                            if let Ok(n) = dek.decode(Some(&ton_inhalt[..]), &mut pcm[..], false) {
+                            if let Ok(n) = dek.decode(Some(&tone_content[..]), &mut pcm[..], false) {
                                 pcm.truncate(n);
-                                let pegel = pcm
+                                let level = pcm
                                     .iter()
                                     .map(|s| (*s as f32 / 32768.0).abs())
                                     .fold(0.0f32, f32::max);
-                                if let Ok(mut z) = zahlen.lock() {
+                                if let Ok(mut z) = numbers.lock() {
                                     z.receive += 1;
                                     z.bytes_rein += d.data.len() as u64;
-                                    z.pegel_rein = pegel;
+                                    z.level_pure = level;
                                 }
-                                let _ = ev.send(TonEreignis::Rahmen { quelle: peer, pcm });
+                                let _ = ev.send(ToneEvent::FrameBox { origin: peer, pcm });
                             }
                         }
                     }
@@ -725,21 +725,21 @@ fn lauf(
         };
 
         // ---- wait and receive -------------------------------------------
-        let jetzt = Instant::now();
-        let warte = bis.saturating_duration_since(jetzt).min(Duration::from_millis(10));
+        let now_ts = Instant::now();
+        let warte = bis.saturating_duration_since(now_ts).min(Duration::from_millis(10));
         socket.set_read_timeout(Some(warte.max(Duration::from_millis(1))))?;
         socket.set_nonblocking(false)?;
         match socket.recv_from(&mut puffer) {
             Ok((n, von)) => {
-                let ziel = socket.local_addr()?;
-                if let Ok(inhalt) = (&puffer[..n]).try_into() {
+                let dest = socket.local_addr()?;
+                if let Ok(content) = (&puffer[..n]).try_into() {
                     let _ = rtc.handle_input(Input::Receive(
                         Instant::now(),
                         Receive {
                             proto: Protocol::Udp,
                             source: von,
-                            destination: ziel,
-                            contents: inhalt,
+                            destination: dest,
+                            contents: content,
                         },
                     ));
                 }
@@ -761,7 +761,7 @@ fn lauf(
 /// 3 frames = 60 ms. More brings nothing: sending is strictly in
 /// 20 ms steps, so every frame above that would raise the delay
 /// permanently instead of draining it.
-pub const TON_STAU_MAX: usize = 3;
+pub const TONE_BACKLOG_MAX: usize = 3;
 
 /// Drain the backlog in the audio send buffer: the OLDEST frames are dropped.
 ///
@@ -775,7 +775,7 @@ pub const TON_STAU_MAX: usize = 3;
 ///
 /// Dropping happens at the FRONT, not at the back: the listener should hear the CURRENT
 /// word, not an old one. Returns how many frames were dropped.
-pub fn stau_abbauen(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize) -> usize {
+pub fn backlog_drain(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize) -> usize {
     let mut weg = 0usize;
     while warte.len() > max {
         warte.pop_front();
@@ -787,19 +787,19 @@ pub fn stau_abbauen(warte: &mut std::collections::VecDeque<Vec<i16>>, max: usize
 /// Does this m-line belong to video?
 /// Does this access point contain a key frame (IDR) or at least
 /// a parameter set (SPS)? Annex-B: start code, then NAL header.
-pub fn ist_schluesselbild(daten: &[u8]) -> bool {
+pub fn is_keyframe_data(daten: &[u8]) -> bool {
     let mut i = 0usize;
     while i + 4 < daten.len() {
         // Startcode 00 00 01 oder 00 00 00 01
         if daten[i] == 0 && daten[i + 1] == 0 {
-            let kopf = if daten[i + 2] == 1 {
+            let head = if daten[i + 2] == 1 {
                 Some(i + 3)
             } else if daten[i + 2] == 0 && daten[i + 3] == 1 {
                 Some(i + 4)
             } else {
                 None
             };
-            if let Some(k) = kopf {
+            if let Some(k) = head {
                 if k < daten.len() {
                     let typ = daten[k] & 0x1f;
                     if typ == 5 || typ == 7 {
@@ -823,11 +823,11 @@ fn ist_video(rtc: &Rtc, mid: Mid) -> bool {
 
 /// A test tone (sine) - for measurements without a microphone.
 pub fn testton(phase: &mut f32, hz: f32) -> Vec<i16> {
-    let mut v = Vec::with_capacity(RAHMEN);
-    let schritt = 2.0 * std::f32::consts::PI * hz / RATE as f32;
-    for _ in 0..RAHMEN {
+    let mut v = Vec::with_capacity(FRAME);
+    let step = 2.0 * std::f32::consts::PI * hz / RATE as f32;
+    for _ in 0..FRAME {
         v.push((phase.sin() * 12000.0) as i16);
-        *phase += schritt;
+        *phase += step;
         if *phase > 2.0 * std::f32::consts::PI {
             *phase -= 2.0 * std::f32::consts::PI;
         }
@@ -845,50 +845,50 @@ mod tests {
     /// Setup: the microphone delivers 500 frames (10 seconds of audio) at
     /// once - the way it happens after a hang. Afterwards sending is
     /// done as in operation, one frame per 20 ms slot.
-    fn rueckstau_in_ms(max: usize, geliefert: usize) -> usize {
+    fn backlog_in_ms(max: usize, delivered: usize) -> usize {
         let mut w: std::collections::VecDeque<Vec<i16>> = std::collections::VecDeque::new();
-        for _ in 0..geliefert {
-            w.push_back(vec![0i16; RAHMEN]);
+        for _ in 0..delivered {
+            w.push_back(vec![0i16; FRAME]);
         }
-        super::stau_abbauen(&mut w, max);
+        super::backlog_drain(&mut w, max);
         // Was uebrig bleibt, wartet - je Rahmen 20 ms Verzoegerung.
         w.len() * 20
     }
 
     #[test]
-    fn verzoegerung_waechst_nicht_mehr_ueber_die_schranke() {
+    fn delay_no_longer_grows_beyond_the_bound() {
         // 500 frames at once = 10 seconds of audio in the buffer.
-        let bleibt = rueckstau_in_ms(TON_STAU_MAX, 500);
+        let stays = backlog_in_ms(TONE_BACKLOG_MAX, 500);
         assert!(
-            bleibt <= 60,
+            stays <= 60,
             "{} ms of audio still waiting after the drain - that is the delay that stays",
-            bleibt
+            stays
         );
     }
 
     #[test]
-    fn gegenprobe_ohne_abbau_bleiben_sekunden_stehen() {
+    fn control_without_drain_seconds_remain() {
         // The same setup, but with a limit that never takes effect - this is how
         // the old version computed. If THIS test does not fail,
         // the upper one measures nothing.
-        let bleibt = rueckstau_in_ms(usize::MAX, 500);
+        let stays = backlog_in_ms(usize::MAX, 500);
         assert_eq!(
-            bleibt, 10_000,
+            stays, 10_000,
             "ohne Abbau muessten 10 Sekunden stehen bleiben"
         );
         assert!(
-            bleibt > 5_000,
+            stays > 5_000,
             "the control run shows no problem - then the measurement is useless"
         );
     }
 
     #[test]
-    fn abbau_wirft_das_alte_weg_und_behaelt_das_neue() {
+    fn drain_drops_the_old_and_keeps_the_new() {
         let mut w: std::collections::VecDeque<Vec<i16>> = std::collections::VecDeque::new();
         for n in 0..10i16 {
-            w.push_back(vec![n; RAHMEN]);
+            w.push_back(vec![n; FRAME]);
         }
-        let weg = super::stau_abbauen(&mut w, 3);
+        let weg = super::backlog_drain(&mut w, 3);
         assert_eq!(weg, 7);
         assert_eq!(w.len(), 3);
         // The youngest frame (9) must be kept, the oldest gone.
@@ -897,33 +897,33 @@ mod tests {
     }
 
     #[test]
-    fn schluesselbild_wird_im_ganzen_zugriffspunkt_gefunden() {
+    fn keyframe_is_found_in_whole_access_unit() {
         // SPS(7) + PPS(8) + IDR(5), each with start code - this is how it comes out of
         // the unpacking of str0m.
         let mut au = vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e];
         au.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce]);
         au.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84]);
-        assert!(ist_schluesselbild(&au));
+        assert!(is_keyframe_data(&au));
         // Reines P-Bild (Typ 1) - kein Schluesselbild.
         let p = vec![0, 0, 0, 1, 0x41, 0x9a, 0x21, 0x6c, 0x45, 0xff];
-        assert!(!ist_schluesselbild(&p));
+        assert!(!is_keyframe_data(&p));
         // The IDR is FAR back - the old check only looked at 8 bytes.
         let mut spaet = vec![0, 0, 0, 1, 0x41];
         spaet.extend(std::iter::repeat(0x33).take(60));
         spaet.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x11]);
-        assert!(ist_schluesselbild(&spaet), "IDR hinter dem 8. Byte uebersehen");
+        assert!(is_keyframe_data(&spaet), "IDR hinter dem 8. Byte uebersehen");
     }
 
     #[test]
     fn test_tone_has_right_length_and_oscillates() {
         let mut p = 0.0;
         let a = testton(&mut p, 440.0);
-        assert_eq!(a.len(), RAHMEN);
+        assert_eq!(a.len(), FRAME);
         let spitze = a.iter().map(|s| s.abs()).max().unwrap();
         assert!(spitze > 8000, "Testton zu leise: {}", spitze);
         // second frame continues the oscillation, so does not start at 0
         let b = testton(&mut p, 440.0);
-        assert_eq!(b.len(), RAHMEN);
+        assert_eq!(b.len(), FRAME);
     }
 
     #[test]
@@ -944,19 +944,19 @@ mod tests {
         let mut aus = vec![0u8; 2000];
         let n = enc.encode(&ton, &mut aus).unwrap();
         assert!(n > 10, "Opus-Paket zu klein: {}", n);
-        let mut go_back = vec![0i16; RAHMEN];
+        let mut go_back = vec![0i16; FRAME];
         let m = dec.decode(Some(&aus[..n]), &mut go_back[..], false).unwrap();
-        assert_eq!(m, RAHMEN);
+        assert_eq!(m, FRAME);
         let spitze = go_back.iter().map(|s| s.abs()).max().unwrap();
         assert!(spitze > 4000, "Dekodierter Ton zu leise: {}", spitze);
     }
 
     #[test]
-    fn angebot_enthaelt_opus_und_eine_tonspur() {
+    fn offer_has_opus_and_an_audio_track() {
         let ton = launch().expect("Ton startet");
-        assert!(ton.angebot.contains("m=audio"), "no audio in the offer");
+        assert!(ton.offer.contains("m=audio"), "no audio in the offer");
         assert!(
-            ton.angebot.to_lowercase().contains("opus"),
+            ton.offer.to_lowercase().contains("opus"),
             "no Opus in the offer"
         );
         assert!(!ton.mid.is_empty());
@@ -964,11 +964,11 @@ mod tests {
     }
 
     #[test]
-    fn angebot_enthaelt_auch_eine_bildspur_mit_h264() {
+    fn offer_also_has_an_image_track_with_h264() {
         let ton = launch().expect("startet");
-        assert!(ton.angebot.contains("m=video"), "no video track in the offer");
+        assert!(ton.offer.contains("m=video"), "no video track in the offer");
         assert!(
-            ton.angebot.to_uppercase().contains("H264"),
+            ton.offer.to_uppercase().contains("H264"),
             "no H.264 in the offer"
         );
         assert!(!ton.vid.is_empty(), "no id for the video track");
@@ -978,12 +978,12 @@ mod tests {
     #[test]
     fn offer_has_third_track_for_display() {
         let ton = launch().expect("startet");
-        let zeilen = ton.angebot.lines().filter(|l| l.starts_with("m=")).count();
-        assert_eq!(zeilen, 3, "Angebot:\n{}", ton.angebot);
+        let rows = ton.offer.lines().filter(|l| l.starts_with("m=")).count();
+        assert_eq!(rows, 3, "Angebot:\n{}", ton.offer);
         assert_ne!(ton.vid2, ton.vid, "screen and camera on the same track");
         assert_ne!(ton.vid2, ton.mid, "screen and audio on the same track");
         assert_eq!(
-            ton.angebot.matches("H264").count() >= 2,
+            ton.offer.matches("H264").count() >= 2,
             true,
             "beide Bildspuren muessen H.264 anbieten"
         );

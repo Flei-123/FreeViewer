@@ -43,37 +43,37 @@ use std::sync::{Arc, Mutex};
 
 /// First byte of every v2 frame. A v1 receiver sees a foreign marker and
 /// drops the frame instead of showing garbage.
-pub const KENNUNG: u8 = 0xE3;
+pub const TAG: u8 = 0xE3;
 
 /// Blob byte 0 of an encrypted slice NAL unit (type 1/5) by the slice's
 /// pic_parameter_set_id (r82). A receiving WebRTC stack parses
 /// first_mb_in_slice, slice_type and pps_id (Exp-Golomb) from the first bytes
 /// of each slice and drops frames whose pps_id has no PPS. The byte is built
 /// to read 0, 0, pps_id: bits '1' '1' ue(pps_id) + padding. Index = pps_id;
-/// 0 is the classic `KENNUNG`. Other pps_ids (> 6) keep `KENNUNG`.
-const VIDEO_KENNUNG: [u8; 7] = [0xE3, 0xD3, 0xDB, 0xC9, 0xCB, 0xCD, 0xCF];
+/// 0 is the classic `TAG`. Other pps_ids (> 6) keep `TAG`.
+const VIDEO_TAG: [u8; 7] = [0xE3, 0xD3, 0xDB, 0xC9, 0xCB, 0xCD, 0xCF];
 
 /// Does this blob byte 0 belong to a v2 video blob?
-fn ist_video_kennung(b: u8) -> bool {
-    VIDEO_KENNUNG.contains(&b)
+fn is_video_tag(b: u8) -> bool {
+    VIDEO_TAG.contains(&b)
 }
 
 /// Exp-Golomb ue(v) at a bit offset: (value, next bit).
 fn lese_ue(d: &[u8], mut bit: usize) -> Option<(u32, usize)> {
-    let mut nullen = 0u32;
+    let mut zero = 0u32;
     loop {
-        if bit >= d.len() * 8 || nullen > 16 {
+        if bit >= d.len() * 8 || zero > 16 {
             return None;
         }
         if (d[bit >> 3] >> (7 - (bit & 7))) & 1 == 1 {
             break;
         }
-        nullen += 1;
+        zero += 1;
         bit += 1;
     }
     bit += 1;
     let mut wert = 1u32;
-    for _ in 0..nullen {
+    for _ in 0..zero {
         if bit >= d.len() * 8 {
             return None;
         }
@@ -84,23 +84,23 @@ fn lese_ue(d: &[u8], mut bit: usize) -> Option<(u32, usize)> {
 }
 
 /// pic_parameter_set_id of a slice NAL payload (after the NAL header byte).
-fn slice_pps_id(inhalt: &[u8]) -> Option<u32> {
-    let kopf = &inhalt[..inhalt.len().min(8)];
-    let (_, b) = lese_ue(kopf, 0)?;
-    let (_, b) = lese_ue(kopf, b)?;
-    lese_ue(kopf, b).map(|(pps, _)| pps)
+fn slice_pps_id(content: &[u8]) -> Option<u32> {
+    let head = &content[..content.len().min(8)];
+    let (_, b) = lese_ue(head, 0)?;
+    let (_, b) = lese_ue(head, b)?;
+    lese_ue(head, b).map(|(pps, _)| pps)
 }
 
 /// Blob byte 0 of one encrypted NAL unit.
-fn video_kennung(nal_typ: u8, inhalt: &[u8]) -> u8 {
+fn video_tag(nal_typ: u8, content: &[u8]) -> u8 {
     if nal_typ == 1 || nal_typ == 5 {
-        if let Some(pps) = slice_pps_id(inhalt) {
-            if let Some(b) = VIDEO_KENNUNG.get(pps as usize) {
+        if let Some(pps) = slice_pps_id(content) {
+            if let Some(b) = VIDEO_TAG.get(pps as usize) {
                 return *b;
             }
         }
     }
-    KENNUNG
+    TAG
 }
 
 /// Frame format version announced to the server in the join (`caps.e2e_ver`).
@@ -108,13 +108,13 @@ pub const FORMAT_VERSION: u8 = 2;
 /// First byte of v1 audio frames (the vulnerable format). Never accepted.
 pub const MARKER_V1: u8 = 0xE2;
 /// Length of the clear audio header: version, flags, salt, counter.
-pub const KOPF: usize = 14;
+pub const HEAD: usize = 14;
 /// Length of the sender salt.
 pub const SALT_LEN: usize = 8;
 /// Length of the per-NAL blob header: version, salt, counter, NAL index.
 const NAL_HEAD: usize = 1 + SALT_LEN + 4 + 2;
 /// Flags byte, bit 0.
-const MERKER_SCHLUESSELBILD: u8 = 0x01;
+const MARKER_KEYFRAME: u8 = 0x01;
 /// HKDF salt of format v2 (v1 used "freemeet-e2e-v1": keys never overlap).
 const KDF_SALT: &[u8] = b"freemeet-e2e-v2";
 /// How many derived stream keys a receiver remembers before it starts over.
@@ -129,20 +129,20 @@ pub type Salt = [u8; SALT_LEN];
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Spur {
     Ton,
-    Bild,
+    Image,
 }
 
 impl Spur {
     fn id(self) -> u8 {
         match self {
             Spur::Ton => 1,
-            Spur::Bild => 2,
+            Spur::Image => 2,
         }
     }
     fn info(self) -> &'static [u8] {
         match self {
             Spur::Ton => b"ton",
-            Spur::Bild => b"bild",
+            Spur::Image => b"bild",
         }
     }
 }
@@ -251,11 +251,11 @@ impl Key {
     /// Start an outgoing stream with a fresh random sender salt. Create ONE
     /// `Sender` per microphone, camera, screen share and per (re)join.
     pub fn sender(&self, spur: Spur) -> Sender {
-        self.sender_mit_salz(spur, random_salt())
+        self.sender_with_salt(spur, random_salt())
     }
 
     /// Like `sender`, with a chosen salt (tests only).
-    pub fn sender_mit_salz(&self, spur: Spur, salt: Salt) -> Sender {
+    pub fn sender_with_salt(&self, spur: Spur, salt: Salt) -> Sender {
         Sender {
             key: self.clone(),
             spur,
@@ -272,40 +272,40 @@ impl Key {
         spur: Spur,
         salt: &Salt,
         counter: u32,
-        schluesselbild: bool,
-        klar: &[u8],
+        keyframe: bool,
+        cleartext: &[u8],
     ) -> Vec<u8> {
-        let mut kopf = [0u8; KOPF];
-        kopf[0] = KENNUNG;
-        kopf[1] = if schluesselbild { MERKER_SCHLUESSELBILD } else { 0 };
-        kopf[2..2 + SALT_LEN].copy_from_slice(salt);
-        kopf[2 + SALT_LEN..KOPF].copy_from_slice(&counter.to_be_bytes());
+        let mut head = [0u8; HEAD];
+        head[0] = TAG;
+        head[1] = if keyframe { MARKER_KEYFRAME } else { 0 };
+        head[2..2 + SALT_LEN].copy_from_slice(salt);
+        head[2 + SALT_LEN..HEAD].copy_from_slice(&counter.to_be_bytes());
         let nonce = make_nonce(spur, 0, salt, counter);
-        let geheim = self
+        let secret = self
             .cipher(spur, salt)
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
-                    msg: klar,
-                    aad: &kopf,
+                    msg: cleartext,
+                    aad: &head,
                 },
             )
             .unwrap_or_default();
-        let mut aus = Vec::with_capacity(KOPF + geheim.len());
-        aus.extend_from_slice(&kopf);
-        aus.extend_from_slice(&geheim);
+        let mut aus = Vec::with_capacity(HEAD + secret.len());
+        aus.extend_from_slice(&head);
+        aus.extend_from_slice(&secret);
         aus
     }
 
     /// Decrypt one audio frame. None = not our format (also: v1), wrong key
     /// or tampered - in every case do NOT show it.
-    pub fn open(&self, spur: Spur, rahmen: &[u8]) -> Option<Vec<u8>> {
-        if !ist_geschuetzt(rahmen) {
+    pub fn open(&self, spur: Spur, frame_box: &[u8]) -> Option<Vec<u8>> {
+        if !is_protected(frame_box) {
             return None;
         }
-        let kopf = &rahmen[..KOPF];
-        let salt = salz_von(rahmen)?;
-        let counter = counter_from(rahmen)?;
+        let head = &frame_box[..HEAD];
+        let salt = salt_from(frame_box)?;
+        let counter = counter_from(frame_box)?;
         let nonce = make_nonce(spur, 0, &salt, counter);
         // The salt is attacker-controlled until the tag checks out, so a
         // stream key is only remembered after a successful decryption.
@@ -313,19 +313,19 @@ impl Key {
             Some(c) => (c, true),
             None => (self.derive_cipher(spur, &salt), false),
         };
-        let klar = cipher
+        let cleartext = cipher
             .decrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
-                    msg: &rahmen[KOPF..],
-                    aad: kopf,
+                    msg: &frame_box[HEAD..],
+                    aad: head,
                 },
             )
             .ok()?;
         if !was_cached {
             self.remember(spur, &salt, &cipher);
         }
-        Some(klar)
+        Some(cleartext)
     }
 }
 
@@ -341,7 +341,7 @@ pub struct Sender {
 
 impl Sender {
     /// Current sender salt (it travels in every frame).
-    pub fn salz(&self) -> Salt {
+    pub fn nonce_salt(&self) -> Salt {
         self.salt
     }
 
@@ -358,18 +358,18 @@ impl Sender {
     }
 
     /// Encrypt one audio frame.
-    pub fn schuetzen(&mut self, schluesselbild: bool, klar: &[u8]) -> Vec<u8> {
+    pub fn protect(&mut self, keyframe: bool, cleartext: &[u8]) -> Vec<u8> {
         debug_assert_eq!(self.spur, Spur::Ton, "audio frames need an audio sender");
         let (salt, c) = self.take();
         self.key
-            .seal_audio_at(self.spur, &salt, c, schluesselbild, klar)
+            .seal_audio_at(self.spur, &salt, c, keyframe, cleartext)
     }
 
     /// Encrypt one H.264 frame (structure stays readable).
-    pub fn schuetzen_h264(&mut self, rahmen: &[u8]) -> Vec<u8> {
-        debug_assert_eq!(self.spur, Spur::Bild, "video frames need a video sender");
+    pub fn protect_h264(&mut self, frame_box: &[u8]) -> Vec<u8> {
+        debug_assert_eq!(self.spur, Spur::Image, "video frames need a video sender");
         let (salt, c) = self.take();
-        self.key.seal_h264_at(&salt, c, rahmen)
+        self.key.seal_h264_at(&salt, c, frame_box)
     }
 
     /// Test hook: jump the counter (to test the rotation at the end).
@@ -405,7 +405,7 @@ impl Sender {
 
 /// Where does the next NAL unit start? Returns (start of the start code,
 /// start of the data).
-fn naechster_startcode(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
+fn next_start_code(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
     let mut i = ab;
     while i + 3 <= daten.len() {
         if daten[i] == 0 && daten[i + 1] == 0 {
@@ -423,11 +423,11 @@ fn naechster_startcode(daten: &[u8], ab: usize) -> Option<(usize, usize)> {
 
 /// Einen Annex-B-Rahmen in seine NAL-Einheiten zerlegen: (Startcode-Beginn,
 /// Daten-Beginn, Daten-Ende).
-pub fn nal_einheiten(daten: &[u8]) -> Vec<(usize, usize, usize)> {
+pub fn nal_units(daten: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut aus = Vec::new();
     let mut search = 0usize;
     let mut offen: Option<(usize, usize)> = None;
-    while let Some((sc, db)) = naechster_startcode(daten, search) {
+    while let Some((sc, db)) = next_start_code(daten, search) {
         if let Some((osc, odb)) = offen {
             aus.push((osc, odb, sc));
         }
@@ -444,46 +444,46 @@ pub fn nal_einheiten(daten: &[u8]) -> Vec<(usize, usize, usize)> {
 ///
 /// SPS/PPS describe only size and encoding parameters - no picture content -
 /// and the packer in the server needs them. AUD is a pure separator.
-fn nal_bleibt_klar(typ: u8) -> bool {
+fn nal_stays_clear(typ: u8) -> bool {
     matches!(typ, 7 | 8 | 9)
 }
 
 /// Den Schutz gegen falsche Startcodes einfuegen (wie H.264 selbst).
 fn epb_ein(daten: &[u8]) -> Vec<u8> {
     let mut aus = Vec::with_capacity(daten.len() + daten.len() / 64 + 4);
-    let mut nullen = 0usize;
+    let mut zero = 0usize;
     for &b in daten {
-        if nullen >= 2 && b <= 3 {
+        if zero >= 2 && b <= 3 {
             aus.push(3);
-            nullen = 0;
+            zero = 0;
         }
         aus.push(b);
         if b == 0 {
-            nullen += 1;
+            zero += 1;
         } else {
-            nullen = 0;
+            zero = 0;
         }
     }
     aus
 }
 
 /// Take the protection out again.
-fn epb_raus(daten: &[u8]) -> Vec<u8> {
+fn epb_out(daten: &[u8]) -> Vec<u8> {
     let mut aus = Vec::with_capacity(daten.len());
-    let mut nullen = 0usize;
+    let mut zero = 0usize;
     let mut i = 0usize;
     while i < daten.len() {
         let b = daten[i];
-        if nullen >= 2 && b == 3 && i + 1 < daten.len() && daten[i + 1] <= 3 {
-            nullen = 0;
+        if zero >= 2 && b == 3 && i + 1 < daten.len() && daten[i + 1] <= 3 {
+            zero = 0;
             i += 1;
             continue;
         }
         aus.push(b);
         if b == 0 {
-            nullen += 1;
+            zero += 1;
         } else {
-            nullen = 0;
+            zero = 0;
         }
         i += 1;
     }
@@ -492,7 +492,7 @@ fn epb_raus(daten: &[u8]) -> Vec<u8> {
 
 // Per-NAL blob (inside the emulation-prevention escaping), format v2:
 //   byte 0       version: 0xE3, or for slice NAL units the pps_id byte of
-//                VIDEO_KENNUNG (so a receiving WebRTC stack finds a PPS)
+//                VIDEO_TAG (so a receiving WebRTC stack finds a PPS)
 //   byte 1..9    sender salt
 //   byte 9..13   counter (32 bit, big endian)
 //   byte 13..15  NAL index inside the frame (16 bit, big endian)
@@ -502,50 +502,50 @@ fn epb_raus(daten: &[u8]) -> Vec<u8> {
 impl Key {
     /// Encrypt one H.264 frame with an explicit salt + counter. LOW LEVEL
     /// like `seal_audio_at`: use a `Sender`.
-    pub fn seal_h264_at(&self, salt: &Salt, counter: u32, rahmen: &[u8]) -> Vec<u8> {
-        let teile = nal_einheiten(rahmen);
-        if teile.is_empty() {
-            return rahmen.to_vec(); // not Annex B: leave untouched
+    pub fn seal_h264_at(&self, salt: &Salt, counter: u32, frame_box: &[u8]) -> Vec<u8> {
+        let parts = nal_units(frame_box);
+        if parts.is_empty() {
+            return frame_box.to_vec(); // not Annex B: leave untouched
         }
-        if teile.len() > u16::MAX as usize {
+        if parts.len() > u16::MAX as usize {
             // The NAL index (part of the nonce) would repeat. Never happens
             // with a real encoder; send nothing rather than reuse a nonce.
             return Vec::new();
         }
-        let cipher = self.cipher(Spur::Bild, salt);
-        let mut aus = Vec::with_capacity(rahmen.len() + teile.len() * (NAL_HEAD + 16 + 2));
-        for (nr, (sc, db, ende)) in teile.iter().enumerate() {
-            let kopf_byte = rahmen[*db];
-            let typ = kopf_byte & 0x1f;
+        let cipher = self.cipher(Spur::Image, salt);
+        let mut aus = Vec::with_capacity(frame_box.len() + parts.len() * (NAL_HEAD + 16 + 2));
+        for (nr, (sc, db, end)) in parts.iter().enumerate() {
+            let head_byte = frame_box[*db];
+            let typ = head_byte & 0x1f;
             // Start code and NAL header byte always stay in the clear.
-            aus.extend_from_slice(&rahmen[*sc..*db + 1]);
-            let inhalt = &rahmen[*db + 1..*ende];
-            if nal_bleibt_klar(typ) || inhalt.is_empty() {
-                aus.extend_from_slice(inhalt);
+            aus.extend_from_slice(&frame_box[*sc..*db + 1]);
+            let content = &frame_box[*db + 1..*end];
+            if nal_stays_clear(typ) || content.is_empty() {
+                aus.extend_from_slice(content);
                 continue;
             }
             let nr16 = nr as u16;
-            let mut blob = Vec::with_capacity(NAL_HEAD + inhalt.len() + 16);
-            blob.push(video_kennung(typ, inhalt));
+            let mut blob = Vec::with_capacity(NAL_HEAD + content.len() + 16);
+            blob.push(video_tag(typ, content));
             blob.extend_from_slice(salt);
             blob.extend_from_slice(&counter.to_be_bytes());
             blob.extend_from_slice(&nr16.to_be_bytes());
             // NAL header byte + blob header are authenticated: swapping the
             // counter, salt or NAL index invalidates the frame.
             let mut aad = Vec::with_capacity(1 + NAL_HEAD);
-            aad.push(kopf_byte);
+            aad.push(head_byte);
             aad.extend_from_slice(&blob);
-            let nonce = make_nonce(Spur::Bild, nr16, salt, counter);
-            let geheim = cipher
+            let nonce = make_nonce(Spur::Image, nr16, salt, counter);
+            let secret = cipher
                 .encrypt(
                     Nonce::from_slice(&nonce),
                     Payload {
-                        msg: inhalt,
+                        msg: content,
                         aad: &aad,
                     },
                 )
                 .unwrap_or_default();
-            blob.extend_from_slice(&geheim);
+            blob.extend_from_slice(&secret);
             aus.extend_from_slice(&epb_ein(&blob));
         }
         aus
@@ -554,19 +554,19 @@ impl Key {
     /// Open an encrypted H.264 frame. None = wrong key, tampered, or an old
     /// (v1) / foreign format. Does NOT guard against replays: use
     /// `open_h264_guard` in a receiver.
-    pub fn open_h264(&self, rahmen: &[u8]) -> Option<Vec<u8>> {
-        self.open_h264_head(rahmen).map(|(klar, _)| klar)
+    pub fn open_h264(&self, frame_box: &[u8]) -> Option<Vec<u8>> {
+        self.open_h264_head(frame_box).map(|(cleartext, _)| cleartext)
     }
 
     /// Open an encrypted H.264 frame AND reject replays (r60). The check runs
     /// only after the tags verified, so forged frames cannot move the window.
     /// A frame without any encrypted NAL unit (only SPS/PPS/AUD) has no
     /// counter and is passed on.
-    pub fn open_h264_guard(&self, wache: &mut Wache, rahmen: &[u8]) -> Option<Vec<u8>> {
-        let (klar, kopf) = self.open_h264_head(rahmen)?;
-        match kopf {
-            Some((salz, ctr)) if !wache.check(&salz, ctr) => None,
-            _ => Some(klar),
+    pub fn open_h264_guard(&self, guard: &mut Guard, frame_box: &[u8]) -> Option<Vec<u8>> {
+        let (cleartext, head) = self.open_h264_head(frame_box)?;
+        match head {
+            Some((nonce_salt, ctr)) if !guard.check(&nonce_salt, ctr) => None,
+            _ => Some(cleartext),
         }
     }
 
@@ -575,25 +575,25 @@ impl Key {
     /// all encrypted NAL units must name the SAME salt+counter, and their NAL
     /// indices must strictly increase. Otherwise NAL units of different frames
     /// could be spliced (each tag is valid on its own), repeated or reordered.
-    pub fn open_h264_head(&self, rahmen: &[u8]) -> Option<(Vec<u8>, Option<(Salt, u32)>)> {
-        let teile = nal_einheiten(rahmen);
-        if teile.is_empty() {
+    pub fn open_h264_head(&self, frame_box: &[u8]) -> Option<(Vec<u8>, Option<(Salt, u32)>)> {
+        let parts = nal_units(frame_box);
+        if parts.is_empty() {
             return None;
         }
-        let mut aus = Vec::with_capacity(rahmen.len());
-        let mut frame_kopf: Option<(Salt, u32)> = None;
-        let mut letzte_nr: Option<u16> = None;
-        for (sc, db, ende) in teile {
-            let kopf_byte = rahmen[db];
-            let typ = kopf_byte & 0x1f;
-            aus.extend_from_slice(&rahmen[sc..db + 1]);
-            let inhalt = &rahmen[db + 1..ende];
-            if nal_bleibt_klar(typ) || inhalt.is_empty() {
-                aus.extend_from_slice(inhalt);
+        let mut aus = Vec::with_capacity(frame_box.len());
+        let mut frame_head: Option<(Salt, u32)> = None;
+        let mut last_nr: Option<u16> = None;
+        for (sc, db, end) in parts {
+            let head_byte = frame_box[db];
+            let typ = head_byte & 0x1f;
+            aus.extend_from_slice(&frame_box[sc..db + 1]);
+            let content = &frame_box[db + 1..end];
+            if nal_stays_clear(typ) || content.is_empty() {
+                aus.extend_from_slice(content);
                 continue;
             }
-            let roh = epb_raus(inhalt);
-            if roh.len() < NAL_HEAD + 16 || !ist_video_kennung(roh[0]) {
+            let roh = epb_out(content);
+            if roh.len() < NAL_HEAD + 16 || !is_video_tag(roh[0]) {
                 return None;
             }
             let mut salt = [0u8; SALT_LEN];
@@ -601,23 +601,23 @@ impl Key {
             let o = 1 + SALT_LEN;
             let counter = u32::from_be_bytes([roh[o], roh[o + 1], roh[o + 2], roh[o + 3]]);
             let nr16 = u16::from_be_bytes([roh[o + 4], roh[o + 5]]);
-            match frame_kopf {
+            match frame_head {
                 Some(k) if k != (salt, counter) => return None, // spliced from two frames
-                _ => frame_kopf = Some((salt, counter)),
+                _ => frame_head = Some((salt, counter)),
             }
-            if letzte_nr.is_some_and(|l| nr16 <= l) {
+            if last_nr.is_some_and(|l| nr16 <= l) {
                 return None; // repeated or reordered NAL unit
             }
-            letzte_nr = Some(nr16);
+            last_nr = Some(nr16);
             let mut aad = Vec::with_capacity(1 + NAL_HEAD);
-            aad.push(kopf_byte);
+            aad.push(head_byte);
             aad.extend_from_slice(&roh[..NAL_HEAD]);
-            let nonce = make_nonce(Spur::Bild, nr16, &salt, counter);
-            let (cipher, was_cached) = match self.cached(Spur::Bild, &salt) {
+            let nonce = make_nonce(Spur::Image, nr16, &salt, counter);
+            let (cipher, was_cached) = match self.cached(Spur::Image, &salt) {
                 Some(c) => (c, true),
-                None => (self.derive_cipher(Spur::Bild, &salt), false),
+                None => (self.derive_cipher(Spur::Image, &salt), false),
             };
-            let klar = cipher
+            let cleartext = cipher
                 .decrypt(
                     Nonce::from_slice(&nonce),
                     Payload {
@@ -627,82 +627,82 @@ impl Key {
                 )
                 .ok()?;
             if !was_cached {
-                self.remember(Spur::Bild, &salt, &cipher);
+                self.remember(Spur::Image, &salt, &cipher);
             }
-            aus.extend_from_slice(&klar);
+            aus.extend_from_slice(&cleartext);
         }
-        Some((aus, frame_kopf))
+        Some((aus, frame_head))
     }
 }
 
 /// Does this look like a protected (v2) audio frame? (The server asks too.)
-pub fn ist_geschuetzt(rahmen: &[u8]) -> bool {
-    rahmen.len() > KOPF + 16 && rahmen[0] == KENNUNG
+pub fn is_protected(frame_box: &[u8]) -> bool {
+    frame_box.len() > HEAD + 16 && frame_box[0] == TAG
 }
 
 /// Is this an audio frame of the OLD, vulnerable format (v1)? Such a
 /// participant has to update; their frames are never opened.
-pub fn ist_altes_format(rahmen: &[u8]) -> bool {
-    !rahmen.is_empty() && rahmen[0] == MARKER_V1
+pub fn is_old_format(frame_box: &[u8]) -> bool {
+    !frame_box.is_empty() && frame_box[0] == MARKER_V1
 }
 
 /// Does it contain a key frame? The server may read this - it needs it to
 /// switch quality layers.
-pub fn ist_schluesselbild(rahmen: &[u8]) -> Option<bool> {
-    if !ist_geschuetzt(rahmen) {
+pub fn is_keyframe_data(frame_box: &[u8]) -> Option<bool> {
+    if !is_protected(frame_box) {
         return None;
     }
-    Some(rahmen[1] & MERKER_SCHLUESSELBILD != 0)
+    Some(frame_box[1] & MARKER_KEYFRAME != 0)
 }
 
 /// Counter of an audio frame.
-pub fn counter_from(rahmen: &[u8]) -> Option<u32> {
-    if !ist_geschuetzt(rahmen) {
+pub fn counter_from(frame_box: &[u8]) -> Option<u32> {
+    if !is_protected(frame_box) {
         return None;
     }
     let o = 2 + SALT_LEN;
     Some(u32::from_be_bytes([
-        rahmen[o],
-        rahmen[o + 1],
-        rahmen[o + 2],
-        rahmen[o + 3],
+        frame_box[o],
+        frame_box[o + 1],
+        frame_box[o + 2],
+        frame_box[o + 3],
     ]))
 }
 
 /// Sender salt of an audio frame.
-pub fn salz_von(rahmen: &[u8]) -> Option<Salt> {
-    if !ist_geschuetzt(rahmen) {
+pub fn salt_from(frame_box: &[u8]) -> Option<Salt> {
+    if !is_protected(frame_box) {
         return None;
     }
     let mut s = [0u8; SALT_LEN];
-    s.copy_from_slice(&rahmen[2..2 + SALT_LEN]);
+    s.copy_from_slice(&frame_box[2..2 + SALT_LEN]);
     Some(s)
 }
 
 /// Replay window (64 numbers below the highest) of ONE sender salt.
 #[derive(Default)]
 struct Window {
-    hoechste: u32,
-    /// Bit field of the last 64 numbers below `hoechste` (the network may reorder).
+    highest: u32,
+    /// Bit field of the last 64 numbers below `highest` (the network may reorder).
     window: u64,
 }
 
 impl Window {
     fn check(&mut self, ctr: u32) -> bool {
-        if ctr > self.hoechste {
-            let schritt = ctr - self.hoechste;
+        if ctr > self.highest {
+            let step = ctr - self.highest;
             // The old highest becomes bit (schritt - 1). With a step of
             // exactly 64 that is bit 63 and the old bits fall out; a larger
             // step forgets everything.
-            self.window = match schritt {
-                1..=63 => (self.window << schritt) | (1u64 << (schritt - 1)),
+            self.window = match step {
+                1..=63 => (self.window << step) | (1u64 << (step - 1)),
                 64 => 1u64 << 63,
                 _ => 0,
             };
-            self.hoechste = ctr;
+            self.highest = ctr;
             return true;
         }
-        let go_back = self.hoechste - ctr;
+        let go_back = self.highest - ctr;
         if go_back == 0 || go_back > 64 {
             return false; // exactly the highest, or long out of the window
         }
@@ -723,24 +723,24 @@ impl Window {
 /// The last `GUARD_SALTS_MAX` salts are remembered; a replay of a stream that
 /// was evicted since is not detected (documented limit).
 #[derive(Default)]
-pub struct Wache {
+pub struct Guard {
     window: Vec<(Salt, Window)>,
 }
 
-impl Wache {
+impl Guard {
     /// True = new and fine. False = repeat or too old.
-    pub fn check(&mut self, salz: &Salt, ctr: u32) -> bool {
-        if let Some((_, f)) = self.window.iter_mut().find(|(s, _)| s == salz) {
+    pub fn check(&mut self, nonce_salt: &Salt, ctr: u32) -> bool {
+        if let Some((_, f)) = self.window.iter_mut().find(|(s, _)| s == nonce_salt) {
             return f.check(ctr);
         }
         if self.window.len() >= GUARD_SALTS_MAX {
             self.window.remove(0);
         }
         let f = Window {
-            hoechste: ctr,
+            highest: ctr,
             window: 0,
         };
-        self.window.push((*salz, f));
+        self.window.push((*nonce_salt, f));
         true
     }
 }
@@ -753,15 +753,15 @@ const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 
 pub fn base64_url(daten: &[u8]) -> String {
     let mut aus = String::new();
-    for stueck in daten.chunks(3) {
+    for piece in daten.chunks(3) {
         let b = [
-            stueck[0],
-            *stueck.get(1).unwrap_or(&0),
-            *stueck.get(2).unwrap_or(&0),
+            piece[0],
+            *piece.get(1).unwrap_or(&0),
+            *piece.get(2).unwrap_or(&0),
         ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        let zeichen = stueck.len() + 1;
-        for i in 0..zeichen {
+        let glyphs = piece.len() + 1;
+        for i in 0..glyphs {
             aus.push(ABC[((n >> (18 - i * 6)) & 0x3f) as usize] as char);
         }
     }
@@ -772,15 +772,15 @@ pub fn base64_url_roundtrip(text: &str) -> Option<Vec<u8>> {
     let wert = |c: u8| -> Option<u32> { ABC.iter().position(|x| *x == c).map(|p| p as u32) };
     let roh: Vec<u8> = text.bytes().filter(|c| *c != b'=').collect();
     let mut aus = Vec::new();
-    for stueck in roh.chunks(4) {
-        if stueck.len() < 2 {
+    for piece in roh.chunks(4) {
+        if piece.len() < 2 {
             return None;
         }
         let mut n = 0u32;
-        for (i, c) in stueck.iter().enumerate() {
+        for (i, c) in piece.iter().enumerate() {
             n |= wert(*c)? << (18 - i * 6);
         }
-        for i in 0..stueck.len() - 1 {
+        for i in 0..piece.len() - 1 {
             aus.push(((n >> (16 - i * 8)) & 0xff) as u8);
         }
     }
@@ -796,7 +796,7 @@ mod tests {
     const SALT_B: Salt = [1, 2, 3, 4, 5, 6, 7, 8];
 
     /// A frame like the encoder delivers it: SPS, PPS, then a picture.
-    fn beispielrahmen() -> Vec<u8> {
+    fn example_frame() -> Vec<u8> {
         let mut f = Vec::new();
         f.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0x96, 0x54]); // SPS (7)
         f.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80]); // PPS (8)
@@ -808,7 +808,7 @@ mod tests {
     }
 
     fn video(k: &Key) -> Sender {
-        k.sender(Spur::Bild)
+        k.sender(Spur::Image)
     }
     fn audio(k: &Key) -> Sender {
         k.sender(Spur::Ton)
@@ -819,8 +819,8 @@ mod tests {
     #[test]
     fn h264_round_trip() {
         let k = Key::neu();
-        let f = beispielrahmen();
-        let g = video(&k).schuetzen_h264(&f);
+        let f = example_frame();
+        let g = video(&k).protect_h264(&f);
         assert_ne!(g, f, "nothing encrypted");
         assert_eq!(k.open_h264(&g).as_deref(), Some(&f[..]), "does not come back intact");
     }
@@ -828,28 +828,28 @@ mod tests {
     /// THE point where the first attempt failed: the server must still be
     /// able to read the structure.
     #[test]
-    fn die_struktur_bleibt_lesbar() {
+    fn the_structure_stays_readable() {
         let k = Key::neu();
-        let f = beispielrahmen();
-        let g = video(&k).schuetzen_h264(&f);
-        let vorher: Vec<u8> = nal_einheiten(&f).iter().map(|(_, d, _)| f[*d] & 0x1f).collect();
-        let nachher: Vec<u8> = nal_einheiten(&g).iter().map(|(_, d, _)| g[*d] & 0x1f).collect();
-        assert_eq!(vorher, nachher, "NAL types changed");
-        assert_eq!(vorher, vec![7, 8, 5, 1]);
+        let f = example_frame();
+        let g = video(&k).protect_h264(&f);
+        let before: Vec<u8> = nal_units(&f).iter().map(|(_, d, _)| f[*d] & 0x1f).collect();
+        let after: Vec<u8> = nal_units(&g).iter().map(|(_, d, _)| g[*d] & 0x1f).collect();
+        assert_eq!(before, after, "NAL types changed");
+        assert_eq!(before, vec![7, 8, 5, 1]);
     }
 
     /// SPS and PPS must stay identical - the packer in the server reads them.
     #[test]
-    fn sps_und_pps_bleiben_unangetastet() {
+    fn sps_and_pps_stay_untouched() {
         let k = Key::neu();
-        let f = beispielrahmen();
-        let g = video(&k).schuetzen_h264(&f);
-        for (sc, db, ende) in nal_einheiten(&f) {
+        let f = example_frame();
+        let g = video(&k).protect_h264(&f);
+        for (sc, db, end) in nal_units(&f) {
             let typ = f[db] & 0x1f;
             if typ == 7 || typ == 8 {
-                let stueck = &f[sc..ende];
+                let piece = &f[sc..end];
                 assert!(
-                    g.windows(stueck.len()).any(|w| w == stueck),
+                    g.windows(piece.len()).any(|w| w == piece),
                     "NAL type {} was changed",
                     typ
                 );
@@ -859,14 +859,14 @@ mod tests {
 
     /// The picture content must NOT be in the frame any more.
     #[test]
-    fn h264_inhalt_ist_wirklich_weg() {
+    fn h264_content_is_really_gone() {
         let k = Key::neu();
         let mut f = vec![0, 0, 0, 1, 0x65];
-        let geheim: Vec<u8> = b"SECRETPICTURECONTENT".repeat(6);
-        f.extend_from_slice(&geheim);
-        let g = video(&k).schuetzen_h264(&f);
+        let secret: Vec<u8> = b"SECRETPICTURECONTENT".repeat(6);
+        f.extend_from_slice(&secret);
+        let g = video(&k).protect_h264(&f);
         assert!(
-            !g.windows(geheim.len()).any(|w| w == &geheim[..]),
+            !g.windows(secret.len()).any(|w| w == &secret[..]),
             "the picture content lies open in the frame"
         );
     }
@@ -874,14 +874,14 @@ mod tests {
     /// False start codes would tear the picture apart - never, not even if
     /// the ciphertext happens to contain 00 00 01.
     #[test]
-    fn es_entstehen_keine_falschen_startcodes() {
+    fn no_false_start_codes_appear() {
         let k = Key::neu();
         let mut s = video(&k);
         for runde in 0..300u32 {
             let mut f = vec![0, 0, 0, 1, 0x41];
             f.extend((0..64u32).map(|i| ((i * runde + 7) % 256) as u8));
-            let g = s.schuetzen_h264(&f);
-            assert_eq!(nal_einheiten(&g).len(), 1, "round {}: false start codes", runde);
+            let g = s.protect_h264(&f);
+            assert_eq!(nal_units(&g).len(), 1, "round {}: false start codes", runde);
             assert_eq!(k.open_h264(&g).as_deref(), Some(&f[..]), "round {}", runde);
         }
     }
@@ -890,31 +890,31 @@ mod tests {
     fn h264_foreign_key_opens_nothing() {
         let a = Key::neu();
         let b = Key::neu();
-        let g = video(&a).schuetzen_h264(&beispielrahmen());
+        let g = video(&a).protect_h264(&example_frame());
         assert!(b.open_h264(&g).is_none());
     }
 
     #[test]
-    fn h264_verfaelschung_faellt_auf() {
+    fn h264_tampering_is_detected() {
         let k = Key::neu();
-        let g = video(&k).schuetzen_h264(&beispielrahmen());
-        let mut kaputt = g.clone();
+        let g = video(&k).protect_h264(&example_frame());
+        let mut broken = g.clone();
         let mitte = g.len() - 40;
-        kaputt[mitte] ^= 0x01;
-        assert!(k.open_h264(&kaputt).is_none(), "tampering went unnoticed");
+        broken[mitte] ^= 0x01;
+        assert!(k.open_h264(&broken).is_none(), "tampering went unnoticed");
     }
 
     /// The key frame stays recognisable at NAL type 5.
     #[test]
-    fn schluesselbild_bleibt_erkennbar() {
+    fn keyframe_stays_recognizable() {
         let k = Key::neu();
-        let g = video(&k).schuetzen_h264(&beispielrahmen());
-        let hat_idr = nal_einheiten(&g).iter().any(|(_, d, _)| g[*d] & 0x1f == 5);
+        let g = video(&k).protect_h264(&example_frame());
+        let hat_idr = nal_units(&g).iter().any(|(_, d, _)| g[*d] & 0x1f == 5);
         assert!(hat_idr, "the server can no longer find the key frame");
     }
 
     #[test]
-    fn schutz_vor_falschen_startcodes_ist_umkehrbar() {
+    fn protection_against_false_start_codes_is_reversible() {
         for muster in [
             vec![0u8, 0, 1, 2, 3],
             vec![0, 0, 0, 0, 0, 0],
@@ -923,7 +923,7 @@ mod tests {
             vec![0, 0, 2],
         ] {
             let ein = epb_ein(&muster);
-            assert_eq!(epb_raus(&ein), muster, "pattern {:?}", muster);
+            assert_eq!(epb_out(&ein), muster, "pattern {:?}", muster);
         }
     }
 
@@ -944,21 +944,21 @@ mod tests {
     #[test]
     fn round_trip() {
         let k = Key::neu();
-        let klar = b"Hello, this is a frame.";
-        let g = audio(&k).schuetzen(true, klar);
-        assert!(ist_geschuetzt(&g));
-        assert_eq!(ist_schluesselbild(&g), Some(true));
+        let cleartext = b"Hello, this is a frame.";
+        let g = audio(&k).protect(true, cleartext);
+        assert!(is_protected(&g));
+        assert_eq!(is_keyframe_data(&g), Some(true));
         assert_eq!(counter_from(&g), Some(0));
-        assert_eq!(k.open(Spur::Ton, &g).as_deref(), Some(&klar[..]));
+        assert_eq!(k.open(Spur::Ton, &g).as_deref(), Some(&cleartext[..]));
     }
 
     /// The core: the plaintext must NOT be in the frame.
     #[test]
-    fn der_klartext_steht_nicht_drin() {
+    fn plaintext_is_not_inside() {
         let k = Key::neu();
-        let klar = b"SECRETWORD";
-        let g = audio(&k).schuetzen(false, klar);
-        assert!(g.windows(klar.len()).all(|f| f != klar), "plaintext lies open");
+        let cleartext = b"SECRETWORD";
+        let g = audio(&k).protect(false, cleartext);
+        assert!(g.windows(cleartext.len()).all(|f| f != cleartext), "plaintext lies open");
     }
 
     /// Another key must open NOTHING - that is the whole point.
@@ -966,16 +966,16 @@ mod tests {
     fn foreign_key_opens_nothing() {
         let a = Key::neu();
         let b = Key::neu();
-        let g = audio(&a).schuetzen(false, b"content");
+        let g = audio(&a).protect(false, b"content");
         assert!(b.open(Spur::Ton, &g).is_none());
     }
 
     /// Audio and video keys are separate: an audio frame never passes as video.
     #[test]
-    fn spuren_sind_getrennt() {
+    fn tracks_are_separated() {
         let k = Key::neu();
-        let g = audio(&k).schuetzen(false, b"sound");
-        assert!(k.open(Spur::Bild, &g).is_none());
+        let g = audio(&k).protect(false, b"sound");
+        assert!(k.open(Spur::Image, &g).is_none());
         assert!(k.open(Spur::Ton, &g).is_some());
     }
 
@@ -983,16 +983,16 @@ mod tests {
     /// (flags, salt, counter), or the server could forge the key frame flag
     /// or splice a frame onto another stream.
     #[test]
-    fn jede_verfaelschung_faellt_auf() {
+    fn any_tampering_is_detected() {
         let k = Key::neu();
-        let g = audio(&k).schuetzen(true, b"A longer content to check");
-        for stelle in [1usize, 2, 9, 10, 13, KOPF, KOPF + 3, g.len() - 1] {
-            let mut kaputt = g.clone();
-            kaputt[stelle] ^= 0x01;
+        let g = audio(&k).protect(true, b"A longer content to check");
+        for place in [1usize, 2, 9, 10, 13, HEAD, HEAD + 3, g.len() - 1] {
+            let mut broken = g.clone();
+            broken[place] ^= 0x01;
             assert!(
-                k.open(Spur::Ton, &kaputt).is_none(),
+                k.open(Spur::Ton, &broken).is_none(),
                 "change at position {} went unnoticed",
-                stelle
+                place
             );
         }
     }
@@ -1004,9 +1004,9 @@ mod tests {
         let alt = [0u8, 0, 0, 1, 0x65, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33,
                    0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
                    0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-        assert!(!ist_geschuetzt(&alt));
-        assert_eq!(ist_schluesselbild(&alt), None);
-        assert!(k.open(Spur::Bild, &alt).is_none());
+        assert!(!is_protected(&alt));
+        assert_eq!(is_keyframe_data(&alt), None);
+        assert!(k.open(Spur::Image, &alt).is_none());
     }
 
     /// v1 audio frames (marker 0xE2, 6 byte header) are recognised as OLD
@@ -1016,11 +1016,11 @@ mod tests {
         let k = Key::neu();
         let mut v1 = vec![MARKER_V1, 0x01, 0, 0, 0, 7];
         v1.extend((0..40u8).map(|i| i ^ 0x5a));
-        assert!(ist_altes_format(&v1));
-        assert!(!ist_geschuetzt(&v1));
+        assert!(is_old_format(&v1));
+        assert!(!is_protected(&v1));
         assert!(k.open(Spur::Ton, &v1).is_none());
-        let neu = audio(&k).schuetzen(false, b"x");
-        assert!(!ist_altes_format(&neu));
+        let neu = audio(&k).protect(false, b"x");
+        assert!(!is_old_format(&neu));
     }
 
     #[test]
@@ -1030,12 +1030,12 @@ mod tests {
         assert_eq!(t.len(), 43, "43 characters expected, got {}", t.len());
         assert!(!t.contains('+') && !t.contains('/') && !t.contains('='), "not link safe: {}", t);
         let go_back = Key::aus_text(&t).expect("must come back");
-        let g = audio(&k).schuetzen(false, b"probe");
+        let g = audio(&k).protect(false, b"probe");
         assert_eq!(go_back.open(Spur::Ton, &g).as_deref(), Some(&b"probe"[..]));
     }
 
     #[test]
-    fn unsinniger_schluesseltext_wird_abgelehnt() {
+    fn nonsense_key_text_is_rejected() {
         assert!(Key::aus_text("").is_none());
         assert!(Key::aus_text("zu-kurz").is_none());
         assert!(Key::aus_text(&"A".repeat(43)).is_some());
@@ -1053,18 +1053,18 @@ mod tests {
 
     /// Header is 14 bytes: the overhead per frame is 14 + 16 tag bytes.
     #[test]
-    fn der_aufschlag_bleibt_klein() {
+    fn the_overhead_stays_small() {
         let k = Key::neu();
-        let klar = vec![0u8; 5000];
-        let g = k.sender(Spur::Ton).schuetzen(false, &klar);
-        assert_eq!(g.len(), klar.len() + KOPF + 16, "overhead changed");
+        let cleartext = vec![0u8; 5000];
+        let g = k.sender(Spur::Ton).protect(false, &cleartext);
+        assert_eq!(g.len(), cleartext.len() + HEAD + 16, "overhead changed");
     }
 
     // ------------------------------------------------------ replay -------
 
     #[test]
-    fn wache_laesst_neues_durch_und_wiederholungen_nicht() {
-        let mut w = Wache::default();
+    fn guard_lets_new_through_and_repeats_not() {
+        let mut w = Guard::default();
         assert!(w.check(&SALT_A, 10));
         assert!(w.check(&SALT_A, 11));
         assert!(!w.check(&SALT_A, 11), "repeat let through");
@@ -1082,8 +1082,8 @@ mod tests {
     }
 
     #[test]
-    fn wache_kommt_mit_grossen_spruengen_klar() {
-        let mut w = Wache::default();
+    fn guard_copes_with_big_jumps() {
+        let mut w = Guard::default();
         assert!(w.check(&SALT_A, 1));
         assert!(w.check(&SALT_A, 1_000_000));
         assert!(!w.check(&SALT_A, 500), "ancient frame let through");
@@ -1094,7 +1094,7 @@ mod tests {
     /// repeat of counter 5 of sender A; but each one only once.
     #[test]
     fn guard_keeps_one_window_per_sender() {
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         assert!(w.check(&SALT_A, 5));
         assert!(w.check(&SALT_B, 5));
         assert!(!w.check(&SALT_A, 5));
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn guard_forgets_only_the_oldest_salts() {
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         for i in 0..(GUARD_SALTS_MAX as u8 + 3) {
             let s: Salt = [i, 9, 9, 9, 9, 9, 9, 9];
             assert!(w.check(&s, 1));
@@ -1122,27 +1122,27 @@ mod tests {
     // pair occurs twice.
 
     fn pairs_audio(k: &Key, frame: &[u8]) -> (Vec<u8>, [u8; 12]) {
-        let salt = salz_von(frame).unwrap();
+        let salt = salt_from(frame).unwrap();
         let c = counter_from(frame).unwrap();
         (derive_key(&k.roh, Spur::Ton, &salt).to_vec(), make_nonce(Spur::Ton, 0, &salt, c))
     }
 
     fn pairs_video(k: &Key, frame: &[u8]) -> Vec<(Vec<u8>, [u8; 12])> {
         let mut out = Vec::new();
-        for (_, db, ende) in nal_einheiten(frame) {
+        for (_, db, end) in nal_units(frame) {
             let typ = frame[db] & 0x1f;
-            let inhalt = &frame[db + 1..ende];
-            if nal_bleibt_klar(typ) || inhalt.is_empty() {
+            let content = &frame[db + 1..end];
+            if nal_stays_clear(typ) || content.is_empty() {
                 continue;
             }
-            let roh = epb_raus(inhalt);
+            let roh = epb_out(content);
             let mut salt = [0u8; SALT_LEN];
             salt.copy_from_slice(&roh[1..9]);
             let c = u32::from_be_bytes([roh[9], roh[10], roh[11], roh[12]]);
             let nr = u16::from_be_bytes([roh[13], roh[14]]);
             out.push((
-                derive_key(&k.roh, Spur::Bild, &salt).to_vec(),
-                make_nonce(Spur::Bild, nr, &salt, c),
+                derive_key(&k.roh, Spur::Image, &salt).to_vec(),
+                make_nonce(Spur::Image, nr, &salt, c),
             ));
         }
         out
@@ -1151,7 +1151,7 @@ mod tests {
     #[test]
     fn nonce_never_repeats_across_senders_streams_and_rejoin() {
         let k = Key::neu();
-        let rahmen = beispielrahmen();
+        let frame_box = example_frame();
         let mut seen: HashSet<(Vec<u8>, [u8; 12])> = HashSet::new();
         let mut nonces: HashSet<[u8; 12]> = HashSet::new();
         let mut n_pairs = 0usize;
@@ -1162,19 +1162,19 @@ mod tests {
         };
 
         // Two rounds: "first join" and "rejoin" - every stream is created anew.
-        for _beitritt in 0..2 {
+        for _join in 0..2 {
             // Two participants (same room key), each with microphone,
             // camera AND screen share = 3 streams, 2 of them video.
             for _participant in 0..2 {
-                let mut mikro = audio(&k);
-                let mut kamera = video(&k);
+                let mut mic_name = audio(&k);
+                let mut camera = video(&k);
                 let mut screen = video(&k);
                 for _ in 0..200 {
-                    ein(pairs_audio(&k, &mikro.schuetzen(false, b"opus")));
-                    for p in pairs_video(&k, &kamera.schuetzen_h264(&rahmen)) {
+                    ein(pairs_audio(&k, &mic_name.protect(false, b"opus")));
+                    for p in pairs_video(&k, &camera.protect_h264(&frame_box)) {
                         ein(p);
                     }
-                    for p in pairs_video(&k, &screen.schuetzen_h264(&rahmen)) {
+                    for p in pairs_video(&k, &screen.protect_h264(&frame_box)) {
                         ein(p);
                     }
                 }
@@ -1195,23 +1195,23 @@ mod tests {
         let k = Key::neu();
         let p1 = vec![0x11u8; 48];
         let p2 = vec![0x22u8; 48];
-        let g1 = audio(&k).schuetzen(false, &p1);
-        let g2 = audio(&k).schuetzen(false, &p2);
+        let g1 = audio(&k).protect(false, &p1);
+        let g2 = audio(&k).protect(false, &p2);
         assert_eq!(counter_from(&g1), counter_from(&g2), "both start at counter 0");
-        let xor_klar: Vec<u8> = p1.iter().zip(&p2).map(|(a, b)| a ^ b).collect();
-        let xor_geheim: Vec<u8> = g1[KOPF..KOPF + 48]
+        let xor_clear: Vec<u8> = p1.iter().zip(&p2).map(|(a, b)| a ^ b).collect();
+        let xor_secret: Vec<u8> = g1[HEAD..HEAD + 48]
             .iter()
-            .zip(&g2[KOPF..KOPF + 48])
+            .zip(&g2[HEAD..HEAD + 48])
             .map(|(a, b)| a ^ b)
             .collect();
-        assert_ne!(xor_klar, xor_geheim, "keystream shared between senders");
+        assert_ne!(xor_clear, xor_secret, "keystream shared between senders");
     }
 
     #[test]
     fn every_sender_draws_its_own_salt() {
         let k = Key::neu();
-        let salze: HashSet<Salt> = (0..64).map(|_| audio(&k).salz()).collect();
-        assert_eq!(salze.len(), 64, "salt collision");
+        let salts: HashSet<Salt> = (0..64).map(|_| audio(&k).nonce_salt()).collect();
+        assert_eq!(salts.len(), 64, "salt collision");
     }
 
     /// A sender must not wrap its 32 bit counter: just before it would, it
@@ -1221,17 +1221,17 @@ mod tests {
         let k = Key::neu();
         let mut s = audio(&k);
         s.set_next(u32::MAX as u64);
-        let last_frame = s.schuetzen(false, b"last");
+        let last_frame = s.protect(false, b"last");
         assert_eq!(counter_from(&last_frame), Some(u32::MAX));
-        let salt_before = salz_von(&last_frame).unwrap();
-        let next_frame = s.schuetzen(false, b"next");
+        let salt_before = salt_from(&last_frame).unwrap();
+        let next_frame = s.protect(false, b"next");
         assert_eq!(counter_from(&next_frame), Some(0), "counter wrapped without a new salt");
-        assert_ne!(salz_von(&next_frame).unwrap(), salt_before, "same salt after exhaustion");
+        assert_ne!(salt_from(&next_frame).unwrap(), salt_before, "same salt after exhaustion");
         assert_eq!(k.open(Spur::Ton, &next_frame).as_deref(), Some(&b"next"[..]));
         // And the receiving guard treats the new salt as a new stream.
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         assert!(w.check(&salt_before, u32::MAX));
-        assert!(w.check(&salz_von(&next_frame).unwrap(), 0));
+        assert!(w.check(&salt_from(&next_frame).unwrap(), 0));
     }
 
     /// A receiver must not remember keys of frames that did not authenticate
@@ -1239,7 +1239,7 @@ mod tests {
     #[test]
     fn forged_salts_do_not_fill_the_cache() {
         let k = Key::neu();
-        let genuine = audio(&k).schuetzen(false, b"genuine");
+        let genuine = audio(&k).protect(false, b"genuine");
         let count = |k: &Key| k.cache.lock().unwrap().len();
         let receiver = Key::aus_roh(k.roh);
         assert_eq!(count(&receiver), 0);
@@ -1260,7 +1260,7 @@ mod tests {
             .expect("vector file is valid JSON")
     }
 
-    fn salz_hex(s: &str) -> Salt {
+    fn salt_hex(s: &str) -> Salt {
         let mut a = [0u8; SALT_LEN];
         a.copy_from_slice(&hex::decode(s).unwrap());
         a
@@ -1269,7 +1269,7 @@ mod tests {
     fn spur_von(s: &str) -> Spur {
         match s {
             "ton" => Spur::Ton,
-            "bild" => Spur::Bild,
+            "bild" => Spur::Image,
             other => panic!("unknown track kind {}", other),
         }
     }
@@ -1286,14 +1286,14 @@ mod tests {
         let v = vektoren();
         let k = vector_key(&v);
         for e in v["keys"].as_array().unwrap() {
-            let got = derive_key(&k.roh, spur_von(e["spur"].as_str().unwrap()), &salz_hex(e["salt"].as_str().unwrap()));
+            let got = derive_key(&k.roh, spur_von(e["spur"].as_str().unwrap()), &salt_hex(e["salt"].as_str().unwrap()));
             assert_eq!(hex::encode(got), e["key"].as_str().unwrap(), "key {}", e);
         }
         for e in v["nonces"].as_array().unwrap() {
             let got = make_nonce(
                 spur_von(e["spur"].as_str().unwrap()),
                 e["nal"].as_u64().unwrap() as u16,
-                &salz_hex(e["salt"].as_str().unwrap()),
+                &salt_hex(e["salt"].as_str().unwrap()),
                 e["counter"].as_u64().unwrap() as u32,
             );
             assert_eq!(hex::encode(got), e["nonce"].as_str().unwrap(), "nonce {}", e);
@@ -1311,7 +1311,7 @@ mod tests {
             let frame = hex::decode(e["frame"].as_str().unwrap()).unwrap();
             let got = k.seal_audio_at(
                 Spur::Ton,
-                &salz_hex(e["salt"].as_str().unwrap()),
+                &salt_hex(e["salt"].as_str().unwrap()),
                 e["counter"].as_u64().unwrap() as u32,
                 e["keyframe"].as_bool().unwrap(),
                 &plain,
@@ -1325,7 +1325,7 @@ mod tests {
             let plain = hex::decode(e["plain"].as_str().unwrap()).unwrap();
             let frame = hex::decode(e["frame"].as_str().unwrap()).unwrap();
             let got = k.seal_h264_at(
-                &salz_hex(e["salt"].as_str().unwrap()),
+                &salt_hex(e["salt"].as_str().unwrap()),
                 e["counter"].as_u64().unwrap() as u32,
                 &plain,
             );
@@ -1345,7 +1345,7 @@ mod tests {
             let frame = hex::decode(e["frame"].as_str().unwrap()).unwrap();
             let pps = e["pps"].as_u64().unwrap();
             let got = k.seal_h264_at(
-                &salz_hex(e["salt"].as_str().unwrap()),
+                &salt_hex(e["salt"].as_str().unwrap()),
                 e["counter"].as_u64().unwrap() as u32,
                 &plain,
             );
@@ -1353,23 +1353,23 @@ mod tests {
             let rx = vector_key(&v);
             assert_eq!(rx.open_h264(&frame), Some(plain));
             // The receiver-side view of each encrypted slice: pps_id as read from the blob.
-            for (_, db, ende) in nal_einheiten(&frame) {
+            for (_, db, end) in nal_units(&frame) {
                 let typ = frame[db] & 0x1f;
                 if typ == 1 || typ == 5 {
-                    let roh = epb_raus(&frame[db + 1..ende]);
+                    let roh = epb_out(&frame[db + 1..end]);
                     assert_eq!(slice_pps_id(&roh), Some(if pps <= 6 { pps as u32 } else { 0 }));
                 }
             }
         }
         // Table sanity: one byte, reads (0, 0, pps), all distinct.
-        for (p, b) in VIDEO_KENNUNG.iter().enumerate() {
+        for (p, b) in VIDEO_TAG.iter().enumerate() {
             assert_eq!(slice_pps_id(&[*b, 0, 0, 0, 0, 0, 0, 0]), Some(p as u32));
             assert_eq!(b >> 6, 3);
         }
         // A byte 0 outside the table is refused.
         let e = &v["h264_pps"][1];
         let mut bad = hex::decode(e["frame"].as_str().unwrap()).unwrap();
-        let (_, db, _) = nal_einheiten(&bad)[2];
+        let (_, db, _) = nal_units(&bad)[2];
         bad[db + 1] = 0xC0;
         assert_eq!(vector_key(&v).open_h264(&bad), None);
     }
@@ -1378,7 +1378,7 @@ mod tests {
     fn sample_frame_matches_the_reference() {
         let v = vektoren();
         let ref_plain = hex::decode(v["h264"][0]["plain"].as_str().unwrap()).unwrap();
-        assert_eq!(beispielrahmen(), ref_plain, "sample frame drifted from ref.py");
+        assert_eq!(example_frame(), ref_plain, "sample frame drifted from ref.py");
     }
 
     // ------------------------------------------------ replay (r60) --------
@@ -1387,10 +1387,10 @@ mod tests {
     fn vectors_guard_windows() {
         let v = vektoren();
         for c in v["guard"].as_array().unwrap() {
-            let mut w = Wache::default();
+            let mut w = Guard::default();
             for (i, st) in c["steps"].as_array().unwrap().iter().enumerate() {
                 let got = w.check(
-                    &salz_hex(st["salt"].as_str().unwrap()),
+                    &salt_hex(st["salt"].as_str().unwrap()),
                     st["counter"].as_u64().unwrap() as u32,
                 );
                 assert_eq!(got, st["accept"].as_bool().unwrap(), "{} step {}", c["name"], i);
@@ -1409,7 +1409,7 @@ mod tests {
             .collect();
         for c in v["replay_video"]["cases"].as_array().unwrap() {
             let k = vector_key(&v);
-            let mut w = Wache::default();
+            let mut w = Guard::default();
             for (i, st) in c["steps"].as_array().unwrap().iter().enumerate() {
                 let f = &frames[st["frame"].as_u64().unwrap() as usize];
                 let got = k.open_h264_guard(&mut w, f).is_some();
@@ -1422,7 +1422,7 @@ mod tests {
     fn window_step_of_64_keeps_the_old_highest() {
         // Regression: a step of exactly 64 used to drop the old highest, so
         // its replay was accepted.
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         let s = [7u8; SALT_LEN];
         assert!(w.check(&s, 0));
         assert!(w.check(&s, 64));
@@ -1433,11 +1433,11 @@ mod tests {
     fn video_replay_is_dropped_live() {
         let k = Key::neu();
         let mut tx = video(&k);
-        let f = beispielrahmen();
-        let a = tx.schuetzen_h264(&f);
-        let b = tx.schuetzen_h264(&f);
+        let f = example_frame();
+        let a = tx.protect_h264(&f);
+        let b = tx.protect_h264(&f);
         let rx = Key::aus_roh(k.roh);
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         assert_eq!(rx.open_h264_guard(&mut w, &a).as_deref(), Some(&f[..]));
         assert_eq!(rx.open_h264_guard(&mut w, &b).as_deref(), Some(&f[..]));
         assert!(rx.open_h264_guard(&mut w, &a).is_none(), "replay shown");
@@ -1448,13 +1448,13 @@ mod tests {
     fn forged_video_frame_does_not_move_the_window() {
         let k = Key::neu();
         let mut tx = video(&k);
-        let f = beispielrahmen();
-        let a = tx.schuetzen_h264(&f);
-        let mut bad = tx.schuetzen_h264(&f);
+        let f = example_frame();
+        let a = tx.protect_h264(&f);
+        let mut bad = tx.protect_h264(&f);
         let n = bad.len();
         bad[n - 1] ^= 1; // break the tag of the last NAL unit
         let rx = Key::aus_roh(k.roh);
-        let mut w = Wache::default();
+        let mut w = Guard::default();
         assert!(rx.open_h264_guard(&mut w, &bad).is_none());
         assert!(rx.open_h264_guard(&mut w, &a).is_some(), "forgery used up the counter");
     }

@@ -60,20 +60,20 @@ pub fn parse(url: &str) -> Option<Action> {
     let mut rest_opt: Option<&str> = None;
     for sch in schemes() {
         let lang = format!("{}://", sch);
-        let kurz = format!("{}:", sch);
-        if let Some(r) = u.strip_prefix(&lang).or_else(|| u.strip_prefix(&kurz)) {
+        let short = format!("{}:", sch);
+        if let Some(r) = u.strip_prefix(&lang).or_else(|| u.strip_prefix(&short)) {
             rest_opt = Some(r);
             break;
         }
     }
     let rest = rest_opt?;
-    let (pfad, frage) = match rest.split_once('?') {
+    let (file_path, frage) = match rest.split_once('?') {
         Some((a, b)) => (a, b),
         None => (rest, ""),
     };
-    let mut teile = pfad.splitn(2, '/');
-    let was = teile.next().unwrap_or("");
-    let wert = teile.next().unwrap_or("").trim().to_string();
+    let mut parts = file_path.splitn(2, '/');
+    let was = parts.next().unwrap_or("");
+    let wert = parts.next().unwrap_or("").trim().to_string();
     match was {
         "control" => {
             let id: String = wert.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -196,21 +196,21 @@ pub fn register_for(exe: &std::path::Path, machine_wide: bool) -> std::io::Resul
     } else {
         RegKey::predef(HKEY_CURRENT_USER)
     };
-    schreibe_schema(&root, SCHEME, exe)?;
+    write_schema(&root, SCHEME, exe)?;
 
     // Only take over the old shared scheme if it is still free.
     // A second brand must NEVER take the links away from one already
     // installed - that is exactly why X-Remote opened
     // FreeViewer meetings.
-    if SCHEME != SCHEME_ALT && !schema_belegt(SCHEME_ALT) {
-        let _ = schreibe_schema(&root, SCHEME_ALT, exe);
+    if SCHEME != SCHEME_ALT && !schema_occupied(SCHEME_ALT) {
+        let _ = write_schema(&root, SCHEME_ALT, exe);
     }
     Ok(())
 }
 
 /// Einen einzelnen Schema-Eintrag schreiben.
 #[cfg(windows)]
-fn schreibe_schema(
+fn write_schema(
     root: &winreg::RegKey,
     schema: &str,
     exe: &std::path::Path,
@@ -227,7 +227,7 @@ fn schreibe_schema(
 
 /// Is a program already attached to this scheme? (No matter whether HKLM or HKCU.)
 #[cfg(windows)]
-pub fn schema_belegt(schema: &str) -> bool {
+pub fn schema_occupied(schema: &str) -> bool {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
     for r in [

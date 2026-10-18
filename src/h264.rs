@@ -398,7 +398,7 @@ mod win {
         }
 
         /// True if this encoder takes images directly from the graphics card.
-        pub fn direkt(&self) -> bool {
+        pub fn direct_link(&self) -> bool {
             self.devman.is_some()
         }
 
@@ -627,7 +627,7 @@ mod win {
                     self.nv12_len()
                 ));
             }
-            let (time, dur) = self.zeitmarke();
+            let (time, dur) = self.timestamp();
             // SAFETY: `sample_from_bytes` is called with the first `nv12_len()` bytes of `nv12`, a
             // slice whose length was checked just above, so the copy reads in bounds; Media
             // Foundation is started in `new`.
@@ -642,7 +642,7 @@ mod win {
             if self.devman.is_none() {
                 return Err(anyhow!("this encoder does not accept textures"));
             }
-            let (time, dur) = self.zeitmarke();
+            let (time, dur) = self.timestamp();
             // SAFETY: `tex` is a live D3D11 texture and this encoder was built with a DXGI device
             // manager (`devman` is Some, checked above), so wrapping the texture in a DXGI surface
             // buffer is valid; the IID matches the texture interface. The buffer and sample are
@@ -665,7 +665,7 @@ mod win {
             self.hineingeben(sample)
         }
 
-        fn zeitmarke(&self) -> (i64, i64) {
+        fn timestamp(&self) -> (i64, i64) {
             let dur = 10_000_000i64 / self.fps.max(1) as i64;
             (self.frames as i64 * dur, dur)
         }
@@ -731,23 +731,23 @@ mod win {
         /// In the meeting nobody knows beforehand how large the image of the others
         /// is - with a fixed wanted size you would see only a
         /// section (exactly that was visible when sharing the screen).
-        frei: bool,
+        free: bool,
         name: String,
         nv12: Vec<u8>,
     }
 
     impl Decoder {
         pub fn new(w: u32, h: u32) -> Result<Self> {
-            Self::mit_groesse(w, h, false)
+            Self::with_size(w, h, false)
         }
 
         /// Decoder that takes the image size from the stream. `w`/`h`
         /// are only a first hint for the negotiation.
         pub fn new_auto(w: u32, h: u32) -> Result<Self> {
-            Self::mit_groesse(w, h, true)
+            Self::with_size(w, h, true)
         }
 
-        fn mit_groesse(w: u32, h: u32, frei: bool) -> Result<Self> {
+        fn with_size(w: u32, h: u32, free: bool) -> Result<Self> {
             mf_startup();
             let input = type_info(MFMediaType_Video, MFVideoFormat_H264);
             let output = type_info(MFMediaType_Video, MFVideoFormat_NV12);
@@ -766,7 +766,7 @@ mod win {
                     flags,
                     input,
                     output,
-                    |a, name| match Self::build(a, name, w, h, frei) {
+                    |a, name| match Self::build(a, name, w, h, free) {
                         Ok(d) => Some(d),
                         Err(e) => {
                             crate::capture::log_line(&format!("h264 decoder {}: {}", name, e));
@@ -778,7 +778,7 @@ mod win {
             dec.ok_or_else(|| anyhow!("kein H.264 Decoder gefunden"))
         }
 
-        fn build(a: &IMFActivate, name: &str, w: u32, h: u32, frei: bool) -> Result<Self> {
+        fn build(a: &IMFActivate, name: &str, w: u32, h: u32, free: bool) -> Result<Self> {
             // SAFETY: Media Foundation COM calls on `a` (live borrow) and on objects created here.
             // `inp` and the attribute values are owned/by-value, `t` is moved into `Self` only
             // after SetInputType succeeded, and the begin/start-of-stream messages carry no pointer
@@ -805,7 +805,7 @@ mod win {
                     stride: w as usize,
                     want_w: w,
                     want_h: h,
-                    frei,
+                    free,
                     name: name.to_string(),
                     nv12: Vec::new(),
                 };
@@ -839,17 +839,17 @@ mod win {
                             self.w = (size >> 32) as u32;
                             self.h = (size & 0xffff_ffff) as u32;
                         }
-                        if self.frei {
+                        if self.free {
                             // Visible area, if the decoder
                             // names it (1080 padded to 1088 or similar),
                             // otherwise the full area.
                             let mut blob = [0u8; 32];
                             let mut len = 0u32;
-                            let sicht = t
+                            let view_state = t
                                 .GetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, &mut blob, Some(&mut len))
                                 .is_ok()
                                 && len >= 16;
-                            if sicht {
+                            if view_state {
                                 let b = |i: usize| {
                                     i32::from_le_bytes([
                                         blob[i],
@@ -1128,7 +1128,7 @@ mod tests {
         let mut enc = Encoder::new(w, h, 30, 1_500_000).expect("Kodierer");
         let mut dec = Decoder::new_auto(w, h).expect("Dekodierer");
         let mut rgba = Vec::new();
-        let mut bilder = 0;
+        let mut images = 0;
         let mut bytes = 0usize;
         let mut key_frames = 0;
         for _ in 0..10 {
@@ -1144,17 +1144,17 @@ mod tests {
                 );
                 if let Ok(Some((dw, dh))) = dec.decode(&c.data, &mut rgba) {
                     assert_eq!((dw, dh), (w, h), "falsche Bildgroesse");
-                    bilder += 1;
+                    images += 1;
                 }
             }
         }
         println!(
             "kodiert {} Bytes, {} Schluesselbilder, {} Bilder dekodiert",
-            bytes, key_frames, bilder
+            bytes, key_frames, images
         );
         assert!(bytes > 0, "nichts kodiert");
         assert!(key_frames > 0, "kein Schluesselbild");
-        assert!(bilder > 0, "nichts dekodiert");
+        assert!(images > 0, "nichts dekodiert");
         // And the image must also REALLY resemble the original.
         let (mean, _max) = rgb_vs_rgba_error(&rgb, &rgba, w, h);
         assert!(mean < 25.0, "Bild weicht zu stark ab: {}", mean);

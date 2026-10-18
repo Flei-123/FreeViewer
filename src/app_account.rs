@@ -32,9 +32,9 @@ impl App {
     }
 
     /// Adressbuch hoch, zusammengefuehrte Liste go_back.
-    pub(crate) fn start_sync(&mut self, sichtbar: bool) {
+    pub(crate) fn start_sync(&mut self, visible: bool) {
         let Some(sess) = self.acc.clone() else { return };
-        if sichtbar {
+        if visible {
             self.acc_msg = i18n::t("acc.syncing").to_string();
         }
         self.acc_next = std::time::Instant::now() + Duration::from_secs(120);
@@ -130,8 +130,8 @@ impl App {
             ui.add_space(6.0);
             label_small(ui, i18n::t("dep.count"));
             ui.horizontal(|ui| {
-                let mut unbegrenzt = self.dep_count == 0;
-                if unbegrenzt {
+                let mut unlimited = self.dep_count == 0;
+                if unlimited {
                     // a gray "0" would be confusing - better the symbol
                     ui.label(
                         egui::RichText::new("∞")
@@ -147,12 +147,12 @@ impl App {
                     );
                 }
                 ui.add_space(6.0);
-                if check(ui, &mut unbegrenzt, i18n::t("dep.unlimited"))
+                if check(ui, &mut unlimited, i18n::t("dep.unlimited"))
                     .on_hover_text(i18n::t("dep.unlimited_tip"))
                     .changed()
                 {
                     // 0 heisst am Relay: so oft wie man will
-                    self.dep_count = if unbegrenzt { 0 } else { 1 };
+                    self.dep_count = if unlimited { 0 } else { 1 };
                 }
             });
             ui.add_space(8.0);
@@ -203,7 +203,7 @@ impl App {
             }
             let pending = self.dep_pending.clone();
             let mut revoke: Option<String> = None;
-            let mut kopiert = false;
+            let mut copied = false;
             for pend in &pending {
                 ui.horizontal(|ui| {
                     icons::show(ui, "refresh", 14.0, p.muted);
@@ -212,7 +212,7 @@ impl App {
                     } else {
                         format!("{} ({})", pend.name_hint, pend.code)
                     };
-                    let zeile = if pend.max_uses == 0 {
+                    let text_row = if pend.max_uses == 0 {
                         format!(
                             "{} - {} ({})",
                             was,
@@ -238,7 +238,7 @@ impl App {
                         format!("{} - {}", was, i18n::t("dep.waiting"))
                     };
                     ui.label(
-                        egui::RichText::new(zeile).size(12.0).color(p.muted),
+                        egui::RichText::new(text_row).size(12.0).color(p.muted),
                     );
                     // The link sits next to it (not below) - with copy
                     // and revoke right in the same row.
@@ -249,7 +249,7 @@ impl App {
                         }
                         if icon_ghost(ui, "copy", i18n::t("dep.copy")).clicked() {
                             ui.ctx().copy_text(web.clone());
-                            kopiert = true;
+                            copied = true;
                         }
                         ui.label(
                             egui::RichText::new(&web)
@@ -260,7 +260,7 @@ impl App {
                 });
                 ui.add_space(6.0);
             }
-            if kopiert {
+            if copied {
                 self.dep_msg = i18n::t("dep.copied").to_string();
             }
             if let Some(code) = revoke {

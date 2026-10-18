@@ -731,7 +731,7 @@ pub fn list_devices() -> String {
     s
 }
 
-/// `freeviewer --audioloop <sekunden>`: microphone -> codec -> speaker on this
+/// `freeviewer --audioloop <seconds>`: microphone -> codec -> speaker on this
 /// machine, and a number that says how much the codec changed the sound.
 pub fn loopback_test(secs: u64) -> String {
     let state = Arc::new(VoiceState::default());

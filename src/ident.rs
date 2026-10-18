@@ -118,7 +118,7 @@ pub fn load_or_create_secret() -> String {
     // the same across uninstalls and reinstalls (only a new Windows changes
     // it) - so the FreeViewer ID never changes again.
     #[cfg(windows)]
-    let frisch = winid::machine_guid().map(|g| {
+    let fresh = winid::machine_guid().map(|g| {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
         h.update(b"freeviewer-id:");
@@ -126,8 +126,8 @@ pub fn load_or_create_secret() -> String {
         hex::encode(h.finalize())
     });
     #[cfg(not(windows))]
-    let frisch: Option<String> = None;
-    let secret = frisch.unwrap_or_else(|| hex::encode(random_bytes(32)));
+    let fresh: Option<String> = None;
+    let secret = fresh.unwrap_or_else(|| hex::encode(random_bytes(32)));
     let _ = fs::create_dir_all(&dir);
     let _ = fs::write(&file, &secret);
     #[cfg(windows)]

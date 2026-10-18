@@ -165,12 +165,12 @@ mod imp {
         std::fs::create_dir_all(install_dir())?;
         if !same_path(&src, &dst) {
             // The service holds the old file - stop it first, then swap.
-            let dienst_lief = std::process::Command::new("sc")
+            let service_ran = std::process::Command::new("sc")
                 .args(["query", crate::service::SERVICE_NAME])
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
                 .unwrap_or(false);
-            if dienst_lief {
+            if service_ran {
                 let _ = std::process::Command::new("sc")
                     .args(["stop", crate::service::SERVICE_NAME])
                     .output();
@@ -202,7 +202,7 @@ mod imp {
             }
             std::fs::copy(&src, &dst)
                 .map_err(|e| anyhow!("Kopieren nach {} fehlgeschlagen: {}", dst.display(), e))?;
-            if dienst_lief {
+            if service_ran {
                 let _ = std::process::Command::new("sc")
                     .args(["start", crate::service::SERVICE_NAME])
                     .output();
@@ -240,7 +240,7 @@ mod imp {
     }
 
     /// Cleans everything up again. The configuration stays.
-    pub fn uninstall(alles: bool) -> Result<()> {
+    pub fn uninstall(all: bool) -> Result<()> {
         let exe = installed_exe();
         // Service first - otherwise it holds the file.
         let _ = std::process::Command::new("sc")
@@ -268,7 +268,7 @@ mod imp {
             }
         }
 
-        if alles {
+        if all {
             // really everything: configuration (both places) and the
             // identity backup in the registry. Devices with a derived
             // identity get their ID back on reinstall anyway -

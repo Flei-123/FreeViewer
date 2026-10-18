@@ -79,12 +79,12 @@ impl App {
     /// What was clicked in the control bar. The bar exists twice
     /// (on top in the window and floating in fullscreen), but the content only
     /// once - so it collects its wishes here.
-    pub(crate) fn session_bar(&mut self, ui: &mut egui::Ui, a: &mut BarActs, kompakt: bool) {
+    pub(crate) fn session_bar(&mut self, ui: &mut egui::Ui, a: &mut BarActs, compact: bool) {
         let stats = *self.shared.stats.lock_ok();
         let game = self.shared.game_mode();
         let p = theme::palette();
 
-        if kompakt {
+        if compact {
             // Griff zum Verschieben
             let (rect, r) = ui.allocate_exact_size(egui::vec2(16.0, 22.0), egui::Sense::drag());
             ui.put(rect, icons::image("grip", 14.0, p.muted));
@@ -98,15 +98,15 @@ impl App {
             ui.add_space(2.0);
         }
 
-        if zeigefinger(ui.button(i18n::t("sess.disconnect"))).clicked() {
+        if index_finger(ui.button(i18n::t("sess.disconnect"))).clicked() {
             a.disconnect = true;
         }
         ui.separator();
 
-        if !kompakt {
+        if !compact {
             ui.label(i18n::t("sess.mode"));
         }
-        if zeigefinger(
+        if index_finger(
             ui.selectable_label(!game, i18n::t("sess.mode_admin"))
                 .on_hover_text(i18n::t("sess.mode_admin_tip")),
         )
@@ -115,7 +115,7 @@ impl App {
         {
             a.mode = Some(proto::MODE_ADMIN);
         }
-        if zeigefinger(
+        if index_finger(
             ui.selectable_label(game, i18n::t("sess.mode_game"))
                 .on_hover_text(i18n::t("sess.mode_game_tip")),
         )
@@ -130,7 +130,7 @@ impl App {
             ui.separator();
             let act = self.shared.active_monitor.load(Ordering::Relaxed) as usize;
             let label = |i: usize, m: &proto::MonitorInfo| {
-                if kompakt {
+                if compact {
                     format!("{}. {}", i + 1, m.name)
                 } else {
                     format!("{}. {} ({}x{})", i + 1, m.name, m.w, m.h)
@@ -251,7 +251,7 @@ impl App {
         ui.separator();
         let (rw, rh) = *self.shared.remote_size.lock_ok();
         let direct = self.shared.direct.load(Ordering::Relaxed);
-        let text = if kompakt {
+        let text = if compact {
             format!("{:.0} fps  {:.0} ms", stats.fps, stats.latency_ms)
         } else {
             format!(
@@ -280,7 +280,7 @@ impl App {
             }
         ));
 
-        if !kompakt {
+        if !compact {
             ui.separator();
             ui.label(egui::RichText::new(i18n::t("sess.escape")).weak().size(11.0))
                 .on_hover_text(i18n::t("sess.escape_tip"));

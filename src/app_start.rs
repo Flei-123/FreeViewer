@@ -264,7 +264,7 @@ impl App {
             {
                 let dienst = self.friends.clone();
                 let liste = dienst.as_ref().map(|d| d.liste()).unwrap_or_default();
-                let offen = dienst.as_ref().map(|d| d.eingehende().len()).unwrap_or(0);
+                let offen = dienst.as_ref().map(|d| d.incoming_requests().len()).unwrap_or(0);
                 ui.add_space(8.0);
                 section(ui, i18n::t("nav.friends"));
                 let mut go_f: Option<String> = None;
@@ -409,9 +409,9 @@ impl App {
     }
 
     pub(crate) fn is_me(&self, id: &str) -> bool {
-        let ziffern: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+        let digits: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
         let me = self.shared.my_id.lock_ok().clone();
-        !ziffern.is_empty() && ziffern == me
+        !digits.is_empty() && digits == me
     }
 
     pub(crate) fn connect_to(&mut self, id: &str) {
@@ -456,7 +456,7 @@ impl App {
                     // friend request nobody sees because the
                     // program never asks for it is not a request.
                     let fd = self.friends_service();
-                    let offen = fd.eingehende().len() + fd.einladungen().len();
+                    let offen = fd.incoming_requests().len() + fd.invites().len();
                     for (v, name, tip) in [
                         (View::Start, "home", i18n::t("nav.start")),
                         (View::Devices, "devices", i18n::t("nav.devices")),
@@ -511,7 +511,7 @@ impl App {
                             );
                             tip = format!("{} ({} offen)", tip, offen);
                         }
-                        let r = zeigefinger(r).on_hover_text(tip);
+                        let r = index_finger(r).on_hover_text(tip);
                         if r.clicked() {
                             self.view = v;
                         }

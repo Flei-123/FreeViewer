@@ -24,7 +24,7 @@ pub fn base() -> String {
 pub struct Meeting {
     /// Anzeige-ID im Zoom-Stil: "482-913-770"
     pub id: String,
-    pub titel: String,
+    pub heading: String,
     /// Empty in the list - it is deliberately not handed out.
     pub passphrase: String,
     pub termin_text: String,
@@ -46,7 +46,7 @@ fn from_json(v: &serde_json::Value) -> Meeting {
     };
     Meeting {
         id: s("id"),
-        titel: s("titel"),
+        heading: s("titel"),
         passphrase: s("passwort"),
         termin_text: s("termin_text"),
         // Only from the OWN list; the key never comes from the server.
@@ -64,10 +64,10 @@ fn get_json(url: &str) -> Result<serde_json::Value> {
 }
 
 /// Creates a meeting and returns ID + password.
-pub fn create(titel: &str, e2e: bool) -> Result<Meeting> {
+pub fn create(heading: &str, e2e: bool) -> Result<Meeting> {
     let url = format!("{}/api/meeting", base());
     let payload = serde_json::json!({
-        "titel": titel,
+        "titel": heading,
         "termin": serde_json::Value::Null,
         "termin_text": "",
     });
@@ -120,7 +120,7 @@ fn write_own(liste: &[Meeting]) {
         .map(|x| {
             serde_json::json!({
                 "id": x.id,
-                "titel": x.titel,
+                "titel": x.heading,
                 "passwort": x.passphrase,
                 "termin_text": x.termin_text,
             })
@@ -141,7 +141,7 @@ fn write_own(liste: &[Meeting]) {
 /// Now each machine remembers its own; whether one is still running,
 /// the server still answers - but you have to already know the
 /// number for that.
-pub fn eigene() -> Vec<Meeting> {
+pub fn own() -> Vec<Meeting> {
     let text = std::fs::read_to_string(own_file()).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     v.as_array()
@@ -150,20 +150,20 @@ pub fn eigene() -> Vec<Meeting> {
 }
 
 /// Add a meeting to the own list (or refresh it).
-pub fn merken(m: &Meeting) {
+pub fn remember(m: &Meeting) {
     if m.id.trim().is_empty() {
         return;
     }
-    let mut liste = eigene();
+    let mut liste = own();
     liste.retain(|x| x.id != m.id);
     liste.insert(0, m.clone());
-    let hoechstens: Vec<Meeting> = liste.into_iter().take(12).collect();
-    write_own(&hoechstens);
+    let at_most: Vec<Meeting> = liste.into_iter().take(12).collect();
+    write_own(&at_most);
 }
 
 /// Remove a meeting from the own list.
-pub fn vergessen(id: &str) {
-    let mut liste = eigene();
+pub fn forget(id: &str) {
+    let mut liste = own();
     liste.retain(|x| x.id != id);
     write_own(&liste);
 }
@@ -172,11 +172,11 @@ pub fn vergessen(id: &str) {
 /// for each number individually - expired ones drop out of the list.
 pub fn list() -> Result<Vec<Meeting>> {
     let mut aus = Vec::new();
-    for m in eigene() {
+    for m in own() {
         if exists(&m.id) {
             aus.push(m);
         } else {
-            vergessen(&m.id);
+            forget(&m.id);
         }
     }
     Ok(aus)
@@ -219,8 +219,8 @@ pub fn with_key(url: &str, e2e: &str) -> String {
 
 /// Get the key from a link (fragment OR "k=" in it).
 pub fn key_from_link(link: &str) -> Option<String> {
-    let teil = link.split('#').nth(1)?;
-    for kv in teil.split('&') {
+    let part = link.split('#').nth(1)?;
+    for kv in part.split('&') {
         if let Some(v) = kv.strip_prefix("k=") {
             let v = v.trim();
             if crate::meete2e::Key::aus_text(v).is_some() {
@@ -233,23 +233,23 @@ pub fn key_from_link(link: &str) -> Option<String> {
 
 /// Like join_url, but with the own FreeViewer ID.
 pub fn join_url_with_id(id: &str, pass: &str, fvid: &str) -> String {
-    let ziffern: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
-    if ziffern.is_empty() {
+    let digits: String = fvid.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
         return join_url(id, pass);
     }
-    format!("{}&fv={}", join_url(id, pass), ziffern)
+    format!("{}&fv={}", join_url(id, pass), digits)
 }
 
 /// Text zum Weitergeben - Telefon, Chat, E-Mail.
 pub fn invite(m: &Meeting) -> String {
-    let titel = if m.titel.trim().is_empty() {
+    let heading = if m.heading.trim().is_empty() {
         format!("{} Meet", crate::brand::NAME)
     } else {
-        m.titel.trim().to_string()
+        m.heading.trim().to_string()
     };
     format!(
         "{}\nMeeting-ID: {}\nPasswort: {}\n{}",
-        titel,
+        heading,
         m.id,
         m.passphrase,
         with_key(&join_url(&m.id, &m.passphrase), &m.e2e)
@@ -280,12 +280,12 @@ fn urlenc(s: &str) -> String {
 /// via the freeviewer:// scheme. This window here IS already
 /// the client - without the marker the page inside it would trigger the scheme again
 /// and open itself in a circle.
-fn mit_app_merkmal(url: &str) -> String {
+fn with_app_marker(url: &str) -> String {
     if url.contains("app=") {
         return url.to_string();
     }
-    let trenn = if url.contains('?') { "&" } else { "?" };
-    format!("{}{}app=1", url, trenn)
+    let separate = if url.contains('?') { "&" } else { "?" };
+    format!("{}{}app=1", url, separate)
 }
 
 /// Opens the meeting in its own window without an address bar.
@@ -294,7 +294,7 @@ fn mit_app_merkmal(url: &str) -> String {
 /// like a program. If neither exists, we use the normal
 /// browser - the main thing is that the user ends up in the meeting.
 pub fn open_window(url: &str) -> Result<()> {
-    let markiert = mit_app_merkmal(url);
+    let markiert = with_app_marker(url);
     let url = markiert.as_str();
     #[cfg(windows)]
     {
@@ -407,7 +407,7 @@ mod tests {
     fn invite_contains_everything_to_join() {
         let m = Meeting {
             id: "111-222-333".into(),
-            titel: "Testrunde".into(),
+            heading: "Testrunde".into(),
             passphrase: "geheim22".into(),
             termin_text: String::new(),
             e2e: String::new(),
@@ -431,14 +431,14 @@ mod tests {
     }
 
     #[test]
-    fn app_merkmal_wird_genau_einmal_angehaengt() {
-        let u = mit_app_merkmal("https://meet.fleitec.com/?room=1-2-3&pass=x");
+    fn app_marker_is_appended_exactly_once() {
+        let u = with_app_marker("https://meet.fleitec.com/?room=1-2-3&pass=x");
         assert!(u.ends_with("&app=1"), "{}", u);
         // Already marked? Then the address stays untouched.
-        let m = mit_app_merkmal(&u);
+        let m = with_app_marker(&u);
         assert_eq!(m, u);
         // With no parameter at all the address gets a question mark.
-        assert_eq!(mit_app_merkmal("https://x.test/"), "https://x.test/?app=1");
+        assert_eq!(with_app_marker("https://x.test/"), "https://x.test/?app=1");
     }
 
     #[test]
@@ -455,8 +455,8 @@ mod tests {
 pub struct Participant {
     pub name: String,
     pub host: bool,
-    pub mikro_aus: bool,
-    pub kamera_aus: bool,
+    pub mic_from: bool,
+    pub camera_from: bool,
     pub hand: bool,
     /// Offers that others may control its machine (FreeViewer ID).
     pub fv: bool,
@@ -475,8 +475,8 @@ fn tn_aus_json(v: &serde_json::Value) -> Vec<Participant> {
                 .unwrap_or_default()
                 .to_string(),
             host: truthy(x, "host"),
-            mikro_aus: truthy(x, "audio_muted"),
-            kamera_aus: truthy(x, "video_muted"),
+            mic_from: truthy(x, "audio_muted"),
+            camera_from: truthy(x, "video_muted"),
             hand: truthy(x, "hand"),
             fv: truthy(x, "fv"),
         })
@@ -500,14 +500,14 @@ pub fn participant(id: &str, pass: &str) -> Result<Vec<Participant>> {
 ///
 /// The names are reported by the system; the browser calls them almost the same, so
 /// the Meet page finds a wanted device again by its name.
-pub fn geraete() -> (Vec<String>, Vec<String>) {
-    (crate::audio::input_devices(), kameras())
+pub fn devices() -> (Vec<String>, Vec<String>) {
+    (crate::audio::input_devices(), cameras())
 }
 
 /// Cameras of the machine. Windows asks the device manager (PnP), Linux
 /// reads the names of the Video4Linux nodes, macOS the system report.
 /// Everything runs locally - no packet goes onto the network for it.
-pub fn kameras() -> Vec<String> {
+pub fn cameras() -> Vec<String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -583,13 +583,13 @@ pub fn join_url_ex(
     mic: Option<&str>,
     cam: Option<&str>,
     is_muted: bool,
-    ohne_video: bool,
+    without_video: bool,
 ) -> String {
     let mut u = join_url(id, pass);
     if let Some(f) = fvid {
-        let ziffern: String = f.chars().filter(|c| c.is_ascii_digit()).take(12).collect();
-        if !ziffern.is_empty() {
-            u = format!("{}&fv={}", u, ziffern);
+        let digits: String = f.chars().filter(|c| c.is_ascii_digit()).take(12).collect();
+        if !digits.is_empty() {
+            u = format!("{}&fv={}", u, digits);
         }
     }
     if let Some(m) = mic {
@@ -605,7 +605,7 @@ pub fn join_url_ex(
     if is_muted {
         u = format!("{}&mute=1", u);
     }
-    if ohne_video {
+    if without_video {
         u = format!("{}&novideo=1", u);
     }
     u
@@ -636,13 +636,13 @@ mod tests_meetwin {
     }
 
     #[test]
-    fn join_url_ex_laesst_leeres_weg() {
+    fn join_url_ex_omits_empty() {
         let u = join_url_ex("1-2-3", "pw", None, None, Some("  "), false, false);
         assert_eq!(u, join_url("1-2-3", "pw"));
     }
 
     #[test]
-    fn teilnehmerliste_wird_gelesen() {
+    fn participant_list_is_read() {
         let v: serde_json::Value = serde_json::from_str(
             r#"[
               {"name":"Justin","host":true,"audio_muted":false,"video_muted":true,"hand":false,"fv":true},
@@ -653,14 +653,14 @@ mod tests_meetwin {
         let t = tn_aus_json(&v);
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].name, "Justin");
-        assert!(t[0].host && t[0].kamera_aus && t[0].fv && !t[0].mikro_aus);
+        assert!(t[0].host && t[0].camera_from && t[0].fv && !t[0].mic_from);
         assert_eq!(t[1].name, "Gast 7");
-        assert!(t[1].mikro_aus && t[1].hand && !t[1].host);
+        assert!(t[1].mic_from && t[1].hand && !t[1].host);
         // Missing fields are not an error - older servers deliver less.
         let leer: serde_json::Value = serde_json::from_str(r#"[{"name":"N"}]"#).unwrap();
         let t = tn_aus_json(&leer);
         assert_eq!(t.len(), 1);
-        assert!(!t[0].host && !t[0].mikro_aus && !t[0].fv);
+        assert!(!t[0].host && !t[0].mic_from && !t[0].fv);
     }
 }
 
@@ -674,9 +674,9 @@ mod e2e_link_tests {
     fn key_follows_the_hash() {
         let k = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
         let u = with_key(&join_url("1-2-3", "pw"), k);
-        let (vorn, hinten) = u.split_once('#').expect("kein Fragment");
-        assert!(!vorn.contains(k), "Schluessel steht in der Abfrage: {}", vorn);
-        assert_eq!(hinten, format!("k={}", k));
+        let (front, back) = u.split_once('#').expect("kein Fragment");
+        assert!(!front.contains(k), "Schluessel steht in der Abfrage: {}", front);
+        assert_eq!(back, format!("k={}", k));
     }
 
     #[test]
@@ -696,7 +696,7 @@ mod e2e_link_tests {
     /// Nonsense in the fragment must NOT pass as a key - otherwise
     /// the client decrypts with garbage and shows garbled video.
     #[test]
-    fn unsinn_im_fragment_wird_abgewiesen() {
+    fn nonsense_in_fragment_is_refused() {
         assert!(key_from_link("https://x/?room=1#k=zukurz").is_none());
         assert!(key_from_link("https://x/?room=1#k=").is_none());
         assert!(key_from_link("https://x/?room=1").is_none());
@@ -711,7 +711,7 @@ mod e2e_link_tests {
         assert_eq!(key_for(false), "");
         let m = Meeting {
             id: "482-913-770".into(),
-            titel: "Test".into(),
+            heading: "Test".into(),
             passphrase: "geheim".into(),
             termin_text: String::new(),
             e2e: key_for(false),
@@ -722,15 +722,15 @@ mod e2e_link_tests {
     }
 
     /// LIVE against the real server - runs only on request:
-    ///     cargo test -- --ignored anlegen_mit_und_ohne_haken --nocapture
+    ///     cargo test -- --ignored create_with_and_without_tick --nocapture
     /// Proves on a real meeting that the tick really decides about the
     /// key in the invitation link.
     #[test]
     #[ignore]
-    fn anlegen_mit_und_ohne_haken() {
-        let ohne = create("Probe ohne Haken", false).expect("Server nicht erreichbar");
-        assert!(ohne.e2e.is_empty(), "Schluessel ohne Haken: {}", ohne.e2e);
-        let l1 = invite(&ohne);
+    fn create_with_and_without_tick() {
+        let without = create("Probe ohne Haken", false).expect("Server nicht erreichbar");
+        assert!(without.e2e.is_empty(), "Schluessel ohne Haken: {}", without.e2e);
+        let l1 = invite(&without);
         assert!(!l1.contains("#k="), "{}", l1);
         println!("OHNE Haken: {}", l1.lines().last().unwrap_or(""));
 
@@ -739,7 +739,7 @@ mod e2e_link_tests {
         let l2 = invite(&mit);
         assert!(l2.contains("#k="), "{}", l2);
         println!("MIT Haken:  {}", l2.lines().last().unwrap_or(""));
-        println!("ROOM_WITHOUT={} PASS_WITHOUT={}", ohne.id, ohne.passphrase);
+        println!("ROOM_WITHOUT={} PASS_WITHOUT={}", without.id, without.passphrase);
         println!("ROOM_WITH={} PASS_WITH={} KEY={}", mit.id, mit.passphrase, mit.e2e);
     }
 
@@ -757,7 +757,7 @@ mod e2e_link_tests {
     fn invite_carries_the_key() {
         let m = Meeting {
             id: "482-913-770".into(),
-            titel: "Test".into(),
+            heading: "Test".into(),
             passphrase: "geheim".into(),
             termin_text: String::new(),
             e2e: crate::meete2e::Key::neu().als_text(),

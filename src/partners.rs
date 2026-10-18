@@ -499,7 +499,7 @@ mod tests {
     /// The trigger of the data loss of 31.07.2026: a test run overwrote the real address book
     /// via merge_remote() -> save().
     #[test]
-    fn ein_test_schreibt_nie_in_die_echte_konfiguration() {
+    fn a_test_never_writes_to_the_real_config() {
         own_dir("isoliert");
         let mut b = Book::default();
         b.merge_remote(&[dev("111111111", "Neu", 200)]);
@@ -512,20 +512,20 @@ mod tests {
 
     /// A filled list must never be replaced by an empty one.
     #[test]
-    fn eine_leere_liste_ueberschreibt_keine_gefuellte() {
+    fn empty_list_does_not_overwrite_a_filled_one() {
         own_dir("nichtleeren");
-        let mut voll = Book::default();
-        voll.entries = vec![Partner {
+        let mut full = Book::default();
+        full.entries = vec![Partner {
             id: "123456789".into(),
             name: "Buero-PC".into(),
             at: 100,
             ..Default::default()
         }];
-        voll.save();
+        full.save();
         Book::default().save();
-        let wieder = Book::load();
-        assert_eq!(wieder.sorted().len(), 1);
-        assert_eq!(wieder.sorted()[0].name, "Buero-PC");
+        let again = Book::load();
+        assert_eq!(again.sorted().len(), 1);
+        assert_eq!(again.sorted()[0].name, "Buero-PC");
     }
 
     /// Broken file -> the backup copy rescues the list.
@@ -543,9 +543,9 @@ mod tests {
         // second write creates the backup copy
         b.rename("222222222", "Laptop 2");
         std::fs::write(Book::path(), b"{ kaputt").unwrap();
-        let wieder = Book::load();
-        assert_eq!(wieder.sorted().len(), 1);
-        assert_eq!(wieder.sorted()[0].id, "222222222");
+        let again = Book::load();
+        assert_eq!(again.sorted().len(), 1);
+        assert_eq!(again.sorted()[0].id, "222222222");
     }
 
     fn dev(id: &str, name: &str, at: u64) -> SyncDevice {
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn ein_unbekanntes_geraet_kommt_dazu() {
+    fn unknown_device_is_added() {
         let mut b = Book::default();
         assert!(b.merge_remote(&[dev("222222222", "Laptop", 10)]));
         assert_eq!(b.sorted().len(), 1);
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn ein_grabstein_raeumt_auch_hier_auf() {
+    fn tombstone_also_cleans_up_here() {
         let mut b = Book::default();
         b.entries = vec![Partner {
             id: "333333333".into(),
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn entfernen_erzeugt_einen_grabstein_statt_einer_luecke() {
+    fn remove_creates_tombstone_instead_of_gap() {
         let mut b = Book::default();
         b.entries = vec![Partner {
             id: "444444444".into(),

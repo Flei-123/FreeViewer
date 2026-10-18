@@ -829,7 +829,7 @@ mod imp {
     /// So every update uses up one of the three
     /// recovery actions - the safety net was used up after three
     /// updates a day. A clean exit does not count.
-    pub fn stop_anfordern() {
+    pub fn stop_request() {
         STOP.store(true, Ordering::Relaxed);
         WAKE.store(true, Ordering::Relaxed);
     }
@@ -960,7 +960,7 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     desktop_report, elevate, install, installed, is_elevated, kill_agent, log,
-    prepare_machine_config, run, running, stop_anfordern, uninstall, watch_desktop,
+    prepare_machine_config, run, running, stop_request, uninstall, watch_desktop,
 };
 
 #[cfg(not(windows))]
@@ -988,7 +988,7 @@ mod stub {
         Err(anyhow!("nur unter Windows"))
     }
     pub fn kill_agent() {}
-    pub fn stop_anfordern() {}
+    pub fn stop_request() {}
     pub fn log(_s: &str) {}
     /// On which input desktop does the agent run? Only Windows knows the
     /// problem (login screen, UAC), elsewhere there is exactly one.

@@ -46,7 +46,7 @@ pub trait Backend {
     /// over PCIe instead of 3. `None` means no hardware scaler is available,
     /// then the caller falls back to the CPU path.
     fn scaled(&mut self, dw: u32, dh: u32, nv12: bool) -> Option<&[u8]> {
-        self.scaled_teil(dw, dh, nv12, (0.0, 0.0, 1.0, 1.0))
+        self.scaled_part(dw, dh, nv12, (0.0, 0.0, 1.0, 1.0))
     }
     /// Like `scaled`, but only a SECTION of the screen (fractions 0..1).
     ///
@@ -56,12 +56,12 @@ pub trait Backend {
     /// gets an old or empty buffer - that is exactly why the sharp zoom
     /// turned black from a certain level. The
     /// video processor can do the section itself, at no extra cost.
-    fn scaled_teil(
+    fn scaled_part(
         &mut self,
         _dw: u32,
         _dh: u32,
         _nv12: bool,
-        _teil: (f32, f32, f32, f32),
+        _part: (f32, f32, f32, f32),
     ) -> Option<&[u8]> {
         None
     }
@@ -600,7 +600,7 @@ mod dxgi {
     /// Without this protection capture and encoder access
     /// the same context at the same time - that ends in image garbage or a crash in the
     /// driver.
-    fn mehrfaedig_schuetzen(ctx: &ID3D11DeviceContext) {
+    fn multithreaded_protect(ctx: &ID3D11DeviceContext) {
         if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
             // SAFETY: `mt` is a valid ID3D11Multithread obtained by a successful cast of the live
             // context; SetMultithreadProtected only toggles an internal flag of the context.
@@ -646,7 +646,7 @@ mod dxgi {
         }
         let device = device.ok_or_else(|| anyhow!("kein D3D11 device"))?;
         let ctx = ctx.ok_or_else(|| anyhow!("kein D3D11 context"))?;
-        mehrfaedig_schuetzen(&ctx);
+        multithreaded_protect(&ctx);
         Ok((device, ctx))
     }
 
@@ -1001,7 +1001,7 @@ mod dxgi {
 
         /// frame (GPU) -> scaled (GPU) -> staging -> packed RGB.
         pub fn scale(&mut self, ctx: &ID3D11DeviceContext, frame: &ID3D11Texture2D) -> Result<()> {
-            self.scale_teil(ctx, frame, (0.0, 0.0, 1.0, 1.0))
+            self.scale_part(ctx, frame, (0.0, 0.0, 1.0, 1.0))
         }
 
         /// Like `scale`, but only a section of the source (fractions 0..1).
@@ -1011,27 +1011,27 @@ mod dxgi {
         /// This way everything stays on the graphics card when zooming in - no
         /// full image over PCIe, no compute time on the main CPU, and the
         /// pixels are REAL instead of extrapolated.
-        pub fn scale_teil(
+        pub fn scale_part(
             &mut self,
             ctx: &ID3D11DeviceContext,
             frame: &ID3D11Texture2D,
-            teil: (f32, f32, f32, f32),
+            part: (f32, f32, f32, f32),
         ) -> Result<()> {
-            self.blt_teil(ctx, frame, teil)?;
-            self.rueck_ins_ram(ctx)
+            self.blt_part(ctx, frame, part)?;
+            self.back_into_ram(ctx)
         }
 
         /// Only the work on the graphics card: scaling and (for NV12) the
         /// colour conversion. The result stays in the output texture.
-        pub fn blt_teil(
+        pub fn blt_part(
             &mut self,
             ctx: &ID3D11DeviceContext,
             frame: &ID3D11Texture2D,
-            teil: (f32, f32, f32, f32),
+            part: (f32, f32, f32, f32),
         ) -> Result<()> {
             // SAFETY: `ctx`, `frame` and the members used here are live COM objects (the references
             // keep them alive); `frame` is the full-size duplication texture, `self.src` has the
-            // same size and format (`in_size`). `ziel` and `rect` are locals copied by the video
+            // same size and format (`in_size`). `dest` and `rect` are locals copied by the video
             // context during each call. `stream.pInputSurface` holds one extra reference to
             // `in_view`; `stream.clone()` is a bitwise copy (windows crate: transmute_copy, no
             // AddRef) inside a temporary array that never releases it, so exactly one
@@ -1041,8 +1041,8 @@ mod dxgi {
             unsafe {
                 ctx.CopyResource(&self.src, frame);
                 let (iw, ih) = self.in_size;
-                let (tx, ty, tw, th) = teil;
-                let ganz = tw >= 0.999 && th >= 0.999 && tx <= 0.001 && ty <= 0.001;
+                let (tx, ty, tw, th) = part;
+                let whole = tw >= 0.999 && th >= 0.999 && tx <= 0.001 && ty <= 0.001;
                 // ALWAYS set the destination explicitly to the full output.
                 //
                 // Without this line, with a source rectangle set the video processor fills
@@ -1050,12 +1050,12 @@ mod dxgi {
                 // - measured on the Intel card in the Surface: the image came out as a
                 // flat colour, without any error message.
                 let (ow, oh) = self.out_size;
-                let ziel = RECT { left: 0, top: 0, right: ow as i32, bottom: oh as i32 };
+                let dest = RECT { left: 0, top: 0, right: ow as i32, bottom: oh as i32 };
                 self.vctx
-                    .VideoProcessorSetStreamDestRect(&self.proc, 0, true, Some(&ziel));
+                    .VideoProcessorSetStreamDestRect(&self.proc, 0, true, Some(&dest));
                 self.vctx
-                    .VideoProcessorSetOutputTargetRect(&self.proc, true, Some(&ziel));
-                if ganz {
+                    .VideoProcessorSetOutputTargetRect(&self.proc, true, Some(&dest));
+                if whole {
                     // No section: switch the setting off again,
                     // otherwise the last crop would stay set forever.
                     self.vctx
@@ -1102,7 +1102,7 @@ mod dxgi {
             device: &ID3D11Device,
             frame: &ID3D11Texture2D,
         ) -> Result<ID3D11Texture2D> {
-            self.blt_teil(ctx, frame, (0.0, 0.0, 1.0, 1.0))?;
+            self.blt_part(ctx, frame, (0.0, 0.0, 1.0, 1.0))?;
             if self.ring.is_empty() {
                 let (ow, oh) = self.out_size;
                 for _ in 0..3 {
@@ -1134,7 +1134,7 @@ mod dxgi {
         }
 
         /// The classic way: output texture -> staging -> main memory.
-        fn rueck_ins_ram(&mut self, ctx: &ID3D11DeviceContext) -> Result<()> {
+        fn back_into_ram(&mut self, ctx: &ID3D11DeviceContext) -> Result<()> {
             // SAFETY: `self.stage` is a CPU-readable staging texture of out_size, mapped for READ.
             // While mapped, `base` is valid for `RowPitch` bytes per row: the Y plane covers rows
             // 0..h and, for NV12, the interleaved UV plane starts at row h (D3D11 NV12 layout) and
@@ -1605,12 +1605,12 @@ mod dxgi {
             "dxgi"
         }
 
-        fn scaled_teil(
+        fn scaled_part(
             &mut self,
             dw: u32,
             dh: u32,
             nv12: bool,
-            teil: (f32, f32, f32, f32),
+            part: (f32, f32, f32, f32),
         ) -> Option<&[u8]> {
             if !self.gpu_ok {
                 return None;
@@ -1640,7 +1640,7 @@ mod dxgi {
             }
             let ctx = self.ctx.clone();
             let err = match slot.as_mut() {
-                Some(s) => s.scale_teil(&ctx, &frame, teil).err(),
+                Some(s) => s.scale_part(&ctx, &frame, part).err(),
                 None => Some(anyhow!("kein Scaler")),
             };
             if let Some(e) = err {

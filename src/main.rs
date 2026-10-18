@@ -177,7 +177,7 @@ fn main() -> eframe::Result<()> {
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--schirmshot") {
-        return cli_schirmshot(i);
+        return cli_screen_shot(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--camtest") {
@@ -185,7 +185,7 @@ fn main() -> eframe::Result<()> {
     }
 
     if std::env::args().any(|a| a == "--kameraliste") {
-        return cli_kameraliste();
+        return cli_camera_list();
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetalles") {
@@ -193,31 +193,31 @@ fn main() -> eframe::Result<()> {
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetsteuer") {
-        return cli_meetsteuer(i);
+        return cli_meet_control(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetempfang") {
-        return cli_meetempfang(i);
+        return cli_meet_receive(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetschirm") {
-        return cli_meetschirm(i);
+        return cli_meet_screen(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetkamera") {
-        return cli_meetkamera(i);
+        return cli_meet_camera(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetbild") {
-        return cli_meetbild(i);
+        return cli_meet_image(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetmik") {
-        return cli_meetmik(i);
+        return cli_meet_mic(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meetton") {
-        return cli_meetton(i);
+        return cli_meet_tone(i);
     }
 
     if let Some(i) = std::env::args().position(|a| a == "--meettest") {
@@ -344,13 +344,13 @@ fn main() -> eframe::Result<()> {
         let sh = shared.clone();
         std::thread::spawn(move || loop {
             if let Some(p) = service::published() {
-                let frisch = std::time::SystemTime::now()
+                let fresh = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
                     .saturating_sub(p.at)
                     < 90;
-                if frisch && !p.id.is_empty() {
+                if fresh && !p.id.is_empty() {
                     *sh.my_id.lock_ok() = p.id;
                     *sh.password.lock_ok() = p.password;
                 }
@@ -473,13 +473,13 @@ fn main() -> eframe::Result<()> {
         // Tell the service (session 0) that a window is open here.
         // Without this marker it does not know after the update whether it should
         // reopen the UI.
-        update::gui_marke_pflegen();
+        update::gui_marker_maintain();
     }
 
     // FV_RENDERER=dx forces DirectX from the start (for the hotline:
     // anyone who knows their machine has no OpenGL saves themselves the two
     // failed attempts). Anything else takes the normal path.
-    let dx_erzwungen = std::env::var("FV_RENDERER")
+    let dx_forced = std::env::var("FV_RENDERER")
         .map(|v| {
             let v = v.to_lowercase();
             v == "dx" || v == "directx" || v == "wgpu"
@@ -492,7 +492,7 @@ fn main() -> eframe::Result<()> {
             .with_visible(!start_hidden)
             .with_icon(app_icon())
             .with_title(crate::brand::NAME),
-        renderer: if dx_erzwungen {
+        renderer: if dx_forced {
             eframe::Renderer::Wgpu
         } else {
             eframe::Renderer::Glow
@@ -508,7 +508,7 @@ fn main() -> eframe::Result<()> {
     let shared4 = shared.clone();
     let embedded2 = embedded.clone();
     let embedded3 = embedded.clone();
-    let bauen = move |cc: &eframe::CreationContext<'_>| {
+    let build_app = move |cc: &eframe::CreationContext<'_>| {
         install_theme(&cc.egui_ctx);
         Ok(Box::new(App::new(shared, start_hidden, embedded.clone())) as Box<dyn eframe::App>)
     };
@@ -518,14 +518,14 @@ fn main() -> eframe::Result<()> {
     {
         let wach = shared3.clone();
         std::thread::spawn(move || {
-            let frist = Duration::from_secs(
+            let deadline = Duration::from_secs(
                 std::env::var("FV_FENSTER_FRIST_SEK")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(25),
             );
-            std::thread::sleep(frist);
-            if BILD_GEZEICHNET.load(Ordering::Relaxed) {
+            std::thread::sleep(deadline);
+            if IMAGE_DRAWN.load(Ordering::Relaxed) {
                 return;
             }
             // The attempts (OpenGL, OpenGL without acceleration, DirectX)
@@ -537,20 +537,20 @@ fn main() -> eframe::Result<()> {
             }
             report_start_error(&format!(
                 "The window did not come up even after {} seconds (no frame drawn)",
-                frist.as_secs()
+                deadline.as_secs()
             ));
             continue_without_window(&wach);
         });
     }
-    let gl_kaputt_simulieren = std::env::var("FV_TEST_GL_KAPUTT").as_deref() == Ok("1");
-    let erst = if gl_kaputt_simulieren {
+    let gl_broken_simulate = std::env::var("FV_TEST_GL_KAPUTT").as_deref() == Ok("1");
+    let first = if gl_broken_simulate {
         Err(eframe::Error::AppCreation(
             "TEST: OpenGL kuenstlich abgeschaltet".into(),
         ))
     } else {
-        eframe::run_native(crate::brand::NAME, options, Box::new(bauen))
+        eframe::run_native(crate::brand::NAME, options, Box::new(build_app))
     };
-    let Err(e1) = erst else {
+    let Err(e1) = first else {
         return Ok(());
     };
     capture::log_line(&format!("UI does not start ({}) - second attempt without hardware acceleration", e1));
@@ -564,7 +564,7 @@ fn main() -> eframe::Result<()> {
         hardware_acceleration: eframe::HardwareAcceleration::Off,
         ..Default::default()
     };
-    let zweit = if gl_kaputt_simulieren {
+    let second = if gl_broken_simulate {
         Err(eframe::Error::AppCreation(
             "TEST: OpenGL kuenstlich abgeschaltet".into(),
         ))
@@ -579,7 +579,7 @@ fn main() -> eframe::Result<()> {
             }),
         )
     };
-    let e2 = match zweit {
+    let e2 = match second {
         Ok(()) => return Ok(()),
         Err(e2) => e2,
     };
@@ -612,7 +612,7 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    let dritt = eframe::run_native(
+    let third = eframe::run_native(
         crate::brand::NAME,
         optionen3,
         Box::new(move |cc| {
@@ -620,7 +620,7 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(App::new(shared4, start_hidden, embedded3.clone())) as Box<dyn eframe::App>)
         }),
     );
-    match dritt {
+    match third {
         Ok(()) => Ok(()),
         Err(e3) => {
             // No window - but the machine should still be reachable.
@@ -651,7 +651,7 @@ struct App {
     /// Friends list including sync with the relay. Only started on the first
     /// look at the page - whoever never opens it should not
     /// cause background traffic either.
-    friends: Option<std::sync::Arc<friends::Dienst>>,
+    friends: Option<std::sync::Arc<friends::Service>>,
     /// Eingabefeld "FreeViewer-Nummer des Freundes".
     friends_id: String,
     /// Last feedback on the friends system (error or success).
@@ -757,25 +757,25 @@ struct App {
     /// The own Meet window (Zoom flow in a separate viewport).
     meet_win: MeetWin,
     /// Natives Meeting (Stufe 1: Ton, Chat, Warteraum) - laeuft ohne Browser.
-    nativ_meet: Option<meetui::NativMeet>,
+    native_meet: Option<meetui::NativeMeet>,
     /// Bildkacheln des nativen Meetings: Participant -> (Stand, Textur).
-    nativ_bilder: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
+    native_images: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Shared screens: participant -> (state, texture). Own storage,
     /// because a participant sends camera AND screen at the same time.
-    nativ_schirme: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
+    native_screens: std::collections::HashMap<u64, (u64, egui::TextureHandle)>,
     /// Whether sharing was already active in the last frame - the
     /// automatic minimizing and the small window depend on it.
-    meet_teilt_war: bool,
+    meet_shares_was: bool,
     /// Eigenes Kamerabild im nativen Meeting: (Stand, Textur).
-    nativ_eigen: Option<(u64, egui::TextureHandle)>,
+    native_own: Option<(u64, egui::TextureHandle)>,
     /// The own SHARED image - so that you see yourself what you share.
     native_own_screen: Option<(u64, egui::TextureHandle)>,
     /// Camera and microphone BEFORE joining (self preview, level).
-    vorprobe: meetui::Vorprobe,
+    preflight: meetui::Preflight,
     /// What only concerns the UI: sidebar, tabs, camera slot.
     meet_z: meetwindow::MeetWindowState,
     /// How many chat lines the user has already seen (counter on the button).
-    meet_gelesen: usize,
+    meet_read: usize,
     /// When the camera may start AFTER joining. The preview holds
     /// the device until joining; on Windows the camera needs
     /// a moment until it is free again - reopening immediately fails.
@@ -868,10 +868,10 @@ struct MeetWin {
     offen: bool,
     meeting: Option<meet::Meeting>,
     /// The browser with image and sound is already running.
-    beigetreten: bool,
+    joined: bool,
     /// Request "join" from the big button - converted one line further
     /// down into a real native session.
-    nativ_start: bool,
+    native_start: bool,
     /// Device names as the system reports them (microphones, cameras).
     mics: Vec<String>,
     cams: Vec<String>,
@@ -879,12 +879,12 @@ struct MeetWin {
     mic_sel: usize,
     cam_sel: usize,
     is_muted: bool,
-    ohne_video: bool,
+    without_video: bool,
     /// Read once in the background (the query takes a moment).
     #[allow(clippy::type_complexity)]
-    geraete: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>, Vec<String>)>>>,
-    geraete_geladen: bool,
-    geraete_da: bool,
+    devices: Arc<std::sync::Mutex<Option<(Vec<String>, Vec<String>, Vec<String>)>>>,
+    devices_loaded: bool,
+    devices_there: bool,
     /// Speakers - only for the settings IN the meeting; before
     /// joining the browser does not show them either.
     spks: Vec<String>,
@@ -912,8 +912,8 @@ impl Default for MeetWin {
         Self {
             offen: false,
             meeting: None,
-            beigetreten: false,
-            nativ_start: false,
+            joined: false,
+            native_start: false,
             mics: Vec::new(),
             cams: Vec::new(),
             mic_sel: 0,
@@ -924,10 +924,10 @@ impl Default for MeetWin {
             window: Vec::new(),
             next_window: std::time::Instant::now(),
             is_muted: false,
-            ohne_video: false,
-            geraete: Arc::new(std::sync::Mutex::new(None)),
-            geraete_geladen: false,
-            geraete_da: false,
+            without_video: false,
+            devices: Arc::new(std::sync::Mutex::new(None)),
+            devices_loaded: false,
+            devices_there: false,
             tn: Arc::new(std::sync::Mutex::new(Vec::new())),
             name: String::new(),
             tn_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),

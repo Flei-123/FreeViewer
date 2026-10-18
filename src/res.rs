@@ -13,7 +13,7 @@ use std::sync::Mutex;
 /// Previous resolution per monitor index (only what we switched ourselves).
 static ORIGINAL: Mutex<Option<HashMap<usize, (u32, u32)>>> = Mutex::new(None);
 
-fn merken(index: usize, w: u32, h: u32) {
+fn remember(index: usize, w: u32, h: u32) {
     let mut g = ORIGINAL.lock_ok();
     let map = g.get_or_insert_with(HashMap::new);
     map.entry(index).or_insert((w, h));
@@ -73,7 +73,7 @@ mod imp {
     /// "current resolution unreadable", the switch was rejected every
     /// time. Exactly this error was in Justin's log.
     fn devicename(index: usize) -> Result<Vec<u16>> {
-        let mut gefunden = 0usize;
+        let mut found = 0usize;
         for i in 0..64u32 {
             let mut dd = DISPLAY_DEVICEW::default();
             dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
@@ -85,7 +85,7 @@ mod imp {
             if dd.StateFlags & ATTACHED_TO_DESKTOP == 0 {
                 continue;
             }
-            if gefunden == index {
+            if found == index {
                 let len = dd
                     .DeviceName
                     .iter()
@@ -93,12 +93,12 @@ mod imp {
                     .unwrap_or(dd.DeviceName.len());
                 return Ok(dd.DeviceName[..len].to_vec());
             }
-            gefunden += 1;
+            found += 1;
         }
         Err(anyhow!(
             "Monitor {} nicht gefunden ({} angeschlossen)",
             index + 1,
-            gefunden
+            found
         ))
     }
 
@@ -153,7 +153,7 @@ mod imp {
         if (ow, oh) == (w, h) {
             return Ok(());
         }
-        super::merken(index, ow, oh);
+        super::remember(index, ow, oh);
         set_keep(index, w, h)
     }
 

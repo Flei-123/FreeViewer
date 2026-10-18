@@ -60,7 +60,7 @@ pub const HELL: Palette = Palette {
 };
 
 /// TeamViewer, but at night.
-pub const DUNKEL: Palette = Palette {
+pub const DARK: Palette = Palette {
     bg: rgb(0x13, 0x15, 0x1b),
     card: rgb(0x1b, 0x1e, 0x26),
     card_hi: rgb(0x23, 0x27, 0x31),
@@ -118,7 +118,7 @@ pub const GRUEN: Palette = Palette {
 
 pub const PRESETS: [(&str, &str, Palette); 4] = [
     ("hell", "Hell", HELL),
-    ("dunkel", "Dunkel", DUNKEL),
+    ("dunkel", "Dunkel", DARK),
     ("navy", "FleiTec Navy", NAVY),
     ("gruen", "FleiLauncher", GRUEN),
 ];
@@ -133,7 +133,7 @@ pub const ACCENTS: [(&str, Color32); 6] = [
     ("Rot", rgb(0xef, 0x44, 0x44)),
 ];
 
-static ACTIVE: RwLock<Palette> = RwLock::new(DUNKEL);
+static ACTIVE: RwLock<Palette> = RwLock::new(DARK);
 
 pub fn palette() -> Palette {
     *ACTIVE.read_ok()
@@ -309,7 +309,7 @@ pub fn resolve(a: &Appearance) -> Palette {
         .iter()
         .find(|(k, _, _)| *k == a.preset)
         .map(|(_, _, p)| *p)
-        .unwrap_or(DUNKEL);
+        .unwrap_or(DARK);
     if let Some(c) = a.accent {
         p.accent = Color32::from_rgb(c[0], c[1], c[2]);
         // keep the label on the accent readable
@@ -460,7 +460,7 @@ mod tests {
             preset: "gibtsnicht".into(),
             ..Default::default()
         };
-        assert_eq!(resolve(&a).bg, DUNKEL.bg);
+        assert_eq!(resolve(&a).bg, DARK.bg);
     }
 
     #[test]

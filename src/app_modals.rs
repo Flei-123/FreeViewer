@@ -20,16 +20,16 @@ impl App {
             }
             account::SetupOut::Inbox { pending, claimed } => {
                 if self.dep_booted {
-                    let mut neue = Vec::new();
+                    let mut fresh = Vec::new();
                     for cl in &claimed {
                         if !self.dep_seen.contains(&cl.id) {
                             self.dep_seen.insert(cl.id.clone());
-                            neue.push(cl.name.clone());
+                            fresh.push(cl.name.clone());
                         }
                     }
-                    if !neue.is_empty() {
+                    if !fresh.is_empty() {
                         // liegt jetzt im Konto-Adressbuch - einmal abgleichen
-                        self.hint = i18n::tf("dep.arrived", &neue.join(", "));
+                        self.hint = i18n::tf("dep.arrived", &fresh.join(", "));
                         self.start_sync(false);
                     }
                 } else {
@@ -55,7 +55,7 @@ impl App {
             return;
         }
         let mut offen = true;
-        let mut sicher = false;
+        let mut safe = false;
         let mut weg = false;
         egui::Window::new(i18n::t("set.uninstall_title"))
             .collapsible(false)
@@ -84,7 +84,7 @@ impl App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if accent_button(ui, i18n::t("set.uninstall_yes"), true).clicked() {
-                        sicher = true;
+                        safe = true;
                     }
                     if ghost_button(ui, i18n::t("setup.cancel")).clicked() {
                         weg = true;
@@ -94,7 +94,7 @@ impl App {
         if weg {
             offen = false;
         }
-        if sicher {
+        if safe {
             self.uninstall_ask = false;
             match service::elevate("--uninstall") {
                 Ok(()) => self.hint = i18n::t("set.uninstall_running").to_string(),
@@ -214,7 +214,7 @@ impl App {
         };
         let mut offen = true;
         let mut connect_now = false;
-        let mut anfragen = false;
+        let mut request = false;
         let mut weg = false;
         let name = self
             .book
@@ -260,7 +260,7 @@ impl App {
                         connect_now = true;
                     }
                     if ghost_button(ui, i18n::t("pwask.ask")).clicked() {
-                        anfragen = true;
+                        request = true;
                     }
                     if ghost_button(ui, i18n::t("setup.cancel")).clicked() {
                         weg = true;
@@ -270,7 +270,7 @@ impl App {
         if connect_now {
             self.pw_ask = None;
             self.start_session();
-        } else if anfragen {
+        } else if request {
             self.pw_ask = None;
             self.start_ask_session();
         } else if weg || !offen {

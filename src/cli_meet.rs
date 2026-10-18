@@ -15,7 +15,7 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
         .skip(i + 1)
         .find(|a| a.len() == 43 && crate::meete2e::Key::aus_text(a).is_some())
         .cloned();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args
         .get(i + 3)
@@ -26,9 +26,9 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
         .get(i + 5)
         .cloned()
         .unwrap_or_else(|| "497628420".to_string());
-    let mut m = match meetui::NativMeet::beitreten(
+    let mut m = match meetui::NativeMeet::join_meeting(
         &meet::base(),
-        &raum,
+        &room,
         &pass,
         &name,
         &fvid,
@@ -46,46 +46,46 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
     println!("ALLES E2E {}", m.e2e_an);
     println!("ALLES START {}", m.notice);
     let start = std::time::Instant::now();
-    let (mut kamera_an, mut screen_on, mut frei) = (false, false, false);
+    let (mut camera_on, mut screen_on, mut free) = (false, false, false);
     while start.elapsed().as_secs() < dur {
         m.pumpe();
         // Switch on one after another so that it is visible in the browser
         // WHAT is being added.
         let s = start.elapsed().as_secs();
-        if !kamera_an && s >= 3 {
-            kamera_an = true;
-            m.kamera_schalten(true);
-            println!("ALLES KAMERA {} ({})", m.kamera_an, m.camera_notice);
+        if !camera_on && s >= 3 {
+            camera_on = true;
+            m.camera_toggle(true);
+            println!("ALLES KAMERA {} ({})", m.camera_on, m.camera_notice);
         }
         if !screen_on && s >= 8 {
             screen_on = true;
             m.toggle_screen(true, 0);
             println!("ALLES SCHIRM {} ({})", m.screen_on, m.screen_notice);
         }
-        if !frei && s >= 12 {
-            frei = true;
+        if !free && s >= 12 {
+            free = true;
             m.release_control(true);
-            println!("ALLES STEUERUNG {}", m.steuer_frei);
+            println!("ALLES STEUERUNG {}", m.control_free);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let z = m.state();
-    let zahlen = m.zahlen();
+    let numbers = m.numbers();
     println!(
         "ALLES ERGEBNIS leute={} ton_gesendet={} ton_empfangen={} kamera_gesendet={} schirm_gesendet={} bild_empfangen={} codec={}",
-        z.leute.len(),
-        zahlen.gesendet,
-        zahlen.receive,
-        m.bild_gesendet,
+        z.people.len(),
+        numbers.sent,
+        numbers.receive,
+        m.image_sent,
         m.screen_sent,
         m.image_counter,
-        m.bild_codec
+        m.image_codec
     );
     println!(
         "ALLES ZUSTAND kamera={} schirm={} steuerung={} meldung={} kamera_meldung={} schirm_meldung={}",
-        m.kamera_an, m.screen_on, m.steuer_frei, m.notice, m.camera_notice, m.screen_notice
+        m.camera_on, m.screen_on, m.control_free, m.notice, m.camera_notice, m.screen_notice
     );
-    m.verlassen();
+    m.leave();
     std::thread::sleep(std::time::Duration::from_millis(600));
     println!("ALLES FERTIG");
     return Ok(());
@@ -95,9 +95,9 @@ pub(crate) fn cli_meetalles(i: usize) -> eframe::Result<()> {
 // and does it notice when someone else releases it? The browser gets
 // its "Control" button from this - and we get the counter-check here.
 //   freeviewer --meetsteuer <raum> <passphrase> [name] [sekunden] [fvid]
-pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_control(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args
         .get(i + 3)
@@ -110,7 +110,7 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         .unwrap_or_else(|| "497628420".to_string());
     // Deliberately join WITHOUT a number: this measures that the
     // button only appears for the other side through the release.
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("STEUERTEST FEHLER Signalisierung: {}", e);
@@ -118,14 +118,14 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
         }
     };
     let start = std::time::Instant::now();
-    let mut freigegeben = false;
+    let mut released = false;
     let mut go_back = false;
-    let mut angebote = 0u32;
+    let mut offers = 0u32;
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Fernsteuerung { peer, fvid } => {
-                    angebote += 1;
+                meetsig::Event::RemoteControl { peer, fvid } => {
+                    offers += 1;
                     println!(
                         "STEUERTEST ANGEBOT peer={} fvid={}",
                         peer,
@@ -134,34 +134,34 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
                 }
                 // Admit immediately in the test - otherwise the browser stands
                 // at the door and nothing can be measured.
-                meetsig::Ereignis::WarteDazu { peer, .. } => {
-                    sig.warteraum("admit", Some(*peer))
+                meetsig::Event::WaitAlso { peer, .. } => {
+                    sig.waiting_room("admit", Some(*peer))
                 }
-                meetsig::Ereignis::Dazu(t) => println!("STEUERTEST DAZU {}", t.name),
+                meetsig::Event::Also(t) => println!("STEUERTEST DAZU {}", t.name),
                 _ => {}
             }
         }
-        if !freigegeben && sig.state().ich != 0 && start.elapsed().as_secs() >= 3 {
-            freigegeben = true;
-            sig.fernsteuerung(true, &fvid);
+        if !released && sig.state().ich != 0 && start.elapsed().as_secs() >= 3 {
+            released = true;
+            sig.remote_control(true, &fvid);
             println!("STEUERTEST FREIGEGEBEN {}", fvid);
         }
         // Take it back in the middle of the run: only this shows
         // that the button also DISAPPEARS again for the other side - had
         // we left for that, it would be no proof, just the
         // usual cleanup.
-        if freigegeben
+        if released
             && !go_back
             && start.elapsed().as_secs() >= dur.saturating_sub(8).max(9)
         {
             go_back = true;
-            sig.fernsteuerung(false, "");
+            sig.remote_control(false, "");
             println!("STEUERTEST ZURUECKGENOMMEN");
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let z = sig.state();
-    for t in z.leute.iter() {
+    for t in z.people.iter() {
         if !t.fvid.is_empty() {
             println!("STEUERTEST STEUERBAR {} {}", t.name, t.fvid);
         }
@@ -169,14 +169,14 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
     println!(
         "STEUERTEST ZUSTAND ich={} leute={} angebote={}",
         z.ich,
-        z.leute.len(),
-        angebote
+        z.people.len(),
+        offers
     );
     if !go_back {
-        sig.fernsteuerung(false, "");
+        sig.remote_control(false, "");
         std::thread::sleep(std::time::Duration::from_millis(800));
     }
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(500));
     println!("STEUERTEST FERTIG");
     return Ok(());
@@ -185,16 +185,16 @@ pub(crate) fn cli_meetsteuer(i: usize) -> eframe::Result<()> {
 // Receive test (stage 3b): what ARRIVES at the native client - and is
 // the camera cleanly separated from the screen?
 //   freeviewer --meetempfang <raum> <passphrase> [name] [sekunden]
-pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_receive(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args
         .get(i + 3)
         .cloned()
         .unwrap_or_else(|| "NativAuge".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("EMPFANGSTEST FEHLER Signalisierung: {}", e);
@@ -208,22 +208,22 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut kameras = meetvideo::Dekodierer::neu();
-    let mut schirme = meetvideo::Dekodierer::neu();
-    let mut angeboten = false;
-    let (mut kam_rahmen, mut screen_frame) = (0u64, 0u64);
+    let mut cameras = meetvideo::VideoDecoder::neu();
+    let mut screens = meetvideo::VideoDecoder::neu();
+    let mut offered = false;
+    let (mut came_frame, mut screen_frame) = (0u64, 0u64);
     let start = std::time::Instant::now();
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Spur {
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Spur {
                     mid,
                     peer,
                     display,
@@ -232,23 +232,23 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
                     ton.spur_art(mid, *peer, *display);
                     println!("SPUR mid={} peer={} art={} bildschirm={}", mid, peer, art, display);
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
                     println!("EREIGNIS Antwort eingespielt");
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
-                meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => ton.server_offer(sdp),
+                meetsig::Event::Separated(m) => println!("EREIGNIS Getrennt: {}", m),
                 _ => {}
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
         }
-        for te in ton.abholen() {
-            if let meetrtc::TonEreignis::Bild {
-                quelle,
+        for te in ton.poll_events() {
+            if let meetrtc::ToneEvent::Image {
+                origin,
                 display,
                 daten,
                 ..
@@ -256,36 +256,36 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
             {
                 if display {
                     screen_frame += 1;
-                    schirme.rahmen(quelle, &daten);
+                    screens.frame_box(origin, &daten);
                 } else {
-                    kam_rahmen += 1;
-                    kameras.rahmen(quelle, &daten);
+                    came_frame += 1;
+                    cameras.frame_box(origin, &daten);
                 }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let masse = |d: &meetvideo::Dekodierer| -> String {
-        d.bilder
+    let masse = |d: &meetvideo::VideoDecoder| -> String {
+        d.images
             .iter()
             .map(|(peer, (w, h, _))| {
-                format!("peer{}={}x{} hell={:.2}", peer, w, h, d.helligkeit(*peer))
+                format!("peer{}={}x{} hell={:.2}", peer, w, h, d.brightness(*peer))
             })
             .collect::<Vec<_>>()
             .join(" ")
     };
     println!(
         "ZAHLEN kamera_rahmen={} kamera_bilder={} [{}] schirm_rahmen={} schirm_bilder={} [{}] fehler={}",
-        kam_rahmen,
-        kameras.gezaehlt,
-        masse(&kameras),
+        came_frame,
+        cameras.counted,
+        masse(&cameras),
         screen_frame,
-        schirme.gezaehlt,
-        masse(&schirme),
-        if schirme.last_error.is_empty() { kameras.last_error.clone() } else { schirme.last_error.clone() }
+        screens.counted,
+        masse(&screens),
+        if screens.last_error.is_empty() { cameras.last_error.clone() } else { screens.last_error.clone() }
     );
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(300));
     println!("EMPFANGSTEST FERTIG");
     return Ok(());
@@ -294,9 +294,9 @@ pub(crate) fn cli_meetempfang(i: usize) -> eframe::Result<()> {
 // Screen test (stage 3): send the REAL screen as its own track into the
 // meeting - without a browser.
 //   freeviewer --meetschirm <raum> <passphrase> [name] [sekunden] [screen-nr]
-pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_screen(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args
         .get(i + 3)
@@ -307,7 +307,7 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
     for (n, m) in meetschirm::liste().iter().enumerate() {
         println!(
             "SCHIRM {} name={} {}x{} primaer={}",
-            n, m.name, m.width_px, m.height_px, m.primaer
+            n, m.name, m.width_px, m.height_px, m.is_primary
         );
     }
     let auf = match meetschirm::open(nr, 1920, 1080, 15) {
@@ -318,14 +318,14 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         }
     };
     println!("SCHIRM OFFEN {} {}x{}", auf.name, auf.width_px, auf.height_px);
-    let mut koder = match meetvideo::Kodierer::neu(auf.width_px, auf.height_px, 15, 3_500_000) {
+    let mut koder = match meetvideo::VideoEncoder::neu(auf.width_px, auf.height_px, 15, 3_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("SCHIRMTEST FEHLER Kodierer: {}", e);
             return Ok(());
         }
     };
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("SCHIRMTEST FEHLER Signalisierung: {}", e);
@@ -339,79 +339,79 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut angeboten = false;
-    let mut pakete: u64 = 0;
-    let mut gesendet: u64 = 0;
-    let mut hell_summe = 0f64;
-    let mut bewegung = 0f64;
-    let mut vorbild: Vec<u8> = Vec::new();
+    let mut offered = false;
+    let mut packets: u64 = 0;
+    let mut sent: u64 = 0;
+    let mut bright_sum = 0f64;
+    let mut motion = 0f64;
+    let mut model: Vec<u8> = Vec::new();
     let start = std::time::Instant::now();
-    let mut naechstes = std::time::Instant::now();
+    let mut next = std::time::Instant::now();
     let mut last_keyframe = std::time::Instant::now();
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.vid2,"screen":true}));
                     sig.roh(serde_json::json!({"t":"screen","on":true}));
                     println!("EREIGNIS Antwort eingespielt, Bildschirm angemeldet");
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => ton.server_offer(sdp),
                 // Do NOT swallow errors - otherwise at the end you only see
                 // "nothing sent" and guess what the cause was.
-                meetsig::Ereignis::Getrennt(m) => println!("EREIGNIS Getrennt: {}", m),
-                meetsig::Ereignis::FriendError { code, text } => {
+                meetsig::Event::Separated(m) => println!("EREIGNIS Getrennt: {}", m),
+                meetsig::Event::FriendError { code, text } => {
                     println!("EREIGNIS Fehler {}: {}", code, text)
                 }
-                meetsig::Ereignis::Abgewiesen(m) => println!("EREIGNIS Abgewiesen: {}", m),
+                meetsig::Event::Refused(m) => println!("EREIGNIS Abgewiesen: {}", m),
                 _ => {}
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
         }
-        for te in ton.abholen() {
+        for te in ton.poll_events() {
             match te {
-                meetrtc::TonEreignis::Verbunden => println!("EREIGNIS RTC verbunden"),
-                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS RTC-Fehler: {}", f),
+                meetrtc::ToneEvent::PeerConnected => println!("EREIGNIS RTC verbunden"),
+                meetrtc::ToneEvent::FriendError(f) => println!("EREIGNIS RTC-Fehler: {}", f),
                 _ => {}
             }
         }
-        if std::time::Instant::now() >= naechstes {
-            naechstes += std::time::Duration::from_millis(66);
-            if let Some(b) = auf.neuestes() {
+        if std::time::Instant::now() >= next {
+            next += std::time::Duration::from_millis(66);
+            if let Some(b) = auf.newest() {
                 let y = &b.nv12[..(b.width_px * b.height_px) as usize];
-                hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
-                if vorbild.len() == y.len() {
+                bright_sum += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
+                if model.len() == y.len() {
                     let d: f64 = y
                         .iter()
-                        .zip(vorbild.iter())
+                        .zip(model.iter())
                         .map(|(a, c)| (*a as i32 - *c as i32).unsigned_abs() as f64)
                         .sum::<f64>()
                         / y.len() as f64;
-                    bewegung += d;
+                    motion += d;
                 }
-                vorbild = y.to_vec();
+                model = y.to_vec();
                 if last_keyframe.elapsed() >= std::time::Duration::from_secs(4) {
                     last_keyframe = std::time::Instant::now();
-                    koder.schluesselbild();
+                    koder.keyframe();
                 }
-                gesendet += 1;
-                match koder.nv12_rahmen(&b.nv12) {
-                    Ok(teile) => {
-                        for t in teile {
-                            pakete += 1;
+                sent += 1;
+                match koder.nv12_frame(&b.nv12) {
+                    Ok(parts) => {
+                        for t in parts {
+                            packets += 1;
                             ton.screen_send(t.data);
                         }
                     }
@@ -421,28 +421,28 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let z = ton.zahlen();
+    let z = ton.numbers();
     println!(
         "ZAHLEN schirm={} groesse={}x{} aufgenommen={} verwendet={} kodiert={} pakete={} schirm_gesendet={} bild_empfangen={} bytes_raus={} helligkeit={:.1} bewegung={:.2} fehler={}",
         auf.name,
         auf.width_px,
         auf.height_px,
-        auf.aufgenommen(),
-        gesendet,
-        koder.bilder,
-        pakete,
+        auf.recorded(),
+        sent,
+        koder.images,
+        packets,
         z.screen_sent,
         z.frame_received,
-        z.bytes_raus,
-        if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
-        if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
+        z.bytes_out,
+        if sent > 0 { bright_sum / sent as f64 } else { 0.0 },
+        if sent > 1 { motion / (sent - 1) as f64 } else { 0.0 },
         auf.error()
     );
-    auf.stoppen();
+    auf.stop_capture();
     sig.roh(serde_json::json!({"t":"screen","on":false}));
     std::thread::sleep(std::time::Duration::from_millis(200));
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("SCHIRMTEST FERTIG");
     return Ok(());
@@ -450,9 +450,9 @@ pub(crate) fn cli_meetschirm(i: usize) -> eframe::Result<()> {
 
 // Kameratest (Stufe 2d): ECHTES Kamerabild als H.264 ins Meeting.
 //   freeviewer --meetkamera <raum> <passphrase> [name] [sekunden] [kamera]
-pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_camera(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args
         .get(i + 3)
@@ -471,14 +471,14 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         }
     };
     println!("KAMERA OFFEN name={} {}x{}", kam.name, kam.width_px, kam.height_px);
-    let mut koder = match meetvideo::Kodierer::neu(kam.width_px, kam.height_px, 15, 1_500_000) {
+    let mut koder = match meetvideo::VideoEncoder::neu(kam.width_px, kam.height_px, 15, 1_500_000) {
         Ok(k) => k,
         Err(e) => {
             println!("KAMERATEST FEHLER Kodierer: {}", e);
             return Ok(());
         }
     };
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("KAMERATEST FEHLER Signalisierung: {}", e);
@@ -492,66 +492,66 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut angeboten = false;
-    let mut pakete: u64 = 0;
-    let mut gesendet: u64 = 0;
+    let mut offered = false;
+    let mut packets: u64 = 0;
+    let mut sent: u64 = 0;
     // Two measurements so that "a picture arrived" is provable: mean
     // brightness (not black) and difference to the previous image (moving).
-    let mut hell_summe = 0f64;
-    let mut bewegung = 0f64;
-    let mut vorbild: Vec<u8> = Vec::new();
+    let mut bright_sum = 0f64;
+    let mut motion = 0f64;
+    let mut model: Vec<u8> = Vec::new();
     let start = std::time::Instant::now();
-    let mut naechstes = std::time::Instant::now();
+    let mut next = std::time::Instant::now();
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
                     println!("EREIGNIS Antwort eingespielt");
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => ton.server_offer(sdp),
                 _ => {}
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
         }
-        for te in ton.abholen() {
-            if let meetrtc::TonEreignis::Verbunden = te {
+        for te in ton.poll_events() {
+            if let meetrtc::ToneEvent::PeerConnected = te {
                 println!("EREIGNIS Ton verbunden");
             }
         }
         // Send 15 frames per second - the newest one the camera has.
-        if std::time::Instant::now() >= naechstes {
-            naechstes += std::time::Duration::from_millis(66);
-            if let Some(b) = kam.neuestes() {
+        if std::time::Instant::now() >= next {
+            next += std::time::Duration::from_millis(66);
+            if let Some(b) = kam.newest() {
                 let y = &b.nv12[..(b.width_px * b.height_px) as usize];
-                hell_summe += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
-                if vorbild.len() == y.len() {
+                bright_sum += y.iter().map(|v| *v as f64).sum::<f64>() / y.len() as f64;
+                if model.len() == y.len() {
                     let d: f64 = y
                         .iter()
-                        .zip(vorbild.iter())
+                        .zip(model.iter())
                         .map(|(a, c)| (*a as i32 - *c as i32).unsigned_abs() as f64)
                         .sum::<f64>()
                         / y.len() as f64;
-                    bewegung += d;
+                    motion += d;
                 }
-                vorbild = y.to_vec();
-                gesendet += 1;
-                match koder.nv12_rahmen(&b.nv12) {
-                    Ok(teile) => {
-                        for t in teile {
-                            pakete += 1;
+                model = y.to_vec();
+                sent += 1;
+                match koder.nv12_frame(&b.nv12) {
+                    Ok(parts) => {
+                        for t in parts {
+                            packets += 1;
                             ton.send_frame(t.data);
                         }
                     }
@@ -561,24 +561,24 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let z = ton.zahlen();
+    let z = ton.numbers();
     println!(
         "ZAHLEN kamera={} aufgenommen={} verwendet={} kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={} helligkeit={:.1} bewegung={:.2} fehler={}",
         kam.name,
-        kam.aufgenommen(),
-        gesendet,
-        koder.bilder,
-        pakete,
-        z.bild_gesendet,
+        kam.recorded(),
+        sent,
+        koder.images,
+        packets,
+        z.image_sent,
         z.frame_received,
-        z.bytes_raus,
-        if gesendet > 0 { hell_summe / gesendet as f64 } else { 0.0 },
-        if gesendet > 1 { bewegung / (gesendet - 1) as f64 } else { 0.0 },
+        z.bytes_out,
+        if sent > 0 { bright_sum / sent as f64 } else { 0.0 },
+        if sent > 1 { motion / (sent - 1) as f64 } else { 0.0 },
         kam.error()
     );
-    kam.stoppen();
+    kam.stop_capture();
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("KAMERATEST FERTIG");
     return Ok(());
@@ -587,13 +587,13 @@ pub(crate) fn cli_meetkamera(i: usize) -> eframe::Result<()> {
 // Video test (stage 2b): sends a moving test pattern as H.264 into the
 // meeting. This measures the whole chain without a camera.
 //   freeviewer --meetbild <raum> <passphrase> [name] [sekunden]
-pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_image(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativBild".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(25);
-    let mut koder = match meetvideo::Kodierer::neu(
+    let mut koder = match meetvideo::VideoEncoder::neu(
         meetvideo::WIDTH,
         meetvideo::HEIGHT,
         15,
@@ -606,7 +606,7 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
         }
     };
     let mut muster = meetvideo::Muster::neu(meetvideo::WIDTH, meetvideo::HEIGHT);
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("BILDTEST FEHLER Signalisierung: {}", e);
@@ -620,47 +620,47 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut angeboten = false;
-    let mut pakete: u64 = 0;
+    let mut offered = false;
+    let mut packets: u64 = 0;
     let start = std::time::Instant::now();
-    let mut naechstes = std::time::Instant::now();
+    let mut next = std::time::Instant::now();
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.vid,"screen":false}));
                     println!("EREIGNIS Antwort eingespielt");
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => ton.server_offer(sdp),
                 _ => println!("EREIGNIS {:?}", e),
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
         }
-        for te in ton.abholen() {
-            if let meetrtc::TonEreignis::Verbunden = te {
+        for te in ton.poll_events() {
+            if let meetrtc::ToneEvent::PeerConnected = te {
                 println!("EREIGNIS Ton verbunden");
             }
         }
         // 15 Bilder je Sekunde
-        while std::time::Instant::now() >= naechstes {
-            naechstes += std::time::Duration::from_millis(66);
-            let rgb = muster.naechstes();
-            match koder.rahmen(&rgb) {
-                Ok(teile) => {
-                    for t in teile {
-                        pakete += 1;
+        while std::time::Instant::now() >= next {
+            next += std::time::Duration::from_millis(66);
+            let rgb = muster.next();
+            match koder.frame_box(&rgb) {
+                Ok(parts) => {
+                    for t in parts {
+                        packets += 1;
                         ton.send_frame(t.data);
                     }
                 }
@@ -669,13 +669,13 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let z = ton.zahlen();
+    let z = ton.numbers();
     println!(
         "ZAHLEN verbunden={} bilder_kodiert={} pakete={} bild_gesendet={} bild_empfangen={} bytes_raus={}",
-        z.verbunden, koder.bilder, pakete, z.bild_gesendet, z.frame_received, z.bytes_raus
+        z.connected, koder.images, packets, z.image_sent, z.frame_received, z.bytes_out
     );
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("BILDTEST FERTIG");
     return Ok(());
@@ -685,24 +685,24 @@ pub(crate) fn cli_meetbild(i: usize) -> eframe::Result<()> {
 //   freeviewer --meetmik <raum> <passphrase> [name] [sekunden]
 // Takes the default microphone, plays the others through the speaker
 // and switches the echo suppression in between.
-pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_mic(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativMikro".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let (ein_liste, aus_liste) = meetaudio::geraete_liste();
+    let (ein_liste, aus_liste) = meetaudio::devices_list();
     println!("MIKROFONE {:?}", ein_liste);
     println!("LAUTSPRECHER {:?}", aus_liste);
-    let geraete = match meetaudio::start_devices(None, None) {
+    let devices = match meetaudio::start_devices(None, None) {
         Ok(g) => g,
         Err(e) => {
             println!("MIKROTEST FEHLER Geraete: {}", e);
             return Ok(());
         }
     };
-    println!("EINGANG {} / AUSGANG {}", geraete.eingang, geraete.ausgang);
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    println!("EINGANG {} / AUSGANG {}", devices.eingang, devices.exit);
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("MIKROTEST FEHLER Signalisierung: {}", e);
@@ -716,65 +716,65 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    let mut angeboten = false;
+    let mut offered = false;
     let start = std::time::Instant::now();
-    let mut mikro_rahmen: u64 = 0;
-    let mut mikro_pegel = 0.0f32;
+    let mut mic_frame: u64 = 0;
+    let mut mic_level = 0.0f32;
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Spur { mid, peer, .. } => ton.spur(mid, *peer),
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Spur { mid, peer, .. } => ton.spur(mid, *peer),
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => ton.server_angebot(sdp),
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => ton.server_offer(sdp),
                 _ => println!("EREIGNIS {:?}", e),
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
         }
         // Mikrofon -> Netz
-        while let Ok(rahmen) = geraete.mikro.try_recv() {
-            let spitze = rahmen
+        while let Ok(frame_box) = devices.mic_name.try_recv() {
+            let spitze = frame_box
                 .iter()
                 .map(|v| (*v as f32 / 32768.0).abs())
                 .fold(0.0f32, f32::max);
-            mikro_pegel = mikro_pegel.max(spitze);
-            mikro_rahmen += 1;
-            ton.send_out(rahmen);
+            mic_level = mic_level.max(spitze);
+            mic_frame += 1;
+            ton.send_out(frame_box);
         }
         // Netz -> Lautsprecher
-        for te in ton.abholen() {
+        for te in ton.poll_events() {
             match te {
-                meetrtc::TonEreignis::Rahmen { quelle, pcm } => {
-                    if let Ok(mut m) = geraete.lautsprecher.lock() {
-                        m.dazu(quelle, &pcm);
+                meetrtc::ToneEvent::FrameBox { origin, pcm } => {
+                    if let Ok(mut m) = devices.speaker.lock() {
+                        m.also(origin, &pcm);
                     }
                 }
-                meetrtc::TonEreignis::Bild { .. } => {}
-                meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
-                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
-                meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
+                meetrtc::ToneEvent::Image { .. } => {}
+                meetrtc::ToneEvent::PeerConnected => println!("EREIGNIS Ton verbunden"),
+                meetrtc::ToneEvent::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                meetrtc::ToneEvent::End(f) => println!("EREIGNIS Ton-Ende {}", f),
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let z = ton.zahlen();
+    let z = ton.numbers();
     println!(
         "ZAHLEN verbunden={} gesendet={} empfangen={} mikro_rahmen={} mikro_pegel={:.3} pegel_rein={:.3}",
-        z.verbunden, z.gesendet, z.receive, mikro_rahmen, mikro_pegel, z.pegel_rein
+        z.connected, z.sent, z.receive, mic_frame, mic_level, z.level_pure
     );
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(400));
     println!("MIKROTEST FERTIG");
     return Ok(());
@@ -784,13 +784,13 @@ pub(crate) fn cli_meetmik(i: usize) -> eframe::Result<()> {
 // media server and send a test tone or measure the audio of the
 // others.
 //   freeviewer --meetton <raum> <passphrase> [name] [sekunden]
-pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
+pub(crate) fn cli_meet_tone(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "NativTon".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let sig = match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    let sig = match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => s,
         Err(e) => {
             println!("TONTEST FEHLER Signalisierung: {}", e);
@@ -804,69 +804,69 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
             return Ok(());
         }
     };
-    println!("ANGEBOT {} Zeichen, mid {}", ton.angebot.len(), ton.mid);
-    let mut angeboten = false;
+    println!("ANGEBOT {} Zeichen, mid {}", ton.offer.len(), ton.mid);
+    let mut offered = false;
     let mut phase = 0.0f32;
     let start = std::time::Instant::now();
-    let mut naechster = std::time::Instant::now();
-    let mut pegel_max = 0.0f32;
-    let schwall: usize = std::env::var("FV_MEET_BURST")
+    let mut next = std::time::Instant::now();
+    let mut level_max = 0.0f32;
+    let burst: usize = std::env::var("FV_MEET_BURST")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let mut geschwallt = false;
-    let mut stau_max: u32 = 0;
+    let mut backlog_max: u32 = 0;
     while start.elapsed().as_secs() < dur {
-        for e in sig.abholen() {
+        for e in sig.poll_events() {
             match &e {
-                meetsig::Ereignis::Willkommen { .. } => {
-                    if !angeboten {
-                        angeboten = true;
-                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.angebot}));
+                meetsig::Event::Welcome { .. } => {
+                    if !offered {
+                        offered = true;
+                        sig.roh(serde_json::json!({"t":"offer","sdp":ton.offer}));
                         println!("EREIGNIS Angebot verschickt");
                     }
                 }
-                meetsig::Ereignis::WarteDazu { peer, .. } => sig.warteraum("admit", Some(*peer)),
-                meetsig::Ereignis::Sdp { art, sdp } if art == "answer" => {
-                    ton.antwort(sdp);
+                meetsig::Event::WaitAlso { peer, .. } => sig.waiting_room("admit", Some(*peer)),
+                meetsig::Event::Sdp { art, sdp } if art == "answer" => {
+                    ton.reply(sdp);
                     sig.roh(serde_json::json!({"t":"publish","mid":ton.mid,"screen":false}));
                     println!("EREIGNIS Antwort eingespielt ({} Zeichen)", sdp.len());
                 }
-                meetsig::Ereignis::Spur { mid, peer, .. } => {
+                meetsig::Event::Spur { mid, peer, .. } => {
                     ton.spur(mid, *peer);
                     println!("EREIGNIS Spur {} gehoert zu {}", mid, peer);
                 }
-                meetsig::Ereignis::Sdp { art, sdp } if art == "offer" => {
-                    ton.server_angebot(sdp);
+                meetsig::Event::Sdp { art, sdp } if art == "offer" => {
+                    ton.server_offer(sdp);
                     println!("EREIGNIS Server-Angebot bekommen");
                 }
                 _ => println!("EREIGNIS {:?}", e),
             }
         }
-        if let Some(a) = ton.offene_antwort() {
+        if let Some(a) = ton.open_reply() {
             sig.roh(serde_json::json!({"t":"answer","sdp":a}));
             println!("EREIGNIS eigene Antwort verschickt");
         }
-        for te in ton.abholen() {
+        for te in ton.poll_events() {
             match te {
-                meetrtc::TonEreignis::Verbunden => println!("EREIGNIS Ton verbunden"),
-                meetrtc::TonEreignis::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
-                meetrtc::TonEreignis::Ende(f) => println!("EREIGNIS Ton-Ende {}", f),
-                meetrtc::TonEreignis::Rahmen { .. } => {}
-                meetrtc::TonEreignis::Bild {
-                    quelle,
+                meetrtc::ToneEvent::PeerConnected => println!("EREIGNIS Ton verbunden"),
+                meetrtc::ToneEvent::FriendError(f) => println!("EREIGNIS Ton-Fehler {}", f),
+                meetrtc::ToneEvent::End(f) => println!("EREIGNIS Ton-Ende {}", f),
+                meetrtc::ToneEvent::FrameBox { .. } => {}
+                meetrtc::ToneEvent::Image {
+                    origin,
                     display,
                     daten,
-                    schluesselbild,
+                    keyframe,
                     codec,
                 } => {
                     println!(
                         "EREIGNIS {} von {} ({} Bytes, {}{})",
                         if display { "Bildschirm" } else { "Bild" },
-                        quelle,
+                        origin,
                         daten.len(),
                         codec,
-                        if schluesselbild { ", Schluesselbild" } else { "" }
+                        if keyframe { ", Schluesselbild" } else { "" }
                     );
                 }
             }
@@ -877,36 +877,36 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
         // with FV_MEET_BURST=500 exactly that can be measured.
         if !geschwallt && start.elapsed().as_secs() >= 4 {
             geschwallt = true;
-            if schwall > 0 {
-                for _ in 0..schwall {
+            if burst > 0 {
+                for _ in 0..burst {
                     ton.send_out(meetrtc::testton(&mut phase, 440.0));
                 }
-                println!("SCHWALL {} Rahmen auf einmal eingespeist ({} ms Ton)", schwall, schwall * 20);
+                println!("SCHWALL {} Rahmen auf einmal eingespeist ({} ms Ton)", burst, burst * 20);
             }
         }
         // every 20 ms one frame of test tone (440 Hz)
-        while std::time::Instant::now() >= naechster {
-            naechster += std::time::Duration::from_millis(20);
+        while std::time::Instant::now() >= next {
+            next += std::time::Duration::from_millis(20);
             ton.send_out(meetrtc::testton(&mut phase, 440.0));
         }
-        let z = ton.zahlen();
-        pegel_max = pegel_max.max(z.pegel_rein);
-        stau_max = stau_max.max(z.ton_stau);
+        let z = ton.numbers();
+        level_max = level_max.max(z.level_pure);
+        backlog_max = backlog_max.max(z.tone_backlog);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let z = ton.zahlen();
+    let z = ton.numbers();
     println!(
         "ZAHLEN verbunden={} gesendet={} empfangen={} bild_gesendet={} bild_empfangen={} bytes_raus={} bytes_rein={} pegel_max={:.3} bandbreite={} ton_verworfen={} ton_stau={}",
-        z.verbunden, z.gesendet, z.receive, z.bild_gesendet, z.frame_received,
-        z.bytes_raus, z.bytes_rein, pegel_max, z.bandbreite, z.ton_verworfen, z.ton_stau
+        z.connected, z.sent, z.receive, z.image_sent, z.frame_received,
+        z.bytes_out, z.bytes_rein, level_max, z.bandwidth, z.tone_dropped, z.tone_backlog
     );
     println!(
         "STAU hoechstens {} Rahmen = {} ms Verzoegerung im Sendepuffer",
-        stau_max,
-        stau_max * 20
+        backlog_max,
+        backlog_max * 20
     );
     ton.finish();
-    sig.verlassen();
+    sig.leave();
     std::thread::sleep(std::time::Duration::from_millis(500));
     println!("TONTEST FERTIG");
     return Ok(());
@@ -917,40 +917,40 @@ pub(crate) fn cli_meetton(i: usize) -> eframe::Result<()> {
 // Joins, reports every event, sends a chat message and leaves again.
 pub(crate) fn cli_meettest(i: usize) -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let raum = args.get(i + 1).cloned().unwrap_or_default();
+    let room = args.get(i + 1).cloned().unwrap_or_default();
     let pass = args.get(i + 2).cloned().unwrap_or_default();
     let name = args.get(i + 3).cloned().unwrap_or_else(|| "Nativ".to_string());
     let dur: u64 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(12);
-    match meetsig::beitreten(&meet::base(), &raum, &pass, &name, "", false) {
+    match meetsig::join_meeting(&meet::base(), &room, &pass, &name, "", false) {
         Ok(s) => {
             let start = std::time::Instant::now();
-            let mut chat_geschickt = false;
+            let mut chat_sent = false;
             while start.elapsed().as_secs() < dur {
-                for e in s.abholen() {
+                for e in s.poll_events() {
                     println!("EREIGNIS {:?}", e);
                     // In the test we let waiting people in immediately so that the path
                     // browser -> waiting room -> native host
                     // can really be checked.
-                    if let meetsig::Ereignis::WarteDazu { peer, .. } = e {
-                        s.warteraum("admit", Some(peer));
+                    if let meetsig::Event::WaitAlso { peer, .. } = e {
+                        s.waiting_room("admit", Some(peer));
                     }
                     // When someone comes in, we greet them - this way one
                     // can check that chat REALLY reaches the others
                     // (earlier messages are not re-delivered,
                     // that is intended by the server).
-                    if let meetsig::Ereignis::Dazu(_) = e {
+                    if let meetsig::Event::Also(_) = e {
                         s.chat("Willkommen im nativen Meeting");
                     }
                 }
-                if !chat_geschickt && s.state().ich != 0 {
+                if !chat_sent && s.state().ich != 0 {
                     s.chat("Hallo aus dem nativen Client");
                     s.hand(true);
-                    chat_geschickt = true;
+                    chat_sent = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             println!("ZUSTAND {:?}", s.state());
-            s.verlassen();
+            s.leave();
             std::thread::sleep(std::time::Duration::from_millis(600));
             println!("MEETTEST FERTIG");
         }

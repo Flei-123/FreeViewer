@@ -55,7 +55,7 @@ impl App {
                         egui::FontId::proportional(13.0),
                         if sel { p.text } else { fg },
                     );
-                    let r = zeigefinger(r);
+                    let r = index_finger(r);
                     if r.clicked() {
                         self.stab = tab;
                     }

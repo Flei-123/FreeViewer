@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn eine_ip_ist_kein_geraetename() {
+    fn an_ip_is_no_device_name() {
         assert!(looks_like_ip("192.168.1.24"));
         assert!(looks_like_ip("192.168.1.24:7180"));
         assert!(looks_like_ip("::1"));

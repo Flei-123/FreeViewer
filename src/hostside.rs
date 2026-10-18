@@ -78,7 +78,7 @@ pub fn profile(mode: u8) -> Profile {
 /// answer". Without this distinction the message only guesses.
 /// Seconds from an environment variable, otherwise the default. Only so that
 /// the times can be shortened in tests (and when hunting a bug).
-fn sekunden(name: &str, standard: u64) -> u64 {
+fn seconds(name: &str, standard: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -87,10 +87,10 @@ fn sekunden(name: &str, standard: u64) -> u64 {
 }
 
 async fn internet_da() -> bool {
-    for ziel in ["1.1.1.1:443", "8.8.8.8:443"] {
+    for dest in ["1.1.1.1:443", "8.8.8.8:443"] {
         let v = tokio::time::timeout(
             Duration::from_secs(2),
-            tokio::net::TcpStream::connect(ziel),
+            tokio::net::TcpStream::connect(dest),
         )
         .await;
         if matches!(v, Ok(Ok(_))) {
@@ -143,7 +143,7 @@ pub async fn run_host(shared: Arc<Shared>, secret: String, agent: bool) {
                 return;
             }
         } else {
-            tokio::time::sleep(Duration::from_secs(sekunden("FV_RETRY_SEK", 3))).await;
+            tokio::time::sleep(Duration::from_secs(seconds("FV_RETRY_SEK", 3))).await;
         }
     }
 }
@@ -171,10 +171,10 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
     // and TCP takes minutes to admit it. Therefore: a ping every 15 s,
     // and if NOTHING came for 40 s (not even a pong), the
     // connection counts as dead and is rebuilt.
-    let mut letzter_kontakt = Instant::now();
-    let mut letzter_ping = Instant::now();
-    let ping_alle = Duration::from_secs(sekunden("FV_PING_SEK", 15));
-    let still_max = Duration::from_secs(sekunden("FV_STILL_SEK", 40));
+    let mut last_contact = Instant::now();
+    let mut last_ping = Instant::now();
+    let ping_alle = Duration::from_secs(seconds("FV_PING_SEK", 15));
+    let still_max = Duration::from_secs(seconds("FV_STILL_SEK", 40));
 
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
     loop {
@@ -184,11 +184,11 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 None => break,
             },
             _ = ticker.tick() => {
-                if letzter_kontakt.elapsed() > still_max {
+                if last_contact.elapsed() > still_max {
                     return Err(anyhow!("Relay antwortet nicht mehr"));
                 }
-                if letzter_ping.elapsed() > ping_alle {
-                    letzter_ping = Instant::now();
+                if last_ping.elapsed() > ping_alle {
+                    last_ping = Instant::now();
                     if tx.send(WsMsg::Ping(Vec::new().into())).is_err() {
                         return Err(anyhow!("Leitung zum Relay abgerissen"));
                     }
@@ -208,7 +208,7 @@ async fn host_once(shared: &Arc<Shared>, secret: &str) -> Result<()> {
                 continue;
             }
         };
-        letzter_kontakt = Instant::now();
+        last_contact = Instant::now();
         match msg {
             WsMsg::Text(t) => {
                 let v: serde_json::Value =
@@ -1061,7 +1061,7 @@ pub fn video_selftest(rounds: u32) -> String {
         // texture into the encoder. Only built at the first image, because
         // it needs the capture device.
         #[cfg(windows)]
-        let mut direkt: Option<crate::h264::Encoder> = None;
+        let mut direct_link: Option<crate::h264::Encoder> = None;
         #[cfg(windows)]
         let (mut t_dir, mut b_dir, mut n_dir, mut dir_error) =
             (0u128, 0usize, 0u32, String::new());
@@ -1136,7 +1136,7 @@ pub fn video_selftest(rounds: u32) -> String {
             {
                 let t = Instant::now();
                 if let Some((dev, tex)) = cap.nv12_gpu(dw, dh) {
-                    if direkt.is_none() && dir_error.is_empty() {
+                    if direct_link.is_none() && dir_error.is_empty() {
                         match crate::h264::Encoder::new_d3d(
                             &dev,
                             dw,
@@ -1144,11 +1144,11 @@ pub fn video_selftest(rounds: u32) -> String {
                             prof.fps as u32,
                             prof.bitrate,
                         ) {
-                            Ok(e) => direkt = Some(e),
+                            Ok(e) => direct_link = Some(e),
                             Err(e) => dir_error = e.to_string(),
                         }
                     }
-                    if let Some(e) = direkt.as_mut() {
+                    if let Some(e) = direct_link.as_mut() {
                         match e.encode_tex(&tex) {
                             Ok(cs) => {
                                 t_dir += t.elapsed().as_micros();
@@ -1161,7 +1161,7 @@ pub fn video_selftest(rounds: u32) -> String {
                                 if dir_error.is_empty() {
                                     dir_error = err.to_string();
                                 }
-                                direkt = None;
+                                direct_link = None;
                             }
                         }
                     }
@@ -1232,7 +1232,7 @@ pub fn video_selftest(rounds: u32) -> String {
 }
 
 /// Counters for the statistics of the direct path (images, bytes, window start).
-struct DirektZahlen {
+struct DirectNumbers {
     frames: u32,
     bytes: usize,
     window_start: Instant,
@@ -1255,7 +1255,7 @@ fn send_direct(
     key: bool,
     out: &mpsc::UnboundedSender<Vec<u8>>,
     shared: &Arc<Shared>,
-    z: &mut DirektZahlen,
+    z: &mut DirectNumbers,
 ) -> bool {
     if *aus {
         return false;
@@ -1421,11 +1421,11 @@ fn capture_loop(
         // D3D11 texture must not change threads, and 3 ms of work
         // do not slow down the capture.
         #[cfg(windows)]
-        let mut direkt_enc: Option<crate::h264::Encoder> = None;
+        let mut direct_enc: Option<crate::h264::Encoder> = None;
         #[cfg(windows)]
-        let mut direkt_aus = std::env::var("FV_NODIREKT").is_ok();
+        let mut direct_from = std::env::var("FV_NODIREKT").is_ok();
         #[cfg(windows)]
-        let mut direkt_z = DirektZahlen {
+        let mut direct_z = DirectNumbers {
             frames: 0,
             bytes: 0,
             window_start: Instant::now(),
@@ -1503,30 +1503,30 @@ fn capture_loop(
                     last_push = Instant::now();
                     let (cw, ch) = cap.size();
                     let will_video = h264_grab.load(Ordering::Relaxed);
-                    let grenze = if will_video {
+                    let limit = if will_video {
                         prof.max_w_video
                     } else {
                         prof.max_w
                     };
-                    let (dw, dh) = target_size(cw, ch, grenze);
+                    let (dw, dh) = target_size(cw, ch, limit);
                     // First attempt: everything stays on the graphics card.
-                    let mut erledigt = false;
+                    let mut done = false;
                     #[cfg(windows)]
                     if will_video {
                         let key = key_grab.swap(false, Ordering::Relaxed);
-                        erledigt = send_direct(
+                        done = send_direct(
                             &mut cap,
-                            &mut direkt_enc,
-                            &mut direkt_aus,
+                            &mut direct_enc,
+                            &mut direct_from,
                             dw,
                             dh,
                             &prof,
                             key,
                             &out_grab,
                             &shared_grab,
-                            &mut direkt_z,
+                            &mut direct_z,
                         );
-                        if erledigt {
+                        if done {
                             pushed += 1;
                         } else if key {
                             // not managed - the request for a
@@ -1534,7 +1534,7 @@ fn capture_loop(
                             key_grab.store(true, Ordering::Relaxed);
                         }
                     }
-                    if !erledigt {
+                    if !done {
                         // With H.264 the GPU scales AND converts to NV12 in one
                         // pass, so no RGB frame is ever built on the CPU.
                         let (buf, is_nv12) = if will_video {
@@ -1568,35 +1568,35 @@ fn capture_loop(
                         key_grab.store(true, Ordering::Relaxed);
                         let (cw, ch) = cap.size();
                         let will_video = h264_grab.load(Ordering::Relaxed);
-                        let grenze = if will_video {
+                        let limit = if will_video {
                             prof.max_w_video
                         } else {
                             prof.max_w
                         };
-                        let (dw, dh) = target_size(cw, ch, grenze);
-                        let mut erledigt = false;
+                        let (dw, dh) = target_size(cw, ch, limit);
+                        let mut done = false;
                         #[cfg(windows)]
                         if will_video {
                             key_grab.store(false, Ordering::Relaxed);
-                            erledigt = send_direct(
+                            done = send_direct(
                                 &mut cap,
-                                &mut direkt_enc,
-                                &mut direkt_aus,
+                                &mut direct_enc,
+                                &mut direct_from,
                                 dw,
                                 dh,
                                 &prof,
                                 true,
                                 &out_grab,
                                 &shared_grab,
-                                &mut direkt_z,
+                                &mut direct_z,
                             );
-                            if erledigt {
+                            if done {
                                 pushed += 1;
                             } else {
                                 key_grab.store(true, Ordering::Relaxed);
                             }
                         }
-                        if !erledigt {
+                        if !done {
                             let (buf, is_nv12) = if will_video {
                                 let mut b = Vec::new();
                                 frame_nv12(&mut cap, dw, dh, &mut b);
@@ -1646,12 +1646,12 @@ fn capture_loop(
                     // alternating with the slower screenshot way, which
                     // still delivers something even on the lock screen.
                     if fails % 8 == 0 {
-                        let schnell = (fails / 8) % 2 == 1;
+                        let fast = (fails / 8) % 2 == 1;
                         capture::log_line(&format!(
                             "Aufnahme verloren ({}x) - baue neu auf (schnell={})",
-                            fails, schnell
+                            fails, fast
                         ));
-                        if let Some(c) = capture::open_index(schnell, cur_mon) {
+                        if let Some(c) = capture::open_index(fast, cur_mon) {
                             cap = c;
                             key_grab.store(true, Ordering::Relaxed);
                             last_push = Instant::now() - Duration::from_secs(2);
@@ -1923,14 +1923,14 @@ fn input_loop(
 
 
 #[cfg(test)]
-mod verbindungstests {
+mod connection_tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
     /// A relay that reports once and then stays silent - exactly
     /// what a dropped WLAN looks like from the program's view: the
     /// line is still open, but nothing ever comes again.
-    async fn stummer_relay() -> (String, tokio::task::JoinHandle<()>) {
+    async fn muted_relay() -> (String, tokio::task::JoinHandle<()>) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let h = tokio::spawn(async move {
@@ -1953,7 +1953,7 @@ mod verbindungstests {
     /// Previously "Ready" stayed shown until TCP gave up after minutes. Now
     /// the state must flip to "offline" after the silence period.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stille_leitung_wird_als_offline_erkannt() {
+    async fn silent_line_is_detected_as_offline() {
         // Since security commit 1ccde14 ws:// is rejected. The
         // test relay runs on 127.0.0.1 and is what the exception means, if the
         // exception has any purpose at all - without this line the
@@ -1962,34 +1962,34 @@ mod verbindungstests {
         std::env::set_var("FV_PING_SEK", "1");
         std::env::set_var("FV_STILL_SEK", "2");
         std::env::set_var("FV_RETRY_SEK", "1");
-        let (url, _srv) = stummer_relay().await;
+        let (url, _srv) = muted_relay().await;
         let shared = Arc::new(Shared::new(url, "pw".to_string()));
         let s2 = shared.clone();
         let host = tokio::spawn(async move { run_host(s2, "geheim".to_string(), true).await });
 
         // 1) it must first become "ready" at all
-        let mut war_bereit = false;
+        let mut was_ready = false;
         for _ in 0..40 {
             if shared.net_state() == 1 && !shared.my_id.lock_ok().is_empty() {
-                war_bereit = true;
+                was_ready = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(war_bereit, "registration was never reported as 'ready'");
+        assert!(was_ready, "registration was never reported as 'ready'");
 
         // 2) and afterwards, without a single sign of life, flip to offline
-        let mut wurde_offline = false;
+        let mut became_offline = false;
         for _ in 0..60 {
             if shared.net_state() == 2 {
-                wurde_offline = true;
+                became_offline = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         host.abort();
         assert!(
-            wurde_offline,
+            became_offline,
             "silent line stayed 'ready' - exactly the bug this is about"
         );
         assert!(
@@ -2008,7 +2008,7 @@ mod verbindungstests {
 
     /// Ohne Relay in Sicht darf nie "Bereit" stehen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn kein_relay_erreichbar_heisst_offline() {
+    async fn no_relay_reachable_means_offline() {
         std::env::set_var("FV_RETRY_SEK", "1");
         // Port 1 hoert niemand ab.
         let shared = Arc::new(Shared::new("ws://127.0.0.1:1".to_string(), "pw".into()));

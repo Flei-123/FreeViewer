@@ -76,15 +76,15 @@ impl App {
             meet_loaded: false,
             meet_offer_control: true,
             meet_win: MeetWin::default(),
-            nativ_meet: None,
-            nativ_bilder: std::collections::HashMap::new(),
-            nativ_schirme: std::collections::HashMap::new(),
-            meet_teilt_war: false,
-            nativ_eigen: None,
+            native_meet: None,
+            native_images: std::collections::HashMap::new(),
+            native_screens: std::collections::HashMap::new(),
+            meet_shares_was: false,
+            native_own: None,
             native_own_screen: None,
-            vorprobe: meetui::Vorprobe::default(),
+            preflight: meetui::Preflight::default(),
             meet_z: meetwindow::MeetWindowState::default(),
-            meet_gelesen: 0,
+            meet_read: 0,
             meet_kam_start: None,
             headless: false,
             meet_demo: None,
@@ -326,7 +326,7 @@ impl App {
                 // in the browser.
                 self.meet_win_open(meet::Meeting {
                     id: room.clone(),
-                    titel: String::new(),
+                    heading: String::new(),
                     passphrase: pass.clone(),
                     termin_text: String::new(),
                     e2e: String::new(),
@@ -515,7 +515,7 @@ impl App {
             if ghost_button(ui, &format!("Update {} installieren", rel.version)).clicked() {
                 if dienst {
                     // the service installs it - as SYSTEM, without a prompt
-                    update::bitte_dienst();
+                    update::please_service();
                     self.shared
                         .set_update_status(i18n::t("upd.by_service"));
                 } else {
@@ -588,7 +588,7 @@ impl App {
             let offen = self
                 .friends
                 .as_ref()
-                .map(|d| d.eingehende().len() + d.einladungen().len())
+                .map(|d| d.incoming_requests().len() + d.invites().len())
                 .unwrap_or(0);
             let friends_text = if offen > 0 {
                 format!("Freunde ({})", offen)

@@ -6,23 +6,23 @@ use super::*;
 /// log so that the process stays alive.
 pub(crate) fn continue_without_window(shared: &Arc<Shared>) -> ! {
     capture::log_line("UI does not work - continuing as a host without a window");
-    let mut zuletzt = String::new();
+    let mut lately = String::new();
     loop {
         std::thread::sleep(Duration::from_secs(5));
         let id = shared.my_id.lock_ok().clone();
         let status = shared.host_status.lock_ok().clone();
-        let zeile = format!("ohne Fenster: ID {} | {}", id, status);
-        if zeile != zuletzt {
-            capture::log_line(&zeile);
-            println!("{}", zeile);
-            zuletzt = zeile;
+        let text_row = format!("ohne Fenster: ID {} | {}", id, status);
+        if text_row != lately {
+            capture::log_line(&text_row);
+            println!("{}", text_row);
+            lately = text_row;
         }
     }
 }
 
 /// Has at least one frame been drawn yet? The watchdog depends on this:
 /// without this sign of life the UI has not started.
-pub(crate) static BILD_GEZEICHNET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static IMAGE_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Are all attempts (OpenGL, OpenGL without acceleration, DirectX) through?
 /// Then the main path reports the error - the watchdog stays out.
@@ -36,7 +36,7 @@ pub(crate) static ATTEMPTS_DONE: std::sync::atomic::AtomicBool = std::sync::atom
 /// the OpenGL context the UI needs fails.
 pub(crate) fn start_error_text(e: &str) -> String {
     let low = e.to_lowercase();
-    let grund = if low.contains("opengl")
+    let reason = if low.contains("opengl")
         || low.contains("glutin")
         || low.contains("wgl")
         || low.contains("egl")
@@ -57,7 +57,7 @@ pub(crate) fn start_error_text(e: &str) -> String {
          Administrator einmal aufrufen:\n    {} --install-service\n\n\
          Technische Meldung:\n{}\n\nAlle Einzelheiten stehen in:\n{}",
         crate::brand::NAME,
-        grund,
+        reason,
         crate::brand::NAME,
         crate::brand::EXE,
         e,
@@ -68,12 +68,12 @@ pub(crate) fn start_error_text(e: &str) -> String {
 /// Writes the error to the log and shows it as a window.
 pub(crate) fn report_start_error(e: &str) {
     let text = start_error_text(e);
-    let pfad = ident::config_dir().join("start.log");
+    let file_path = ident::config_dir().join("start.log");
     let _ = std::fs::create_dir_all(ident::config_dir());
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&pfad)
+        .open(&file_path)
     {
         use std::io::Write;
         let _ = writeln!(
@@ -91,11 +91,11 @@ pub(crate) fn report_start_error(e: &str) {
 
 /// Date and time without an extra crate - enough for a log line.
 pub(crate) fn chrono_zeit() -> String {
-    let jetzt = std::time::SystemTime::now()
+    let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("unix {}", jetzt)
+    format!("unix {}", now_ts)
 }
 
 #[cfg(windows)]
@@ -106,16 +106,16 @@ pub(crate) fn error_window(text: &str) {
     };
     let mut t: Vec<u16> = text.encode_utf16().collect();
     t.push(0);
-    let mut titel: Vec<u16> = format!("{} - Start fehlgeschlagen", crate::brand::NAME)
+    let mut heading: Vec<u16> = format!("{} - Start fehlgeschlagen", crate::brand::NAME)
         .encode_utf16()
         .collect();
-    titel.push(0);
-    // SAFETY: `t` and `titel` are NUL-terminated UTF-16 buffers that outlive the blocking MessageBoxW call.
+    heading.push(0);
+    // SAFETY: `t` and `heading` are NUL-terminated UTF-16 buffers that outlive the blocking MessageBoxW call.
     unsafe {
         MessageBoxW(
             None,
             PCWSTR(t.as_ptr()),
-            PCWSTR(titel.as_ptr()),
+            PCWSTR(heading.as_ptr()),
             MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
         );
     }

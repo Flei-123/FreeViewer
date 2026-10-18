@@ -140,7 +140,7 @@ impl App {
                     } else {
                         self.meet_win_open(meet::Meeting {
                             id,
-                            titel: String::new(),
+                            heading: String::new(),
                             passphrase: self.meet_pw.clone(),
                             termin_text: String::new(),
                             e2e: String::new(),
@@ -176,7 +176,7 @@ impl App {
                 for m in list.iter() {
                     // The WHOLE row is clickable, not just the small
                     // arrow on the right - and it shows that with the pointing hand.
-                    let zeile = ui.horizontal(|ui| {
+                    let text_row = ui.horizontal(|ui| {
                         dot(ui, true);
                         ui.label(
                             egui::RichText::new(&m.id)
@@ -184,8 +184,8 @@ impl App {
                                 .family(egui::FontFamily::Monospace)
                                 .color(p.text),
                         );
-                        if !m.titel.is_empty() {
-                            ui.label(egui::RichText::new(&m.titel).size(12.0).color(p.muted));
+                        if !m.heading.is_empty() {
+                            ui.label(egui::RichText::new(&m.heading).size(12.0).color(p.muted));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if icon_ghost(ui, "connect", i18n::t("meet.join")).clicked() {
@@ -195,11 +195,11 @@ impl App {
                         });
                     })
                     .response;
-                    let zeile = zeile.interact(egui::Sense::click());
-                    if zeile.hovered() {
+                    let text_row = text_row.interact(egui::Sense::click());
+                    if text_row.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if zeile.clicked() {
+                    if text_row.clicked() {
                         self.meet_id = m.id.clone();
                     }
                     ui.add_space(3.0);
@@ -219,13 +219,13 @@ impl App {
         // Add to the OWN list. The overview no longer comes from the
         // server (it showed it to every stranger) - each machine keeps its
         // own.
-        meet::merken(&m);
+        meet::remember(&m);
         self.meet_win.offen = true;
         if self.meet_win.name.trim().is_empty() {
             // Suggestion: the machine name - that is how you are called in the browser too.
             self.meet_win.name = presence::device_name();
         }
-        self.meet_win.beigetreten = false;
+        self.meet_win.joined = false;
         self.meet_win.toast = None;
         self.meet_win.meeting = Some(m);
         self.meet_win.tn.lock_ok().clear();
@@ -248,22 +248,22 @@ impl App {
                 std::time::Instant::now() + std::time::Duration::from_millis(1500);
             self.meet_win.window = window::liste()
                 .into_iter()
-                .map(|f| (f.kennung, f.titel, f.programm))
+                .map(|f| (f.tag, f.heading, f.program))
                 .collect();
         }
-        if !self.meet_win.geraete_geladen {
-            self.meet_win.geraete_geladen = true;
-            let slot = self.meet_win.geraete.clone();
+        if !self.meet_win.devices_loaded {
+            self.meet_win.devices_loaded = true;
+            let slot = self.meet_win.devices.clone();
             std::thread::spawn(move || {
-                let (mics, mut cams) = meet::geraete();
+                let (mics, mut cams) = meet::devices();
                 // For the selection IN the meeting, the names the camera
                 // opener itself knows count (Media Foundation). The
                 // PnP list is only a fallback if that stays empty.
-                let echte = crate::meetcam::liste();
-                if !echte.is_empty() {
-                    cams = echte.into_iter().map(|g| g.name).collect();
+                let real = crate::meetcam::liste();
+                if !real.is_empty() {
+                    cams = real.into_iter().map(|g| g.name).collect();
                 }
-                let (_, spks) = crate::meetaudio::geraete_liste();
+                let (_, spks) = crate::meetaudio::devices_list();
                 *slot.lock_ok() = Some((mics, cams, spks));
             });
         }
@@ -315,15 +315,15 @@ impl App {
     /// reported. The cross must do the same as "Leave".
     pub(crate) fn close_meet_win(&mut self) {
         // The preview before joining holds camera AND microphone.
-        self.vorprobe.aus();
-        if let Some(n) = self.nativ_meet.take() {
-            n.verlassen();
+        self.preflight.aus();
+        if let Some(n) = self.native_meet.take() {
+            n.leave();
         }
-        self.nativ_bilder.clear();
-        self.nativ_schirme.clear();
-        self.nativ_eigen = None;
-        self.meet_win.beigetreten = false;
-        self.meet_win.nativ_start = false;
+        self.native_images.clear();
+        self.native_screens.clear();
+        self.native_own = None;
+        self.meet_win.joined = false;
+        self.meet_win.native_start = false;
         self.meet_kam_start = None;
         // The small window must close too, otherwise it is left standing alone.
         self.meet_z = meetwindow::MeetWindowState::default();
@@ -332,12 +332,12 @@ impl App {
 
     pub(crate) fn meet_win_ui(&mut self, ctx: &egui::Context) {
         // Take over the device list as soon as the background thread is done.
-        if !self.meet_win.geraete_da {
-            if let Some((mics, cams, spks)) = self.meet_win.geraete.lock_ok().clone() {
+        if !self.meet_win.devices_there {
+            if let Some((mics, cams, spks)) = self.meet_win.devices.lock_ok().clone() {
                 self.meet_win.mics = mics;
                 self.meet_win.cams = cams;
                 self.meet_win.spks = spks;
-                self.meet_win.geraete_da = true;
+                self.meet_win.devices_there = true;
             }
         }
         self.meet_win_poll();
@@ -345,86 +345,86 @@ impl App {
             Some(m) => m,
             None => return,
         };
-        if self.nativ_meet.is_none() {
-            self.meet_beitritt_ui(ctx, &m);
+        if self.native_meet.is_none() {
+            self.meet_join_ui(ctx, &m);
         } else {
-            self.meet_lauf_ui(ctx, &m);
+            self.meet_run_ui(ctx, &m);
         }
         self.meet_toast(ctx);
     }
 
     /// The screen before joining (`#vorbereiten` in the browser).
-    pub(crate) fn meet_beitritt_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
+    pub(crate) fn meet_join_ui(&mut self, ctx: &egui::Context, m: &meet::Meeting) {
         // Bring camera and microphone of the preview in line with the wish. Only touch on
         // a REAL change - otherwise a device error would trigger a new
         // open attempt every frame.
-        let will_kamera = !self.meet_win.ohne_video;
-        if will_kamera != self.vorprobe.wunsch_kamera {
-            self.vorprobe.kamera(will_kamera);
+        let wants_camera = !self.meet_win.without_video;
+        if wants_camera != self.preflight.wish_camera {
+            self.preflight.camera(wants_camera);
         }
         let mic = if self.meet_win.mic_sel == 0 {
             None
         } else {
             self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
         };
-        let will_mikro = !self.meet_win.is_muted;
-        if will_mikro != self.vorprobe.wunsch_mikro || mic != self.vorprobe.mikro_geraet {
-            self.vorprobe.mikro(will_mikro, mic.clone());
+        let wants_mic = !self.meet_win.is_muted;
+        if wants_mic != self.preflight.wish_mic || mic != self.preflight.mic_device {
+            self.preflight.mic_name(wants_mic, mic.clone());
         }
-        self.vorprobe.pumpe();
+        self.preflight.pumpe();
 
         // Pour the preview image into a texture (only if there is a new one).
-        match self.vorprobe.eigen.as_ref() {
+        match self.preflight.own.as_ref() {
             Some((w, h, px)) => {
-                let stand = self.vorprobe.stand;
-                let frisch = self
-                    .nativ_eigen
+                let stand = self.preflight.stand;
+                let fresh = self
+                    .native_own
                     .as_ref()
                     .map(|(alt, _)| *alt != stand)
                     .unwrap_or(true);
-                if frisch {
-                    let bild =
+                if fresh {
+                    let picture =
                         egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], px);
-                    let tex = ctx.load_texture("meeteigen", bild, egui::TextureOptions::LINEAR);
-                    self.nativ_eigen = Some((stand, tex));
+                    let tex = ctx.load_texture("meeteigen", picture, egui::TextureOptions::LINEAR);
+                    self.native_own = Some((stand, tex));
                 }
             }
-            None => self.nativ_eigen = None,
+            None => self.native_own = None,
         }
 
-        let mut b = meetwindow::Beitritt {
-            raum: m.id.clone(),
-            titel: m.titel.clone(),
+        let mut b = meetwindow::Join {
+            room: m.id.clone(),
+            heading: m.heading.clone(),
             name: self.meet_win.name.clone(),
             mics: self.meet_win.mics.clone(),
             cams: self.meet_win.cams.clone(),
             mic_sel: self.meet_win.mic_sel,
             cam_sel: self.meet_win.cam_sel,
-            mikro_an: will_mikro,
-            kamera_an: will_kamera,
-            geraete_da: self.meet_win.geraete_da,
-            pegel: self.vorprobe.pegel,
-            hinweis: self.vorprobe.notice.clone(),
-            laeuft: self.meet_win.nativ_start,
+            mic_on: wants_mic,
+            camera_on: wants_camera,
+            devices_there: self.meet_win.devices_there,
+            level: self.preflight.level,
+            hint_msg: self.preflight.notice.clone(),
+            running: self.meet_win.native_start,
         };
-        let tex = self.nativ_eigen.as_ref().map(|(_, t)| t.clone());
-        let aktion = meetwindow::beitritt_ui(ctx, &mut b, tex.as_ref());
+        let tex = self.native_own.as_ref().map(|(_, t)| t.clone());
+        let action = meetwindow::join_ui(ctx, &mut b, tex.as_ref());
         self.meet_win.name = b.name;
         self.meet_win.mic_sel = b.mic_sel;
         self.meet_win.cam_sel = b.cam_sel;
 
-        match aktion {
-            Some(meetwindow::Beitrittsaktion::MikroUm) => {
+        match action {
+            Some(meetwindow::JoinAction::MicAround) => {
                 self.meet_win.is_muted = !self.meet_win.is_muted;
             }
-            Some(meetwindow::Beitrittsaktion::KameraUm) => {
-                self.meet_win.ohne_video = !self.meet_win.ohne_video;
+            Some(meetwindow::JoinAction::CameraAround) => {
+                self.meet_win.without_video = !self.meet_win.without_video;
             }
-            Some(meetwindow::Beitrittsaktion::Back) => {
+            Some(meetwindow::JoinAction::Back) => {
                 self.close_meet_win();
             }
-            Some(meetwindow::Beitrittsaktion::Beitreten) => {
-                self.meet_win.nativ_start = true;
+            Some(meetwindow::JoinAction::Join) => {
+                self.meet_win.native_start = true;
             }
             None => {}
         }
@@ -432,9 +432,9 @@ impl App {
         // Joining happens only AFTER the frame is drawn: the
         // preview has to release the camera first, otherwise the
         // meeting does not get it.
-        if std::mem::take(&mut self.meet_win.nativ_start) {
-            self.vorprobe.aus();
-            self.nativ_eigen = None;
+        if std::mem::take(&mut self.meet_win.native_start) {
+            self.preflight.aus();
+            self.native_own = None;
             let me = self.shared.my_id.lock_ok().clone();
             let name = if self.meet_win.name.trim().is_empty() {
                 presence::device_name()
@@ -446,7 +446,7 @@ impl App {
             } else {
                 self.meet_win.mics.get(self.meet_win.mic_sel - 1).cloned()
             };
-            match meetui::NativMeet::beitreten(
+            match meetui::NativeMeet::join_meeting(
                 &meet::base(),
                 &m.id,
                 &m.passphrase,
@@ -463,14 +463,14 @@ impl App {
                     if self.meet_win.is_muted {
                         n.toggle_muted(true);
                     }
-                    self.meet_kam_start = if self.meet_win.ohne_video {
+                    self.meet_kam_start = if self.meet_win.without_video {
                         None
                     } else {
                         Some(std::time::Instant::now() + std::time::Duration::from_millis(600))
                     };
-                    self.nativ_meet = Some(n);
-                    self.meet_win.beigetreten = true;
-                    self.meet_gelesen = 0;
+                    self.native_meet = Some(n);
+                    self.meet_win.joined = true;
+                    self.meet_read = 0;
                     self.meet_z = meetwindow::MeetWindowState::default();
                     self.meet_win.tn_next = std::time::Instant::now();
                 }

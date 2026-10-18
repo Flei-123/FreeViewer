@@ -25,10 +25,10 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowInfo {
     /// Window identifier (HWND as a number - this keeps the type platform-free).
-    pub kennung: isize,
-    pub titel: String,
+    pub tag: isize,
+    pub heading: String,
     /// Name of the program without path and extension ("firefox", "excel").
-    pub programm: String,
+    pub program: String,
     pub width_px: u32,
     pub height_px: u32,
 }
@@ -47,27 +47,27 @@ pub fn liste() -> Vec<WindowInfo> {
 
 /// Aufnahme eines einzelnen Fensters open.
 #[cfg(windows)]
-pub fn aufnahme(kennung: isize) -> Option<Box<dyn crate::capture::Backend>> {
-    win::WindowCap::neu(kennung).ok().map(|c| {
+pub fn recording(tag: isize) -> Option<Box<dyn crate::capture::Backend>> {
+    win::WindowCap::neu(tag).ok().map(|c| {
         let b: Box<dyn crate::capture::Backend> = Box::new(c);
         b
     })
 }
 
 #[cfg(not(windows))]
-pub fn aufnahme(_kennung: isize) -> Option<Box<dyn crate::capture::Backend>> {
+pub fn recording(_tag: isize) -> Option<Box<dyn crate::capture::Backend>> {
     None
 }
 
 /// A red frame around a screen area. Gone when dropped.
-pub struct Rahmen {
+pub struct FrameBox {
     #[cfg(windows)]
-    ziel: std::sync::Arc<std::sync::Mutex<Option<(i32, i32, i32, i32)>>>,
+    dest: std::sync::Arc<std::sync::Mutex<Option<(i32, i32, i32, i32)>>>,
 }
 
-impl Rahmen {
+impl FrameBox {
     /// Rahmen anzeigen. `x`/`y`/`b`/`h` in Bildschirmkoordinaten.
-    pub fn zeigen(x: i32, y: i32, b: i32, h: i32) -> Rahmen {
+    pub fn display_items(x: i32, y: i32, b: i32, h: i32) -> FrameBox {
         #[cfg(windows)]
         {
             win::start_frame(x, y, b, h)
@@ -75,14 +75,14 @@ impl Rahmen {
         #[cfg(not(windows))]
         {
             let _ = (x, y, b, h);
-            Rahmen {}
+            FrameBox {}
         }
     }
 
     /// Move the frame to a new area (window moved).
     pub fn setzen(&self, x: i32, y: i32, b: i32, h: i32) {
         #[cfg(windows)]
-        if let Ok(mut z) = self.ziel.lock() {
+        if let Ok(mut z) = self.dest.lock() {
             *z = Some((x, y, b, h));
         }
         #[cfg(not(windows))]
@@ -90,10 +90,10 @@ impl Rahmen {
     }
 }
 
-impl Drop for Rahmen {
+impl Drop for FrameBox {
     fn drop(&mut self) {
         #[cfg(windows)]
-        if let Ok(mut z) = self.ziel.lock() {
+        if let Ok(mut z) = self.dest.lock() {
             // None tells the thread: stop and destroy the window.
             *z = None;
         }
@@ -101,21 +101,21 @@ impl Drop for Rahmen {
 }
 
 /// Where is this window right now? (x, y, width, height) in pixels.
-pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
+pub fn lage(tag: isize) -> Option<(i32, i32, i32, i32)> {
     #[cfg(windows)]
     {
-        win::lage(kennung)
+        win::lage(tag)
     }
     #[cfg(not(windows))]
     {
-        let _ = kennung;
+        let _ = tag;
         None
     }
 }
 
 #[cfg(windows)]
 mod win {
-    use super::{WindowInfo, Rahmen};
+    use super::{WindowInfo, FrameBox};
     use anyhow::{anyhow, Result};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -138,25 +138,25 @@ mod win {
 
     // ------------------------------------------------------------ auflisten
 
-    struct Sammler {
-        raus: Vec<WindowInfo>,
-        eigen: u32,
+    struct Collector {
+        out: Vec<WindowInfo>,
+        own: u32,
     }
 
     // SAFETY: window enumeration callback; the signature and `system` ABI match WNDENUMPROC. `lp`
-    // is the address of the `Sammler` that `liste` created on its stack and passed through
+    // is the address of the `Collector` that `liste` created on its stack and passed through
     // EnumWindows, which runs the callback synchronously on the same thread; the pointer is
     // therefore valid, properly aligned and not aliased by anything else during the call.
-    unsafe extern "system" fn sammeln(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
-        let s = &mut *(lp.0 as *mut Sammler);
-        if let Some(f) = check(hwnd, s.eigen) {
-            s.raus.push(f);
+    unsafe extern "system" fn collect_windows(hwnd: HWND, lp: LPARAM) -> windows::Win32::Foundation::BOOL {
+        let s = &mut *(lp.0 as *mut Collector);
+        if let Some(f) = check(hwnd, s.own) {
+            s.out.push(f);
         }
         true.into()
     }
 
     // SAFETY: caller contract: none beyond a normal Win32 thread (stale or foreign window handles
-    // make the Win32 calls fail, not misbehave). `versteckt` is a local u32 and the size passed to
+    // make the Win32 calls fail, not misbehave). `hidden` is a local u32 and the size passed to
     // DwmGetWindowAttribute is 4, matching DWMWA_CLOAKED; `pid` and `puffer` are locals and
     // GetWindowTextW is limited to the slice length. Only `n` UTF-16 units reported by the API are
     // read.
@@ -164,7 +164,7 @@ mod win {
     /// list: invisible helper windows, minimised programs, the empty
     /// shells of UWP applications and - important - our OWN window
     /// (sharing that would create a hall-of-mirrors effect).
-    unsafe fn check(hwnd: HWND, eigen: u32) -> Option<WindowInfo> {
+    unsafe fn check(hwnd: HWND, own: u32) -> Option<WindowInfo> {
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             return None;
         }
@@ -176,21 +176,21 @@ mod win {
             return None;
         }
         // Hidden by the window manager (UWP keeps zombie entries around).
-        let mut versteckt = 0u32;
+        let mut hidden = 0u32;
         if DwmGetWindowAttribute(
             hwnd,
             DWMWA_CLOAKED,
-            &mut versteckt as *mut u32 as *mut _,
+            &mut hidden as *mut u32 as *mut _,
             4,
         )
         .is_ok()
-            && versteckt != 0
+            && hidden != 0
         {
             return None;
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == eigen {
+        if pid == own {
             return None;
         }
         let mut puffer = [0u16; 256];
@@ -198,22 +198,22 @@ mod win {
         if n <= 0 {
             return None;
         }
-        let titel = String::from_utf16_lossy(&puffer[..n as usize]);
-        let (_, _, b, h) = rahmen_rect(hwnd)?;
+        let heading = String::from_utf16_lossy(&puffer[..n as usize]);
+        let (_, _, b, h) = frame_rect(hwnd)?;
         // Tiny windows are almost always helper constructs.
         if b < 120 || h < 80 {
             return None;
         }
         Some(WindowInfo {
-            kennung: hwnd.0 as isize,
-            titel,
-            programm: programmname(pid),
+            tag: hwnd.0 as isize,
+            heading,
+            program: program_name(pid),
             width_px: b as u32,
             height_px: h as u32,
         })
     }
 
-    fn programmname(pid: u32) -> String {
+    fn program_name(pid: u32) -> String {
         // SAFETY: `h` is a process handle opened by OpenProcess in this block and closed exactly
         // once on every path after the open. `puffer` is a local array, `len` its length in UTF-16
         // units as QueryFullProcessImageNameW expects, and the API updates `len` to the number of
@@ -233,8 +233,8 @@ mod win {
             )
             .is_ok()
             {
-                let voll = String::from_utf16_lossy(&puffer[..len as usize]);
-                std::path::Path::new(&voll)
+                let full = String::from_utf16_lossy(&puffer[..len as usize]);
+                std::path::Path::new(&full)
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default()
@@ -255,7 +255,7 @@ mod win {
     /// shadow border counts. Whoever captures by it shares a black strip
     /// on three sides. `DWMWA_EXTENDED_FRAME_BOUNDS` gives the
     /// edges you really see.
-    unsafe fn rahmen_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+    unsafe fn frame_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
         let mut r = RECT::default();
         let dwm = DwmGetWindowAttribute(
             hwnd,
@@ -274,31 +274,31 @@ mod win {
         Some((r.left, r.top, b, h))
     }
 
-    pub fn lage(kennung: isize) -> Option<(i32, i32, i32, i32)> {
+    pub fn lage(tag: isize) -> Option<(i32, i32, i32, i32)> {
         // SAFETY: the argument is just an integer window handle taken from the window list; IsWindow
         // validates it first, and a handle reused by another window only changes which rectangle is
-        // returned. No pointers other than the local ones in `rahmen_rect` are involved.
+        // returned. No pointers other than the local ones in `frame_rect` are involved.
         unsafe {
-            let hwnd = HWND(kennung as *mut core::ffi::c_void);
+            let hwnd = HWND(tag as *mut core::ffi::c_void);
             if !IsWindow(hwnd).as_bool() {
                 return None;
             }
-            rahmen_rect(hwnd)
+            frame_rect(hwnd)
         }
     }
 
     pub fn liste() -> Vec<WindowInfo> {
-        // SAFETY: `s` is a local `Sammler` that outlives the call; its address is passed as LPARAM
-        // to `sammeln`, which casts it back to `&mut Sammler`. EnumWindows is synchronous, so the
+        // SAFETY: `s` is a local `Collector` that outlives the call; its address is passed as LPARAM
+        // to `collect_windows`, which casts it back to `&mut Collector`. EnumWindows is synchronous, so the
         // pointer is valid for every callback and nothing else uses `s` meanwhile; the results are
         // read only after it returned.
         unsafe {
-            let mut s = Sammler {
-                raus: Vec::new(),
-                eigen: windows::Win32::System::Threading::GetCurrentProcessId(),
+            let mut s = Collector {
+                out: Vec::new(),
+                own: windows::Win32::System::Threading::GetCurrentProcessId(),
             };
-            let _ = EnumWindows(Some(sammeln), LPARAM(&mut s as *mut Sammler as isize));
-            s.raus
+            let _ = EnumWindows(Some(collect_windows), LPARAM(&mut s as *mut Collector as isize));
+            s.out
         }
     }
 
@@ -325,8 +325,8 @@ mod win {
     }
 
     impl WindowCap {
-        pub fn neu(kennung: isize) -> Result<Self> {
-            let hwnd = HWND(kennung as *mut core::ffi::c_void);
+        pub fn neu(tag: isize) -> Result<Self> {
+            let hwnd = HWND(tag as *mut core::ffi::c_void);
             // SAFETY: the window handle is only validated with IsWindow before use. `c` is fully
             // initialised with null/default GDI handles before `build_area` runs, so `Drop` is
             // safe on every error path. All pointers used inside the callees are locals.
@@ -334,7 +334,7 @@ mod win {
                 if !IsWindow(hwnd).as_bool() {
                     return Err(anyhow!("the window no longer exists"));
                 }
-                let (_, _, b, h) = rahmen_rect(hwnd).ok_or_else(|| anyhow!("Fenster ohne Groesse"))?;
+                let (_, _, b, h) = frame_rect(hwnd).ok_or_else(|| anyhow!("Fenster ohne Groesse"))?;
                 let mut c = WindowCap {
                     hwnd,
                     mem: HDC::default(),
@@ -429,7 +429,7 @@ mod win {
     impl crate::capture::Backend for WindowCap {
         fn next(&mut self, _timeout_ms: u32) -> crate::capture::Next {
             // SAFETY: all handles used here (`self.hwnd`, `self.mem`) are either validated
-            // (IsWindow) or owned by this backend (created in `build_area`). `aussen` is a local
+            // (IsWindow) or owned by this backend (created in `build_area`). `outside` is a local
             // RECT. The DIB section is rebuilt whenever the window size changes, so `self.bits`
             // always points to `self.w * self.h * 4` readable bytes (checked non-null) and
             // `self.buf` has exactly that length; the copy is therefore in bounds for both and the
@@ -443,17 +443,17 @@ mod win {
                 if IsIconic(self.hwnd).as_bool() {
                     return crate::capture::Next::Unchanged;
                 }
-                let Some((x, y, b, h)) = rahmen_rect(self.hwnd) else {
+                let Some((x, y, b, h)) = frame_rect(self.hwnd) else {
                     return crate::capture::Next::Lost;
                 };
                 self.x = x;
                 self.y = y;
                 // PrintWindow draws from the OUTER window edge. The
                 // offset in between is the invisible shadow border.
-                let mut aussen = RECT::default();
-                if GetWindowRect(self.hwnd, &mut aussen).is_ok() {
-                    self.rand_x = x - aussen.left;
-                    self.rand_y = y - aussen.top;
+                let mut outside = RECT::default();
+                if GetWindowRect(self.hwnd, &mut outside).is_ok() {
+                    self.rand_x = x - outside.left;
+                    self.rand_y = y - outside.top;
                 } else {
                     self.rand_x = 0;
                     self.rand_y = 0;
@@ -527,12 +527,12 @@ mod win {
 
     // ----------------------------------------------------------- roter Rahmen
 
-    const RAHMEN_DICKE: i32 = 4;
+    const FRAME_THICKNESS: i32 = 4;
 
-    // SAFETY: window procedure registered in `rahmen_faden`; the signature and `system` ABI match
+    // SAFETY: window procedure registered in `frame_thread`; the signature and `system` ABI match
     // WNDPROC. It forwards all arguments unchanged to DefWindowProcW and dereferences nothing
     // itself.
-    unsafe extern "system" fn rahmen_proc(
+    unsafe extern "system" fn frame_proc(
         h: HWND,
         m: u32,
         w: WPARAM,
@@ -541,30 +541,30 @@ mod win {
         DefWindowProcW(h, m, w, l)
     }
 
-    pub fn start_frame(x: i32, y: i32, b: i32, h: i32) -> Rahmen {
-        let ziel = Arc::new(Mutex::new(Some((x, y, b, h))));
-        let z2 = ziel.clone();
+    pub fn start_frame(x: i32, y: i32, b: i32, h: i32) -> FrameBox {
+        let dest = Arc::new(Mutex::new(Some((x, y, b, h))));
+        let z2 = dest.clone();
         let _ = std::thread::Builder::new()
             .name("rahmen".into())
-            // SAFETY: the closure runs `rahmen_faden` on its own thread; the thread owns the window
-            // it creates and `ziel` is moved into it (an Arc), so no raw pointer or borrowed data
+            // SAFETY: the closure runs `frame_thread` on its own thread; the thread owns the window
+            // it creates and `dest` is moved into it (an Arc), so no raw pointer or borrowed data
             // crosses the thread boundary.
-            .spawn(move || unsafe { rahmen_faden(z2) });
-        Rahmen { ziel }
+            .spawn(move || unsafe { frame_thread(z2) });
+        FrameBox { dest }
     }
 
     // SAFETY: runs on a dedicated thread that creates, pumps and destroys the one window it uses
     // (all Win32 window calls therefore happen on the owning thread). The class name buffer
-    // `klasse` is NUL-terminated and outlives the calls (RegisterClassW copies the name), `wc` is a
+    // `class` is NUL-terminated and outlives the calls (RegisterClassW copies the name), `wc` is a
     // local, `msg` is a local MSG, and `hwnd` is checked from CreateWindowExW before use. The
-    // region handles are created per update: `innen` is deleted by us, `aussen` is handed to the
+    // region handles are created per update: `inside` is deleted by us, `outside` is handed to the
     // window with SetWindowRgn, which takes ownership, so it is not freed here.
-    unsafe fn rahmen_faden(ziel: Arc<Mutex<Option<(i32, i32, i32, i32)>>>) {
-        let klasse: Vec<u16> = "FreeViewerTeilrahmen\0".encode_utf16().collect();
+    unsafe fn frame_thread(dest: Arc<Mutex<Option<(i32, i32, i32, i32)>>>) {
+        let class: Vec<u16> = "FreeViewerTeilrahmen\0".encode_utf16().collect();
         let rot = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00_00_00_FF));
         let wc = WNDCLASSW {
-            lpfnWndProc: Some(rahmen_proc),
-            lpszClassName: PCWSTR(klasse.as_ptr()),
+            lpfnWndProc: Some(frame_proc),
+            lpszClassName: PCWSTR(class.as_ptr()),
             hbrBackground: rot,
             ..Default::default()
         };
@@ -573,8 +573,8 @@ mod win {
         RegisterClassW(&wc);
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            PCWSTR(klasse.as_ptr()),
-            PCWSTR(klasse.as_ptr()),
+            PCWSTR(class.as_ptr()),
+            PCWSTR(class.as_ptr()),
             WS_POPUP,
             0,
             0,
@@ -600,7 +600,7 @@ mod win {
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
-        let mut letzte: Option<(i32, i32, i32, i32)> = None;
+        let mut previous: Option<(i32, i32, i32, i32)> = None;
         loop {
             // Process messages, otherwise the window counts as hung.
             let mut msg = MSG::default();
@@ -608,18 +608,18 @@ mod win {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            let jetzt = ziel.lock().ok().and_then(|z| *z);
-            let Some((x, y, b, h)) = jetzt else {
+            let now_ts = dest.lock().ok().and_then(|z| *z);
+            let Some((x, y, b, h)) = now_ts else {
                 let _ = DestroyWindow(hwnd);
                 return;
             };
-            if letzte != Some((x, y, b, h)) {
-                letzte = Some((x, y, b, h));
-                let d = RAHMEN_DICKE;
-                let aussen = CreateRectRgn(0, 0, b + 2 * d, h + 2 * d);
-                let innen = CreateRectRgn(d, d, b + d, h + d);
-                CombineRgn(aussen, aussen, innen, RGN_DIFF);
-                let _ = DeleteObject(HGDIOBJ(innen.0));
+            if previous != Some((x, y, b, h)) {
+                previous = Some((x, y, b, h));
+                let d = FRAME_THICKNESS;
+                let outside = CreateRectRgn(0, 0, b + 2 * d, h + 2 * d);
+                let inside = CreateRectRgn(d, d, b + d, h + d);
+                CombineRgn(outside, outside, inside, RGN_DIFF);
+                let _ = DeleteObject(HGDIOBJ(inside.0));
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
@@ -630,7 +630,7 @@ mod win {
                     SWP_NOACTIVATE,
                 );
                 // Windows takes over the region - do not free it ourselves.
-                SetWindowRgn(hwnd, aussen, true);
+                SetWindowRgn(hwnd, outside, true);
             }
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
@@ -638,7 +638,7 @@ mod win {
 
     // Unused, but the warning would be annoying.
     #[allow(dead_code)]
-    fn ungenutzt(_: POINT, _: &AtomicBool, _: Ordering) {}
+    fn unused(_: POINT, _: &AtomicBool, _: Ordering) {}
 }
 
 #[cfg(test)]
@@ -657,14 +657,14 @@ mod tests {
             // Unter Windows darf sie voll sein, aber niemals kaputte
             // Eintraege enthalten.
             for f in liste() {
-                assert!(f.kennung != 0, "Fenster ohne Kennung");
+                assert!(f.tag != 0, "Fenster ohne Kennung");
                 assert!(f.width_px >= 120 && f.height_px >= 80, "tiny window in the list");
             }
         }
     }
 
     #[test]
-    fn lage_eines_unbekannten_fensters_ist_none() {
+    fn position_of_unknown_window_is_none() {
         assert_eq!(lage(0), None);
     }
 }

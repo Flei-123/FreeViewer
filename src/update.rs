@@ -332,7 +332,7 @@ pub fn cleanup() {
         if p == cur {
             continue;
         }
-        let gleicher_name = p
+        let same_name = p
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase() == stem)
             .unwrap_or(false);
@@ -343,7 +343,7 @@ pub fn cleanup() {
                 x == "new" || x.starts_with("old")
             })
             .unwrap_or(false);
-        if gleicher_name && update_rest {
+        if same_name && update_rest {
             let _ = std::fs::remove_file(&p);
         }
     }
@@ -472,23 +472,23 @@ fn busy(shared: &Arc<Shared>) -> bool {
 
 /// Background thread: checks now and every few hours for a new version.
 ///
-/// `darf_einspielen` = false means: only look and report. That is
+/// `may_inject` = false means: only look and report. That is
 /// the normal case once the service is installed - it runs as SYSTEM,
 /// may write to "Program Files" and needs NO prompt for it. Previously
 /// the UI AND the agent both tried the swap themselves; both ended up at
 /// "access denied", raised the administrator prompt and tried
 /// again every minute - hence the many prompts.
-pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
+pub fn watcher(shared: Arc<Shared>, may_inject: bool) {
     cleanup();
     std::thread::spawn(move || loop {
         // After a failed attempt (e.g. prompt declined) it is not
         // tried again in this round.
-        let mut gescheitert = false;
+        let mut failed = false;
         match check() {
             Ok(rel) => {
                 if newer(&rel.version, VERSION) {
                     *shared.update.lock_ok() = Some(rel.clone());
-                    if darf_einspielen {
+                    if may_inject {
                         shared.set_update_status(format!(
                             "Update {} verfuegbar (dieser Stand: {})",
                             rel.version, VERSION
@@ -499,7 +499,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
                                 rel.version
                             ));
                             if let Err(e) = install(&rel) {
-                                gescheitert = true;
+                                failed = true;
                                 shared.set_update_status(format!("Update fehlgeschlagen: {}", e));
                             }
                         }
@@ -521,7 +521,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
         // is allowed to apply it at all and it has not just failed.
         for _ in 0..(EVERY.as_secs() / 60) {
             std::thread::sleep(Duration::from_secs(60));
-            if !darf_einspielen || gescheitert {
+            if !may_inject || failed {
                 continue;
             }
             let pending = shared.update.lock_ok().clone();
@@ -529,7 +529,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
                 if shared.auto_update.load(Ordering::Relaxed) && !busy(&shared) {
                     shared.set_update_status(format!("Installiere Update {} ...", rel.version));
                     if let Err(e) = install(&rel) {
-                        gescheitert = true;
+                        failed = true;
                         shared.set_update_status(format!("Update fehlgeschlagen: {}", e));
                     }
                 }
@@ -541,7 +541,7 @@ pub fn watcher(shared: Arc<Shared>, darf_einspielen: bool) {
 /// File with which the UI asks the service to update immediately
 /// (button press instead of waiting for the half hour).
 #[cfg(windows)]
-fn trigger_pfad() -> Option<std::path::PathBuf> {
+fn trigger_path() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("update-now.flag"))
 }
 
@@ -566,7 +566,7 @@ pub fn gui_marke() -> Option<std::path::PathBuf> {
 /// After the update: this marker asks the agent to open the UI
 /// again.
 #[cfg(windows)]
-pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
+pub fn gui_restart_marker() -> Option<std::path::PathBuf> {
     Some(crate::ident::machine_config_dir()?.join("gui-neustart.flag"))
 }
 
@@ -575,12 +575,12 @@ pub fn gui_marke() -> Option<std::path::PathBuf> {
     None
 }
 #[cfg(not(windows))]
-pub fn gui_neustart_marke() -> Option<std::path::PathBuf> {
+pub fn gui_restart_marker() -> Option<std::path::PathBuf> {
     None
 }
 
 /// Runs in the visible UI: keeps the marker fresh.
-pub fn gui_marke_pflegen() {
+pub fn gui_marker_maintain() {
     #[cfg(windows)]
     std::thread::spawn(|| loop {
         if let Some(p) = gui_marke() {
@@ -606,11 +606,11 @@ pub fn gui_war_offen() -> bool {
     let Ok(dann) = text.trim().parse::<u64>() else {
         return false;
     };
-    let jetzt = std::time::SystemTime::now()
+    let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    jetzt.saturating_sub(dann) <= 90
+    now_ts.saturating_sub(dann) <= 90
 }
 
 /// Runs in the agent (the user's session): if a window was open
@@ -623,7 +623,7 @@ pub fn gui_war_offen() -> bool {
 pub fn reopen_gui() {
     #[cfg(windows)]
     {
-        let Some(p) = gui_neustart_marke() else { return };
+        let Some(p) = gui_restart_marker() else { return };
         if !p.exists() {
             return;
         }
@@ -640,14 +640,14 @@ pub fn reopen_gui() {
 /// "Install update" button with an installed service: only leave the request,
 /// the service does the rest (as SYSTEM, without prompt).
 #[cfg(windows)]
-pub fn bitte_dienst() {
-    if let Some(p) = trigger_pfad() {
+pub fn please_service() {
+    if let Some(p) = trigger_path() {
         let _ = std::fs::write(p, b"1");
     }
 }
 
 #[cfg(not(windows))]
-pub fn bitte_dienst() {}
+pub fn please_service() {}
 
 #[cfg(not(windows))]
 pub fn updating_flag() -> Option<std::path::PathBuf> {
@@ -665,37 +665,37 @@ pub fn service_watcher() {
         let _ = std::fs::remove_file(p);
     }
     std::thread::spawn(move || {
-        let mut naechste_runde = std::time::Instant::now();
+        let mut next_round = std::time::Instant::now();
         loop {
             // Quick request from the UI ("Install update")?
             let mut sofort = false;
-            if let Some(p) = trigger_pfad() {
+            if let Some(p) = trigger_path() {
                 if p.exists() {
                     let _ = std::fs::remove_file(&p);
                     sofort = true;
                 }
             }
-            if !sofort && std::time::Instant::now() < naechste_runde {
+            if !sofort && std::time::Instant::now() < next_round {
                 std::thread::sleep(Duration::from_secs(10));
                 continue;
             }
-            naechste_runde = std::time::Instant::now() + EVERY;
-            let einspielen = |rel: &Release| -> bool {
+            next_round = std::time::Instant::now() + EVERY;
+            let inject = |rel: &Release| -> bool {
                 // The button counts as an explicit request - even if
                 // automatic mode is off.
                 sofort || crate::ident::auto_update_enabled()
             };
             if let Ok(rel) = check() {
-                if newer(&rel.version, VERSION) && einspielen(&rel) {
+                if newer(&rel.version, VERSION) && inject(&rel) {
                     crate::service::log(&format!("Update {} gefunden", rel.version));
                     if let Some(p) = updating_flag() {
                         let _ = std::fs::write(&p, b"1");
                     }
-                    let ergebnis = download(&rel).and_then(|fresh| {
-                        let ziel = std::env::current_exe()?;
-                        swap_into(&fresh, &ziel)
+                    let outcome = download(&rel).and_then(|fresh| {
+                        let dest = std::env::current_exe()?;
+                        swap_into(&fresh, &dest)
                     });
-                    match ergebnis {
+                    match outcome {
                         Ok(()) => {
                             crate::service::log("Update eingespielt - alle Teile starten neu");
                             // Was a window open? Then it should come back after the
@@ -703,7 +703,7 @@ pub fn service_watcher() {
                             // simply empty after every update - the service
                             // came back, the WINDOW did not.
                             if gui_war_offen() {
-                                if let Some(p) = gui_neustart_marke() {
+                                if let Some(p) = gui_restart_marker() {
                                     let _ = std::fs::write(&p, b"1");
                                 }
                                 crate::service::log("Oberflaeche war offen - wird neu geoeffnet");
@@ -727,19 +727,19 @@ pub fn service_watcher() {
                             // The service ends in an orderly way right below;
                             // a self-kill counts as a crash on Windows
                             // and uses up the safety net.
-                            let eigen = std::process::id();
+                            let own = std::process::id();
                             let _ = std::process::Command::new("taskkill")
                                 .args([
                                     "/f",
                                     "/im",
                                     crate::brand::EXE,
                                     "/fi",
-                                    &format!("PID ne {}", eigen),
+                                    &format!("PID ne {}", own),
                                 ])
                                 .output();
                             // Now exit cleanly: supervise() returns,
                             // the service reports STOPPED properly.
-                            crate::service::stop_anfordern();
+                            crate::service::stop_request();
                             return;
                         }
                         Err(e) => {
