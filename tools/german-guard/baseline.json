@@ -11,7 +11,6 @@
    "src/feedback.rs": 1,
    "src/friends.rs": 2,
    "src/i18n.rs": 3,
-   "src/meet.rs": 1,
    "src/meete2e.rs": 1,
    "src/meetrtc.rs": 1,
    "src/meetui.rs": 1,
@@ -61,7 +60,7 @@
   }
  },
  "total": {
-  "comments": 25,
+  "comments": 24,
   "eol_comments": 1,
   "identifiers": 103,
   "strings": 274

@@ -186,10 +186,10 @@ impl Friend {
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     /// Someone wants me as a friend. I have to accept or decline.
-    #[serde(rename = "Eingehend")]
+    #[serde(rename = "eingehend")]
     Incoming,
     /// I asked and am waiting for the answer.
-    #[serde(rename = "Ausgehend")]
+    #[serde(rename = "ausgehend")]
     Outgoing,
 }
 
